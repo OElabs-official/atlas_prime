@@ -1,0 +1,213 @@
+--- PANIC AT 2026-01-05 21:18:06 ---
+Location: src/main.rs:163:27
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: ratatui_core::terminal::terminal::Terminal<B>::draw
+   8: atlas_prime::main::{{closure}}::{{closure}}
+   9: tokio::runtime::park::CachedParkThread::block_on
+  10: tokio::runtime::context::runtime::enter_runtime
+  11: tokio::runtime::runtime::Runtime::block_on
+  12: atlas_prime::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace
+  14: std::rt::lang_start::{{closure}}
+  15: std::rt::lang_start_internal
+  16: main
+  17: __libc_init
+
+
+--- PANIC AT 2026-01-06 01:13:40 ---
+Location: src/main.rs:164:35
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: ratatui_core::terminal::terminal::Terminal<B>::draw
+   8: tokio::runtime::park::CachedParkThread::block_on
+   9: tokio::runtime::context::runtime::enter_runtime
+  10: tokio::runtime::runtime::Runtime::block_on
+  11: atlas_prime::main
+  12: std::sys::backtrace::__rust_begin_short_backtrace
+  13: std::rt::lang_start::{{closure}}
+  14: std::rt::lang_start_internal
+  15: main
+  16: __libc_init
+
+
+--- PANIC AT 2026-01-06 02:28:25 ---
+Location: src/main.rs:173:35
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: ratatui_core::terminal::terminal::Terminal<B>::draw
+   8: tokio::runtime::park::CachedParkThread::block_on
+   9: tokio::runtime::context::runtime::enter_runtime
+  10: tokio::runtime::runtime::Runtime::block_on
+  11: atlas_prime::main
+  12: std::sys::backtrace::__rust_begin_short_backtrace
+  13: std::rt::lang_start::{{closure}}
+  14: std::rt::lang_start_internal
+  15: main
+  16: __libc_init
+
+
+--- PANIC AT 2026-01-06 11:34:31 ---
+Location: src/main.rs:175:35
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: ratatui_core::terminal::terminal::Terminal<B>::draw
+   8: tokio::runtime::park::CachedParkThread::block_on
+   9: tokio::runtime::context::runtime::enter_runtime
+  10: tokio::runtime::runtime::Runtime::block_on
+  11: atlas_prime::main
+  12: std::sys::backtrace::__rust_begin_short_backtrace
+  13: std::rt::lang_start::{{closure}}
+  14: std::rt::lang_start_internal
+  15: main
+  16: __libc_init
+
+
+--- PANIC AT 2026-01-06 13:35:21 ---
+Location: src/main.rs:200:39
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: ratatui_core::terminal::terminal::Terminal<B>::draw
+   8: tokio::runtime::park::CachedParkThread::block_on
+   9: tokio::runtime::context::runtime::enter_runtime
+  10: tokio::runtime::runtime::Runtime::block_on
+  11: atlas_prime::main
+  12: std::sys::backtrace::__rust_begin_short_backtrace
+  13: std::rt::lang_start::{{closure}}
+  14: std::rt::lang_start_internal
+  15: main
+  16: __libc_init
+
+
+--- PANIC AT 2026-01-06 15:17:58 ---
+Location: src/main.rs:212:43
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: tokio::runtime::park::CachedParkThread::block_on
+   8: tokio::runtime::context::runtime::enter_runtime
+   9: tokio::runtime::runtime::Runtime::block_on
+  10: atlas_prime::main
+  11: std::sys::backtrace::__rust_begin_short_backtrace
+  12: std::rt::lang_start::{{closure}}
+  13: std::rt::lang_start_internal
+  14: main
+  15: __libc_init
+
+
+--- PANIC AT 2026-01-06 22:56:56 ---
+Location: src/ui/info.rs:105:34
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
+--- PANIC AT 2026-01-06 22:57:01 ---
+Location: src/ui/info.rs:105:34
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
+--- PANIC AT 2026-01-06 22:57:20 ---
+Location: src/ui/info.rs:105:34
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
