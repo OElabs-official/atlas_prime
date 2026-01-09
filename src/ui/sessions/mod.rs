@@ -1,7 +1,7 @@
 use super::sessions::sub::SubSession;
+use crate::config::SharedConfig;
 use crate::message::{GlobalEvent, ProgressType};
 use crate::ui::component::Component;
-use crate::{ config::SharedConfig};
 use ratatui::{prelude::*, widgets::*};
 use tokio::sync::broadcast;
 pub mod sub;

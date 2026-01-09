@@ -27,4 +27,7 @@ pub trait Component: Send + Sync {
 
     // 事件处理：返回 true 表示消费了事件，阻止冒泡
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool;
+
+    fn is_fullscreen(&self) -> bool { false } // 默认不全屏
+    
 }

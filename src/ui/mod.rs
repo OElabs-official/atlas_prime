@@ -6,7 +6,7 @@ pub mod welcome;
 
 use ratatui::{prelude::*, widgets::*};
 
-pub fn render_tabs(f: &mut Frame, area: Rect, active_tab: usize) {
+pub fn _render_tabs(f: &mut Frame, area: Rect, active_tab: usize) {
     let titles = vec![" 1. System ", " 2. Sessions ", " 3. Settings "];
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title(" Main Menu "))

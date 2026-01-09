@@ -166,34 +166,42 @@ fn main() {
     }
 }
 
+/*
+为了方便你后续 Deno 的开发，这是梳理后的通道映射：
+通道	物理载体	逻辑角色	刷新频率控制
+渲染节流阀	render_interval	指挥官：决定用户眼睛看到的最高帧率。	16ms (60FPS) 或 33ms (30FPS)
+状态计时器	status_interval	采集员：决定内存、磁盘等系统数据的更新精度。	500ms
+全局广播	app.tx (Broadcast)	传声筒：后台任务（Deno/Network）的异步通知。	随机（由任务完成时间决定）
+事件流	reader (Stream)	交互点：用户的键盘或终端缩放事件。	随机（由用户操作决定）
+*/
+
 async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化共享配置
     let shared_config = Arc::new(RwLock::new(Config::load()));
     // 4. 初始化 App
     let mut app = App::new(shared_config.clone()).await;
     // 2. 全局后台数据流 (从 App 获取广播订阅)
-    let mut background_rx = app.tx.subscribe();    
+    let mut background_rx = app.tx.subscribe();
 
     let (render_tx, mut render_rx) = mpsc::channel::<()>(1);
     // 初始渲染请求
     let _ = render_tx.send(()).await;
 
-
     // 3. 启动热加载监听
     let watchertx = app.tx.clone();
     tokio::spawn(async move {
-        let _ = setup_config_watcher(shared_config.clone(), render_tx.clone(),watchertx).await;
+        let _ = setup_config_watcher(shared_config.clone(), render_tx.clone(), watchertx).await;
     });
 
-
     // --- 终端初始化 ---
-    enable_raw_mode()?;    
+    enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     let mut reader = EventStream::new(); // 将 crossterm 事件转为异步流
     let mut render_interval = interval(Duration::from_millis(8));
-    render_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);    
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    render_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             // 1. 渲染触发器：收到信号且没有挂起的事件时进行重绘
@@ -226,6 +234,8 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            
+
             // 2. 真正的异步按键流：完全不使用 sleep
             maybe_event = reader.next() => {
                 match maybe_event {
@@ -253,6 +263,14 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
                     _ => {}
                 }
             }
+
+        _ = interval.tick() => {
+            // 每 100ms 尝试检查一次 update
+            if app.update() {
+                // 如果 update 返回 true（数据变了），则标记需要重绘
+                app.needs_render = true;
+            }
+        }
 
             // 分支 C: 关键修改！
         // 我们只需要感知“有消息来了”，不需要在 main 里处理 msg 的内容
@@ -422,3 +440,14 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 //     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 //     Ok(())
 // }
+
+
+
+/*
+通道类型,变量名,流向,核心功能
+Broadcast (多生产者多消费者),app.tx / event_rx,后台任务 -> 多个组件,全局通知中心。用于异步任务（如未来的 Deno 消息、IP 获取）向 UI 组件推送数据。只要消息发出，所有订阅的组件都能收到。
+MPSC (多生产者单消费者),render_tx / render_rx,各种事件 -> 主循环,渲染触发器。当配置更新、按键按下或数据变动时，发送一个信号告诉主循环：“该刷一下屏幕了”。
+Async Stream,reader (EventStream),终端 -> 主循环,用户交互输入。将底层的字节流转为 Rust 的 KeyEvent。
+Internal MPSC,info.rx (如果有),内部任务 -> 组件,组件私有流。用于组件内部的特定任务（如你之前代码中单独采样的 CPU 频率）。
+
+*/

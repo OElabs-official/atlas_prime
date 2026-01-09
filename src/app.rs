@@ -1,6 +1,10 @@
 use crate::config::{Config, SharedConfig};
+use crate::constants::{APP_TITLE, TabId};
 use crate::message::{GlobalEvent, NotificationLevel, ProgressType};
 use crate::ui::component::Component;
+use crate::ui::info::InfoComponent;
+use crate::ui::sessions::SessionsComponent;
+use crate::ui::welcome::WelcomeComponent;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Alignment;
 use ratatui::{
@@ -20,14 +24,12 @@ pub struct App {
     // 限速器相关
     pub needs_render: bool,
     pub render_interval: Interval,
-    
 
-    
     // 消息总线
     pub tx: tokio::sync::broadcast::Sender<GlobalEvent>,
     // 内部订阅者，用于 App 自身处理通知逻辑
     pub event_rx: tokio::sync::broadcast::Receiver<GlobalEvent>,
-    
+
     // 通知管理状态
     pub current_notification: Option<ActiveNotification>,
 }
@@ -66,6 +68,7 @@ impl Component for App {
                         }
                     }
                 }
+                _ => {},
             }
         }
 
@@ -79,7 +82,6 @@ impl Component for App {
             }
         }
 
-        
         // 1. 驱动所有子组件更新（确保后台数据流不堆积）
         for comp in self.components.iter_mut() {
             if comp.update() {
@@ -136,13 +138,13 @@ impl Component for App {
             KeyCode::Char('c') => {
                 // 通过发送事件或直接修改状态来清除错误
                 if let Some(n) = &self.current_notification {
-                        if matches!(n.level, NotificationLevel::Error) {
-                            self.current_notification = None;
-                            self.request_render();
-                            return true;
-                        }
+                    if matches!(n.level, NotificationLevel::Error) {
+                        self.current_notification = None;
+                        self.request_render();
+                        return true;
                     }
                 }
+            }
             _ => consumed = false,
         }
 
@@ -178,6 +180,23 @@ impl App {
     }
 
     fn render_navigation(&self, f: &mut Frame, area: Rect) {
+        let titles: Vec<&str> = TabId::ALL.iter().map(|t| t.title()).collect();
+
+        let active_tab_id = TabId::from_index(self.active_tab);
+
+        let tabs = Tabs::new(titles)
+            .block(Block::default().borders(Borders::ALL).title(APP_TITLE))
+            .select(self.active_tab)
+            .highlight_style(
+                Style::default()
+                    .fg(active_tab_id.theme_color()) // 颜色随标签页自动切换
+                    .add_modifier(Modifier::BOLD),
+            );
+
+        f.render_widget(tabs, area);
+    }
+
+    fn _render_navigation(&self, f: &mut Frame, area: Rect) {
         let titles = vec![" 0. Home ", " 1. System ", " 2. Sessions "];
         let tabs = Tabs::new(titles)
             .block(Block::default().borders(Borders::ALL).title(" Main Menu "))
@@ -194,11 +213,18 @@ impl App {
         let chunks = Layout::horizontal([
             Constraint::Min(40),    // 左侧：固定快捷键
             Constraint::Length(50), // 右侧：通知与进度
-        ]).split(area);
+        ])
+        .split(area);
 
         // --- 左侧：原有快捷键 ---
         let help_text = vec![
-            Span::styled(" ATLAS ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ATLAS ",
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" | "),
             Span::styled("Tab", Style::default().fg(Color::Yellow)),
             Span::raw(": ←/→ | "),
@@ -206,6 +232,12 @@ impl App {
             Span::raw(": Q "),
         ];
         f.render_widget(Paragraph::new(Line::from(help_text)), chunks[0]);
+
+        // 在状态栏左侧显示当前模式
+        let mode_tag = Span::styled(
+            format!(" MODE: {:?} ", self.active_tab),
+            Style::default().bg(Color::Cyan).fg(Color::Black),
+        );
 
         // --- 右侧：通知逻辑 ---
         if let Some(n) = &self.current_notification {
@@ -225,17 +257,22 @@ impl App {
                     ProgressType::TaskCount(curr, total) => format!(" [{}/{}]", curr, total),
                     ProgressType::Indeterminate => " [...]".to_string(),
                 };
-                spans.push(Span::styled(p_text, Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    p_text,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ));
             }
 
             // 如果是错误，提示按 C 清除
             if matches!(n.level, NotificationLevel::Error) {
-                spans.push(Span::styled(" (Press 'C' to clear)", Style::default().fg(Color::Gray).italic()));
+                spans.push(Span::styled(
+                    " (Press 'C' to clear)",
+                    Style::default().fg(Color::Gray).italic(),
+                ));
             }
 
-            let notify_para = Paragraph::new(Line::from(spans))
-                .alignment(Alignment::Right);
-            
+            let notify_para = Paragraph::new(Line::from(spans)).alignment(Alignment::Right);
+
             f.render_widget(notify_para, chunks[1]);
         }
     }
@@ -267,17 +304,28 @@ impl App {
             }
         });
 
-        let components: Vec<Box<dyn crate::ui::component::Component>> = vec![
-            Box::new(crate::ui::welcome::WelcomeComponent::new(config.clone())), // 0: Welcome
-            Box::new(crate::ui::info::InfoComponent::new(
-                config.clone(),
-                tx.subscribe(),
-            )), // 1: System
-            Box::new(crate::ui::sessions::SessionsComponent::new(
-                config.clone(),
-                tx.clone(),
-            )), // 2: Sessions
-        ];
+        // let components: Vec<Box<dyn crate::ui::component::Component>> = vec![
+        //     Box::new(crate::ui::welcome::WelcomeComponent::new(config.clone())), // 0: Welcome
+        //     Box::new(crate::ui::info::InfoComponent::new(
+        //         config.clone(),
+        //         tx.subscribe(),
+        //     )), // 1: System
+        //     Box::new(crate::ui::sessions::SessionsComponent::new(
+        //         config.clone(),
+        //         tx.clone(),
+        //     )), // 2: Sessions
+        // ];
+
+        // 按照 TabId::ALL 的顺序初始化组件
+        let mut components: Vec<Box<dyn Component>> = Vec::new();
+        for id in TabId::ALL.iter() {
+            let comp: Box<dyn Component> = match id {
+                TabId::Welcome => Box::new(WelcomeComponent::new(config.clone())),
+                TabId::Info => Box::new(InfoComponent::new(config.clone(), tx.clone())),
+                TabId::Sessions => Box::new(SessionsComponent::new(config.clone(), tx.clone())),
+            };
+            components.push(comp);
+        }
 
         Self {
             config,
@@ -375,15 +423,9 @@ impl App {
 //     Notify(String),
 // }
 
-
-
 pub struct ActiveNotification {
     pub content: String,
     pub level: NotificationLevel,
     pub progress: Option<ProgressType>,
     pub created_at: std::time::Instant,
 }
-
-
-    
-

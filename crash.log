@@ -211,3 +211,176 @@ Stack Trace:
   18: __libc_init
 
 
+--- PANIC AT 2026-01-08 14:15:43 ---
+Location: /data/data/com.termux/files/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustls-platform-verifier-0.6.2/src/android.rs:94:10
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: rustls_platform_verifier::verification::android::Verifier::verify_certificate
+   8: <rustls_platform_verifier::verification::android::Verifier as rustls::verify::ServerCertVerifier>::verify_server_cert
+   9: <rustls::client::tls13::ExpectCertificateVerify as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle
+  10: rustls::common_state::CommonState::process_main_protocol
+  11: rustls::conn::ConnectionCore<Data>::process_new_packets
+  12: tokio_rustls::common::Stream<IO,C>::read_io
+  13: <tokio_rustls::common::handshake::MidHandshake<IS> as core::future::future::Future>::poll
+  14: <hyper_rustls::connector::HttpsConnector<T> as tower_service::Service<http::uri::Uri>>::call::{{closure}}
+  15: reqwest::connect::ConnectorService::connect_with_maybe_proxy::{{closure}}
+  16: reqwest::connect::with_timeout::{{closure}}
+  17: <futures_util::future::future::map::Map<Fut,F> as core::future::future::Future>::poll
+  18: <futures_util::future::future::map::Map<Fut,F> as core::future::future::Future>::poll
+  19: <futures_util::future::try_future::try_flatten::TryFlatten<Fut,<Fut as futures_core::future::TryFuture>::Ok> as core::future::future::Future>::poll
+  20: <futures_util::future::select::Select<A,B> as core::future::future::Future>::poll
+  21: hyper_util::client::legacy::client::Client<C,B>::send_request::{{closure}}
+  22: <reqwest::async_impl::client::HyperService as tower_service::Service<http::request::Request<reqwest::async_impl::body::Body>>>::call::{{closure}}
+  23: <tower::retry::future::ResponseFuture<P,S,Request> as core::future::future::Future>::poll
+  24: <tower_http::follow_redirect::ResponseFuture<S,ReqBody,P> as core::future::future::Future>::poll
+  25: <reqwest::async_impl::client::PendingRequest as core::future::future::Future>::poll
+  26: atlas_prime::ui::info::InfoComponent::fetch_public_ip::{{closure}}
+  27: tokio::runtime::task::core::Core<T,S>::poll
+  28: tokio::runtime::task::harness::Harness<T,S>::poll
+  29: tokio::runtime::scheduler::multi_thread::worker::Context::run_task
+  30: tokio::runtime::scheduler::multi_thread::worker::Context::run
+  31: tokio::runtime::context::scoped::Scoped<T>::set
+  32: tokio::runtime::context::runtime::enter_runtime
+  33: tokio::runtime::scheduler::multi_thread::worker::run
+  34: <tokio::runtime::blocking::task::BlockingTask<T> as core::future::future::Future>::poll
+  35: tokio::runtime::task::core::Core<T,S>::poll
+  36: tokio::runtime::task::harness::Harness<T,S>::poll
+  37: tokio::runtime::blocking::pool::Inner::run
+  38: std::sys::backtrace::__rust_begin_short_backtrace
+  39: core::ops::function::FnOnce::call_once{{vtable.shim}}
+  40: std::sys::thread::unix::Thread::new::thread_start
+  41: _ZL15__pthread_startPv
+  42: __start_thread
+
+
+--- PANIC AT 2026-01-08 14:15:59 ---
+Location: /data/data/com.termux/files/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustls-platform-verifier-0.6.2/src/android.rs:94:10
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: rustls_platform_verifier::verification::android::Verifier::verify_certificate
+   8: <rustls_platform_verifier::verification::android::Verifier as rustls::verify::ServerCertVerifier>::verify_server_cert
+   9: <rustls::client::tls13::ExpectCertificateVerify as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle
+  10: rustls::common_state::CommonState::process_main_protocol
+  11: rustls::conn::ConnectionCore<Data>::process_new_packets
+  12: tokio_rustls::common::Stream<IO,C>::read_io
+  13: <tokio_rustls::common::handshake::MidHandshake<IS> as core::future::future::Future>::poll
+  14: <hyper_rustls::connector::HttpsConnector<T> as tower_service::Service<http::uri::Uri>>::call::{{closure}}
+  15: reqwest::connect::ConnectorService::connect_with_maybe_proxy::{{closure}}
+  16: reqwest::connect::with_timeout::{{closure}}
+  17: <futures_util::future::future::map::Map<Fut,F> as core::future::future::Future>::poll
+  18: <futures_util::future::future::map::Map<Fut,F> as core::future::future::Future>::poll
+  19: <futures_util::future::try_future::try_flatten::TryFlatten<Fut,<Fut as futures_core::future::TryFuture>::Ok> as core::future::future::Future>::poll
+  20: <futures_util::future::select::Select<A,B> as core::future::future::Future>::poll
+  21: hyper_util::client::legacy::client::Client<C,B>::send_request::{{closure}}
+  22: <reqwest::async_impl::client::HyperService as tower_service::Service<http::request::Request<reqwest::async_impl::body::Body>>>::call::{{closure}}
+  23: <tower::retry::future::ResponseFuture<P,S,Request> as core::future::future::Future>::poll
+  24: <tower_http::follow_redirect::ResponseFuture<S,ReqBody,P> as core::future::future::Future>::poll
+  25: <reqwest::async_impl::client::PendingRequest as core::future::future::Future>::poll
+  26: atlas_prime::ui::info::InfoComponent::fetch_public_ip::{{closure}}
+  27: tokio::runtime::task::core::Core<T,S>::poll
+  28: tokio::runtime::task::harness::Harness<T,S>::poll
+  29: tokio::runtime::scheduler::multi_thread::worker::Context::run_task
+  30: tokio::runtime::scheduler::multi_thread::worker::Context::run
+  31: tokio::runtime::context::scoped::Scoped<T>::set
+  32: tokio::runtime::context::runtime::enter_runtime
+  33: tokio::runtime::scheduler::multi_thread::worker::run
+  34: <tokio::runtime::blocking::task::BlockingTask<T> as core::future::future::Future>::poll
+  35: tokio::runtime::task::core::Core<T,S>::poll
+  36: tokio::runtime::task::harness::Harness<T,S>::poll
+  37: tokio::runtime::blocking::pool::Inner::run
+  38: std::sys::backtrace::__rust_begin_short_backtrace
+  39: core::ops::function::FnOnce::call_once{{vtable.shim}}
+  40: std::sys::thread::unix::Thread::new::thread_start
+  41: _ZL15__pthread_startPv
+  42: __start_thread
+
+
+--- PANIC AT 2026-01-08 20:35:43 ---
+Location: src/ui/info.rs:533:18
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
+--- PANIC AT 2026-01-08 20:36:50 ---
+Location: src/ui/info.rs:531:18
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
+--- PANIC AT 2026-01-08 20:38:32 ---
+Location: src/ui/info.rs:541:18
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{{closure}}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{{closure}}
+   3: std::sys::backtrace::__rust_end_short_backtrace
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::panicking::panic_bounds_check
+   7: <atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: ratatui_core::terminal::terminal::Terminal<B>::draw
+  10: tokio::runtime::park::CachedParkThread::block_on
+  11: tokio::runtime::context::runtime::enter_runtime
+  12: tokio::runtime::runtime::Runtime::block_on
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace
+  15: std::rt::lang_start::{{closure}}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
