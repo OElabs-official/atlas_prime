@@ -51,7 +51,7 @@ impl Component for SessionsComponent {
                         sub.sync_p = p;
                     }
                 }
-                changed = true;
+                changed = true; // 开启时全速渲染进度条，关闭时0.5s渲染进度条
             }
         }
 

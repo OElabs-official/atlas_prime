@@ -8,3 +8,8 @@ page2 仪表板
 
 page3 尽可能全列出ratatui的所有组件
 
+v 重新整理一下绘制逻辑，我们的render_clock是唯一的定时更新渲染分支。如果需要更低频率的绘制，应该限制数据更新的速度 
+
+我做了一些调整，pub focus_on_content: bool, 作为焦点控制简化，
+
+Info 加入电池计量，充电，cpu稳定等

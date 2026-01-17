@@ -1,12 +1,75 @@
 use directories::ProjectDirs;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+use smart_default::SmartDefault;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use std::sync::{Arc, OnceLock};
+
+use std::env;
+use std::path::{Path, PathBuf};
+
 pub type SharedConfig = Arc<RwLock<Config>>;
+
+// --- 全局静态路径句柄 ---
+static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub struct AtlasPaths;
+
+impl AtlasPaths {
+    /// 初始化并获取路径映射
+    fn init() {
+        // 1. 确定配置路径 (优先检查当前程序目录下的 override)
+        let exe_dir = env::current_exe()
+            .map(|p| p.parent().unwrap().to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        let override_path = exe_dir.join("atlas_cfg_override.json");
+
+        let final_config_path = if override_path.exists() {
+            override_path
+        } else {
+            // 回退到系统标准路径
+            ProjectDirs::from("", "", "atlas")
+                .map(|p| {
+                    let dir = p.config_dir().to_path_buf();
+                    let _ = fs::create_dir_all(&dir);
+                    dir.join("atlas_cfg.json")
+                })
+                .unwrap_or_else(|| PathBuf::from("atlas_cfg.json"))
+        };
+
+        CONFIG_PATH.get_or_init(|| final_config_path);
+
+        // 2. 初始化数据和缓存目录
+        if let Some(proj) = ProjectDirs::from("", "", "atlas") {
+            DATA_DIR.get_or_init(|| {
+                let path = proj.data_dir().to_path_buf();
+                let _ = fs::create_dir_all(&path);
+                path
+            });
+            CACHE_DIR.get_or_init(|| {
+                let path = proj.cache_dir().to_path_buf();
+                let _ = fs::create_dir_all(&path);
+                path
+            });
+        }
+    }
+
+    pub fn config() -> &'static PathBuf {
+        CONFIG_PATH.get_or_init(|| PathBuf::from("atlas_cfg.json"))
+    }
+    pub fn data() -> &'static PathBuf {
+        DATA_DIR.get_or_init(|| PathBuf::from("./data"))
+    }
+    pub fn cache() -> &'static PathBuf {
+        CACHE_DIR.get_or_init(|| PathBuf::from("./cache"))
+    }
+}
+
 /*
 // 在 render 时获取只读锁
 fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -18,7 +81,7 @@ fn render(&mut self, f: &mut Frame, area: Rect) {
     }
 }
 */
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)] //处于序列化需要重新包装一层
 pub enum AppColor {
     Black,
     Red,
@@ -43,18 +106,18 @@ impl AppColor {
             AppColor::White => Color::White,
         }
     }
-    pub fn next(self) -> Self {
-        match self {
-            AppColor::Black => AppColor::Red,
-            AppColor::Red => AppColor::Green,
-            AppColor::Green => AppColor::Yellow,
-            AppColor::Yellow => AppColor::Blue,
-            AppColor::Blue => AppColor::Magenta,
-            AppColor::Magenta => AppColor::Cyan,
-            AppColor::Cyan => AppColor::White,
-            AppColor::White => AppColor::Black,
-        }
-    }
+    // pub fn next(self) -> Self {
+    //     match self {
+    //         AppColor::Black => AppColor::Red,
+    //         AppColor::Red => AppColor::Green,
+    //         AppColor::Green => AppColor::Yellow,
+    //         AppColor::Yellow => AppColor::Blue,
+    //         AppColor::Blue => AppColor::Magenta,
+    //         AppColor::Magenta => AppColor::Cyan,
+    //         AppColor::Cyan => AppColor::White,
+    //         AppColor::White => AppColor::Black,
+    //     }
+    // }
 }
 
 impl std::fmt::Display for AppColor {
@@ -63,12 +126,15 @@ impl std::fmt::Display for AppColor {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, SmartDefault)]
 pub struct Config {
+    #[default(AppColor::Black)]
     pub background_color: AppColor,
+    #[default(AppColor::White)]
     pub theme_color: AppColor,
+    #[default(8)]
     pub refresh_rate_ms: u64,
-    pub cpu_affinity: Option<usize>,
+    //pub cpu_affinity: Option<usize>,
 
     // 扩展参数（弱类型，用于存储动态增加或插件化的配置）
     #[serde(flatten)] // 这个宏会让所有未定义的字段都落入这个 Map
@@ -97,22 +163,8 @@ fn default_refresh_rate() -> u64 { 30 }
 
 你之前提到的 HashMap 此时派上了大用场。通过 #[serde(flatten)]，所有无法识别的旧字段都会被塞进 extra 中，程序运行期间可以尝试从 extra 里捞数据。
 */
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            background_color: AppColor::Black,
-            theme_color: AppColor::White,
-            refresh_rate_ms: 8,
-            cpu_affinity: None,
-            extra: Default::default(),
-        }
-    }
-}
 
 impl Config {
-    fn _get_path() -> Option<PathBuf> {
-        ProjectDirs::from("", "", "atlas").map(|p| p.data_dir().join("config.json"))
-    }
     fn get_path() -> Option<PathBuf> {
         ProjectDirs::from("", "", "atlas").map(|p| {
             let data_dir = p.data_dir().to_path_buf();
@@ -122,8 +174,24 @@ impl Config {
         })
     }
 
-    /// 处理损坏的配置文件：重命名为 broken_xxxx.json 并新建默认文件
+    /// 损坏处理：备份并重置
     fn handle_broken_config(path: &PathBuf) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut broken_path = path.clone();
+        broken_path.set_extension(format!("{}.broken", timestamp));
+
+        let _ = fs::rename(path, broken_path);
+
+        let default_config = Self::default();
+        let _ = default_config.save();
+    }
+
+    /// 处理损坏的配置文件：重命名为 broken_xxxx.json 并新建默认文件
+    fn _handle_broken_config(path: &PathBuf) {
         let mut broken_path = path.clone();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -140,7 +208,42 @@ impl Config {
         let _ = default_config.save();
     }
 
+    /// 核心加载逻辑：Override > System > Default
     pub fn load() -> Self {
+        // 确保路径已初始化
+        AtlasPaths::init();
+        let path = AtlasPaths::config();
+
+        // 1. 尝试读取
+        if !path.exists() {
+            let default_cfg = Self::default();
+            let _ = default_cfg.save();
+            return default_cfg;
+        }
+
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                match serde_json::from_str::<Self>(&content) {
+                    Ok(mut config) => {
+                        // 可以在这里对加载后的配置做一些运行时校验
+                        config
+                    }
+                    Err(e) => {
+                        // 只有非 override 文件损坏才尝试修复（防止破坏用户的 override 手动配置）
+                        if !path.to_string_lossy().contains("override") {
+                            Self::handle_broken_config(path);
+                        }
+                        eprintln!("Config error at {:?}: {}", path, e);
+                        Self::default()
+                    }
+                }
+            }
+            Err(_) => Self::default(),
+        }
+    }
+
+    pub fn _load() -> Self {
+        //
         let path = match Self::get_path() {
             Some(p) => p,
             None => return Self::default(),
@@ -173,41 +276,6 @@ impl Config {
         }
     }
 
-    pub fn _load3() -> Self {
-        let path = match Self::get_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
-
-        if !path.exists() {
-            let def = Self::default();
-            let _ = def.save();
-            return def;
-        }
-
-        let content = fs::read_to_string(&path).unwrap_or_default();
-
-        // 如果文件为空，直接返回默认
-        if content.trim().is_empty() {
-            return Self::default();
-        }
-
-        match serde_json::from_str::<Self>(&content) {
-            Ok(config) => config,
-            Err(e) => {
-                // 记录错误，通过打印或日志，在 TUI 启动前可见
-                eprintln!("Config parse error: {}", e);
-
-                // 执行备份
-                if let Err(rename_err) = Self::backup_and_recreate(&path) {
-                    eprintln!("Failed to backup config: {}", rename_err);
-                }
-
-                Self::default()
-            }
-        }
-    }
-
     fn backup_and_recreate(path: &PathBuf) -> std::io::Result<()> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -227,13 +295,16 @@ impl Config {
 
         Ok(())
     }
-    pub fn _load() -> Self {
-        Self::get_path()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default()
-    }
     pub fn save(&self) -> std::io::Result<()> {
+        let path = AtlasPaths::config();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(self)?;
+        fs::write(path, content)
+    }
+
+    pub fn _save(&self) -> std::io::Result<()> {
         if let Some(path) = Self::get_path() {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
@@ -242,56 +313,4 @@ impl Config {
         }
         Ok(())
     }
-}
-
-use notify::{RecursiveMode, Watcher, event};
-use std::path::Path;
-
-use crate::message::{GlobalEvent, NotificationLevel};
-
-pub async fn setup_config_watcher(
-    shared_config: SharedConfig,
-    render_tx: tokio::sync::mpsc::Sender<()>,
-    event_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
-) {
-    tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-
-        // 创建文件监听器
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(e) = res {
-                if e.kind.is_modify() {
-                    let _ = tx.blocking_send(());
-                }
-            }
-        })
-        .expect("Failed to create watcher");
-
-        watcher
-            .watch(Path::new("config.toml"), RecursiveMode::NonRecursive)
-            .ok();
-
-        while let Some(_) = rx.recv().await {
-            // 1. 读取新配置
-            let new_conf = Config::load();
-
-            // 2. 写入共享内存
-            {
-                let mut guard = shared_config.write().await;
-                *guard = new_conf;
-                //println!("Config hot-reloaded!");
-
-                let _ = event_tx.send(GlobalEvent::Notify(
-                    "Config Hot-Reloaded".into(),
-                    NotificationLevel::Info,
-                ));
-                let _ = render_tx.send(()).await;
-            }
-
-            // 3. 强制触发全局重绘
-            let _ = render_tx.send(()).await;
-            // 发送广播消息，通知 App 数据已变
-            //let _ = global_tx.send(GlobalEvent::ConfigChanged); ?
-        }
-    });
 }

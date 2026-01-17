@@ -1,0 +1,51 @@
+运行时：
+    ✅panic_hook
+    ✅tokio rt
+    ✅raw模式进入和退出
+Config：
+    ✅arc+rwlock typed warp
+    ✅如果当前目录下存在atlas_cfg_override.json，则优先加载此文件。 
+    ✅程序启动时生成全局静态变量atlas_cfg.json的路径，以及持久化数据的路径，还有缓存cache数据的路径。
+    ✅处理损坏的配置文件：重命名为 broken_xxxx.json 并新建默认文件
+    ❌配置文件部分读取：如果能解析json，但'确实'了必要的字段，将会用默认值补全
+键盘设计和控制焦点：
+    ✅需要键盘控制的每个Component会有一个字段描述控制焦点
+Glob通道消息设计：
+    GlobalEvent 包含：
+        动态数据
+        状态（通知，3级进度条，4级级别）
+Tui初始化和渲染逻辑：
+    tokio select多任务循环：
+        事件驱动：比如键盘
+        后台数据驱动： glob通道消息传递
+        - 渲染：定时检查，重绘界面并清除渲染标记
+Component Trait 规范模组：
+    init "#new !" 需要传入 配置， 通信管道
+    update  用于向上层组件报告是否变更和需要渲染
+    render  渲染组件
+    handle_key 键盘事件处理
+    ❌is_fullscreen (false)
+App主程序框架： APP和所有下级组件均实现
+    包含state：
+        sharedcfg,
+        全局tx、rx、state 注意rx必须由tx订阅
+        重绘标记 
+        标签页组件、索引、控制焦点、
+        底部组件：（键盘提示，文字信息，进度条）
+底部组件：
+
+
+Welcome页面：
+    在init里初始化一个任务定时发送信息，
+设置页面：
+
+Info 页面：
+
+常量配置：
+
+数据库：
+
+
+
+
+

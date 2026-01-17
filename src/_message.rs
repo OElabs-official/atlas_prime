@@ -1,44 +1,19 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+
 #[derive(Clone, Debug)]
 pub enum GlobalEvent {
     /// 数据更新：用于组件内容填充 (Deno -> Component)
-    //Data(String, serde_json::Value),
-    Data {
-        key: &'static str, // 例如 "public_ip"
-        data: DynamicPayload,
-    },
-
+    Data(String, serde_json::Value),
+    
     /// 状态反馈：用于 Footer 渲染 (Async Task -> App Footer)
     /// 参数：内容, 等级, 可选进度
     Status(String, StatusLevel, Option<Progress>),
-    // 全局指令：改变应用行为 (Component/Deno -> App) 如果需要，在Data 里
-    // Action(AppAction),
-}
-#[derive(Clone)] // 注意：Arc<dyn Any> 不能直接派生 Debug，需要特殊处理
-pub struct DynamicPayload(pub Arc<dyn Any + Send + Sync>);
-
-impl std::fmt::Debug for DynamicPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DynamicPayload(Arc<dyn Any>)")
-    }
+    
+    /// 全局指令：改变应用行为 (Component/Deno -> App)
+    Action(AppAction),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum StatusLevel {
-    Info,
-    Success,
-    Warning,
-    Error,
-}
-
-#[derive(Clone, Debug)]
-pub enum Progress {
-    Percent(u8),
-    TaskCount(u32, u32), // (当前, 总数)
-    Loading,
-}
-/*
 #[derive(Clone, Debug)]
 pub enum _GlobalEvent {
     SyncProgress(ProgressType),
@@ -65,9 +40,41 @@ pub enum NotificationLevel {
     Warning, // 黄色
     Error,   // 红色 (需手动清除)
 }
-*/
 
-/*
+
+
+#[derive(Clone)] // 注意：Arc<dyn Any> 不能直接派生 Debug，需要特殊处理
+pub struct DynamicPayload(pub Arc<dyn Any + Send + Sync>);
+
+impl std::fmt::Debug for DynamicPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DynamicPayload(Arc<dyn Any>)")
+    }
+}
+
+pub struct _ActiveNotification {
+    pub content: String,
+    pub level: NotificationLevel,
+    pub progress: Option<ProgressType>,
+    pub created_at: std::time::Instant,
+}
+
+
+
+
+
+#[derive(Clone, Debug)]
+pub enum _Message {
+    /// 数据更新：用于组件内容填充 (Deno -> Component)
+    Data(String, serde_json::Value),
+    
+    /// 状态反馈：用于 Footer 渲染 (Async Task -> App Footer)
+    /// 参数：内容, 等级, 可选进度
+    Status(String, StatusLevel, Option<Progress>),
+    
+    /// 全局指令：改变应用行为 (Component/Deno -> App)
+    Action(AppAction),
+}
 
 #[derive(Clone, Debug)]
 pub enum AppAction {
@@ -82,4 +89,14 @@ pub enum AppAction {
     /// 弹出模态框（如果未来有 UI 叠加层需求）
     SetOverlay(bool),
 }
- */
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatusLevel {
+    Info, Success, Warning, Error
+}
+
+#[derive(Clone, Debug)]
+pub enum Progress {
+    Percent(u8),
+    Loading,
+}
