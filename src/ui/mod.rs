@@ -4,3 +4,4 @@ pub mod info;
 //pub mod sessions;
 //pub mod settings;
 pub mod welcome;
+pub mod task_control;

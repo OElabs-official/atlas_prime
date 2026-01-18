@@ -6,6 +6,7 @@ mod utils;
 //mod db;
 mod message;
 
+use crossterm::event::KeyModifiers;
 use notify::{RecursiveMode, Watcher};
 use std::path::Path;
 use tokio::sync::broadcast;
@@ -190,18 +191,19 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut render_clock = interval(Duration::from_millis(8)); // 约 60FPS，用于平滑渲染 ,glob
 
-    loop {
-        tokio::select! {
-
-
+    loop 
+    {
+        tokio::select! 
+        {
             /*
             如果后台数据更新极快（比如一个高频传感器每秒发 1000 次数据），background_rx 会不停地往 render_tx 塞任务，导致 CPU 依然爆表
             我们需要一个 “节流阀”：无论收到多少重绘请求，在一定时间内（比如 16ms，即 60FPS）只允许渲染一次。
-             */
+                */
 
             // --- 核心修改：渲染分支 唯一的渲染出口 ---
             // 每一帧(16ms)都检查是否需要重绘
-            _ = render_clock.tick() => {
+            _ = render_clock.tick() => 
+            {
                 // should_draw 应该检查:
                 // 1. 之前有没有 request_render()
                 // 2. 或者有没有后台数据更新标记
@@ -212,30 +214,31 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // 2. 真正的异步按键流：完全不使用 sleep    分支 A：交互事件
-            maybe_event = reader.next() => {
-                match maybe_event {
-                    Some(Ok(Event::Key(key))) => {
-                        if key.code == KeyCode::Char('q') { break; }
-                        if !app.components[app.active_tab].handle_key(key) {
-                            match key.code {
-                                // KeyCode::Right => app.next_tab(),
-                                // KeyCode::Left => app.prev_tab(),
-                                // 這裡可以處理數字鍵直接跳轉 1, 2, 3...
-                                // KeyCode::Char('1') => app.active_tab = 0,
-                                // KeyCode::Char('2') => app.active_tab = 1,
-                                // KeyCode::Char('3') => app.active_tab = 2,
-                                _ => {}
-                            }
+            maybe_event = reader.next() => 
+            {
+                match maybe_event 
+                {
+                    Some(Ok(Event::Key(key))) => 
+                    {
+                        // 1. 只有绝对全局的退出键（如 Ctrl+C 或特定 Q）在这里拦截
+                        // 如果你想让子组件也能处理 'q'，就把这一行也删掉，全部交给 app.handle_key
+                        // 1. 捕获 Ctrl + C 退出
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                            break;
                         }
-                        //let _ = render_tx.try_send(());
-                        // 只要有交互就标记需要渲染
-                        app.request_render();
+
+                        // 2. 【核心逻辑】将所有按键事件交给 App 处理
+                        // app.handle_key 内部会处理：Alt+方向键、Tab切换、以及子组件的输入
+                        if app.handle_key(key) {
+                            // 如果 App 处理了该事件（返回 true），标记需要重绘
+                            app.request_render();
+                        }
                     },
                     Some(Ok(Event::Resize(_, _))) => {
                         // 窗口大小变了，必须强制重绘
                         app.request_render();
                     },
-                    _ => {}
+                        _ => {}
                 }
             }
 
@@ -245,7 +248,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             // 我们只需要感知“有消息来了”，不需要在 main 里处理 msg 的内容
             res = task_glob_recv.recv() => {
                 match res {
-                    Ok(ge) => {
+                    Ok(_ge) => {
                         // match ge
                         // {
                         //     GlobalEvent::Data { key, data } => {app.update();},

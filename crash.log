@@ -22,3 +22,27 @@ Stack Trace:
   17: __libc_init
 
 
+--- PANIC AT 2026-01-18 19:17:05 ---
+Location: src/ui/task_control.rs:268:34
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: <atlas_prime::ui::task_control::TaskControlComponent as atlas_prime::ui::component::Component>::render
+   8: <atlas_prime::app::App as atlas_prime::ui::component::Component>::render
+   9: <ratatui_core::terminal::terminal::Terminal<ratatui_crossterm::CrosstermBackend<std::io::stdio::Stdout>>>::draw::<atlas_prime::run_app::{closure#0}::{closure#6}>
+  10: <tokio::runtime::park::CachedParkThread>::block_on::<atlas_prime::main::{closure#0}::{closure#0}>
+  11: <tokio::runtime::runtime::Runtime>::block_on::<atlas_prime::main::{closure#0}::{closure#0}>
+  12: atlas_prime::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: main
+  17: __libc_init
+
+

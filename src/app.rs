@@ -5,7 +5,7 @@ use crate::message::{GlobalEvent, Progress, StatusLevel};
 use crate::ui::app_button::button_components_init;
 use crate::ui::component::Component;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -35,7 +35,7 @@ pub struct App {
     // --- 标签页组件、索引、控制焦点 ---
     pub components: Vec<Box<dyn Component>>,
     pub active_tab: usize,
-    pub focus_on_content: bool,                     // 新增：焦点控制
+    // pub focus_on_content: bool,                     // 新增：焦点控制
     pub button_components: Vec<Box<dyn Component>>, // 底部通知组件
 
     // --- 消息总线 --- 在有需要的时候广播通道clone一份给子组件
@@ -97,22 +97,36 @@ impl Component for App {
         .split(area);
 
         {
-            // 渲染 Tab 栏 (内部逻辑)
-
-            let titles: Vec<&str> = TabId::ALL.iter().map(|t| t.title()).collect();
-
-            //let active_tab_id = TabId::from_index(self.active_tab);
+            let titles: Vec<Line> = TabId::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    if i == self.active_tab {
+                        // 激活状态：加粗、反色或特定高亮色
+                        Line::from(Span::styled(
+                            format!(" {} ", t.title()), 
+                            Style::default()
+                                .fg(Color::Yellow) // 这里可以换成 TabId 定义的 theme_color
+                                .add_modifier(Modifier::BOLD)
+                                .add_modifier(Modifier::REVERSED), // 反色效果非常醒目
+                        ))
+                    } else {
+                        // 未激活状态：灰色
+                        Line::from(Span::styled(
+                            format!(" {} ", t.title()),
+                            Style::default().fg(Color::Gray),
+                        ))
+                    }
+                })
+                .collect();
 
             let tabs = Tabs::new(titles)
                 .block(Block::default().borders(Borders::ALL).title(APP_TITLE))
                 .select(self.active_tab)
-                .highlight_style(
-                    Style::default()
-                        //.fg(active_tab_id.theme_color()) // 颜色随标签页自动切换
-                        .add_modifier(Modifier::BOLD),
-                );
+                // 这个 highlight_style 是作用于整体选中效果的补充
+                .highlight_style(Style::default().add_modifier(Modifier::UNDERLINED));
+
             f.render_widget(tabs, chunks[0]);
-            // f.render_widget(tabs, area);
         }
 
         // 转发渲染请求给当前活动的子组件
@@ -131,27 +145,12 @@ impl Component for App {
         }
     }
 
-    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        // 键盘处理和屏幕焦点需要再讨论处理
-        // A. 优先让底部组件处理事件 (例如 Error 状态下的 Esc 清除)
-        for btn in self.button_components.iter_mut() {
-            if btn.handle_key(key) {
-                self.re_rend_mark = true;
-                return true;
-            }
-        }
+    // --- app.rs ---
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
 
-        // B. 根据焦点分发逻辑
-        if self.focus_on_content {
-            // 焦点在内容区：分发给当前 Tab
-            if let Some(comp) = self.components.get_mut(self.active_tab) {
-                if comp.handle_key(key) {
-                    self.re_rend_mark = true;
-                    return true;
-                }
-            }
-        } else {
-            // 焦点在 Tab 栏：处理切换逻辑
+        // 1. 最高优先级：全局标签页切换 (Alt + Arrows / Alt + Digits)
+        if key.modifiers.contains(KeyModifiers::ALT) {
             match key.code {
                 KeyCode::Right => {
                     self.next_tab();
@@ -165,7 +164,7 @@ impl Component for App {
                     let idx = (c.to_digit(10).unwrap() as usize).saturating_sub(1);
                     if idx < self.components.len() {
                         self.active_tab = idx;
-                        self.re_rend_mark = true;
+                        self.request_render();
                         return true;
                     }
                 }
@@ -173,17 +172,25 @@ impl Component for App {
             }
         }
 
-        // C. 处理全局功能键 (Tab 切换焦点 / Esc 退出)
-        match key.code {
-            KeyCode::Tab => {
-                self.focus_on_content = !self.focus_on_content;
-                self.re_rend_mark = true;
-                true
+        // 2. 底部组件处理 (例如 Esc 键清除错误弹窗)
+        for btn in self.button_components.iter_mut() {
+            if btn.handle_key(key) {
+                self.request_render();
+                return true;
             }
-            _ => false,
         }
-    }
 
+        // 3. 直接分发给当前激活的子组件 (不再判断 focus_on_content)
+        // 现在的逻辑是：除非是 Alt 组合键，否则所有按键都交给内容区处理
+        if let Some(comp) = self.components.get_mut(self.active_tab) {
+            if comp.handle_key(key) {
+                self.request_render();
+                return true;
+            }
+        }
+
+        false
+    }
     fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self
     where
         Self: Sized,
@@ -212,7 +219,7 @@ impl Component for App {
             config,
             components,
             active_tab: 0,
-            focus_on_content: false,
+            // focus_on_content: false,
             re_rend_mark: true,
             glob_send,
             glob_recv,

@@ -1,17 +1,13 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
 
-// 1. 全局快捷键
-pub const KEY_QUIT: KeyCode = KeyCode::Char('q');
-pub const KEY_CLEAR_NOTIFY: KeyCode = KeyCode::Char('c');
-pub const KEY_TAB_NEXT: KeyCode = KeyCode::Right;
-pub const KEY_TAB_PREV: KeyCode = KeyCode::Left;
 
 /// 2. 标签页唯一标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabId {
     Welcome,
     Info,
+    TaskControl
     // Sessions,
 }
 
@@ -19,9 +15,10 @@ pub enum TabId {
 impl TabId {
     /// 获取所有标签页的顺序列表
     pub const ALL: &[Self] = &[
-        Self::Info,
+        // Self::Info,
         Self::Welcome,
         Self::Info,
+        Self::TaskControl
         // Self::Sessions
     ];
 
@@ -30,6 +27,7 @@ impl TabId {
         match self {
             Self::Welcome => "  Welcome ",
             Self::Info => "  System Info ",
+            Self::TaskControl=> " Task Control ",
             // Self::Sessions => " [2] Session Manager ",
         }
     }
@@ -54,6 +52,11 @@ impl TabId {
                 glob_send.clone(),
                 glob_send.subscribe(),
             )),
+            Self::TaskControl => Box::new(TaskControlComponent::init(
+                config,
+                glob_send.clone(),
+                glob_send.subscribe(),
+            )),            
             // Self::Sessions => " [2] Session Manager ",
         }
     }
@@ -87,37 +90,33 @@ pub const ART_LOGO: &str = r#"
 // 2. 帮助区域内容（数组形式，方便翻页）
 pub const ART_LOGO_HEIGHT: u16 = 6;
 pub const HELP_CONTENT: &[&str] = &[
-    "--- GLOBAL CONTROLS ---",
-    "q          : Quit Atlas",
-    "Left/Right : Switch Tabs",
-    "c          : Clear Notifications",
+"--- Navigation ---",
+    "Alt + Left/Right  : Switch between Tabs immediately",
+    "Alt + [1-9]       : Jump to specific Tab",
+    "Tab               : Cycle focus within the current page",
     "",
-    "--- NAVIGATION ---",
-    "Tab 0: Welcome - This Screen",
-    "Tab 1: System  - Resource Monitor",
-    "Tab 2: Session - Manage Instances",
-    "",
-    "--- SCROLLING ---",
-    "Up/Down    : Scroll Help Content",
-    "h          : Close this panel",
+    "--- Actions ---",
+    "Up/Down Arrows    : Scroll lists or content",
+    "Esc               : Clear notifications or close popups",
+    "Ctrl + C          : Force quit Atlas (Safety Exit)",
 ];
 
 // 3. 布局比例 (黄金分割)
 pub const GOLDEN_RATIO_PC: u16 = 62; // 61.8%
 pub const KEY_HELP: KeyCode = KeyCode::Char('h');
 
-pub const INFO_UPDATE_INTERVAL_BASE: u64 = 2;
-pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 10;
+pub const INFO_UPDATE_INTERVAL_BASE: u64 = 3;
+pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 5;
 pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 100;
 pub const HISTORY_CAP: usize = 1024;
 
 use ratatui::layout::Constraint;
-use ureq::config;
 
 use crate::app::GlobSend;
 use crate::config::SharedConfig;
 use crate::ui::component::Component;
 use crate::ui::info::InfoComponent;
+use crate::ui::task_control::TaskControlComponent;
 use crate::ui::welcome::WelcomeComponent;
 
 /// 底部状态栏的横向布局约束

@@ -10,7 +10,7 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use directories::{BaseDirs, UserDirs};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, symbols::block, widgets::*};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use sysinfo::{Disks, System};
 use tokio::sync::{broadcast, mpsc};
@@ -49,6 +49,8 @@ pub struct InfoComponent {
     bat_history: VecDeque<AndroidBatInfo>,
     cpu_info_history: VecDeque<AndroidCpuInfo>,
     cpu_info_long_history: VecDeque<AndroidCpuInfo>,
+
+    system_info: String,      // 例如: "Android 14"
 }
 
 impl InfoComponent {
@@ -60,7 +62,7 @@ impl InfoComponent {
             .borders(Borders::ALL)
             .title(" 🌐 IP Addresses (Left: v4 | Right: v6) ")
             .border_style(if self.focus_index == Some(2) {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             });
@@ -335,96 +337,6 @@ impl InfoComponent {
         );
     }
 
-    /// 仅用于测试 termuxapi 0.1.1 的数据读取逻辑
-
-    // 专门用于 Android 环境的硬件信息探测测试
-    fn _render_android_test_info(&self, f: &mut Frame, area: Rect) {
-        // --- 1. CPU 频率 (取 cpu0 和 cpu7 代表小核和大核) ---
-        let read_freq = |idx: usize| {
-            std::fs::read_to_string(format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-                idx
-            ))
-            .map(|s| {
-                format!(
-                    "{:.1}GHz",
-                    s.trim().parse::<f32>().unwrap_or(0.0) / 1_000_000.0
-                )
-            })
-            .unwrap_or_else(|_| "N/A".to_string())
-        };
-        let mut feqstr = String::new();
-        for i0 in 0..8 {
-            feqstr.push_str(&format!("{}, ", read_freq(i0)));
-        }
-        // 1. 尝试读取电池电量
-        // let bat_capacity = std::fs::read_to_string("/sys/class/power_supply/battery/capacity")
-        //     .map(|s| format!("{}%", s.trim()))
-        //     .unwrap_or_else(|_| "N/A (Access Denied)".to_string());
-
-        // --- 2. 电池信息尝试 (如果 sysfs 失败，尝试通过系统属性或假设路径) ---
-        // 三星设备有时路径在 /sys/class/power_supply/battery/capacity
-        let bat_val = std::fs::read_to_string("/sys/class/power_supply/battery/capacity")
-            .ok()
-            .unwrap_or_else(|| "??".to_string());
-
-        // --- 3. 内存状态 (从 /proc/meminfo 获取更详细的非 sysinfo 数据) ---
-        // let mem_info = std::fs::read_to_string("/proc/meminfo").ok();
-        // let swap_total = mem_info.as_ref().and_then(|m| m.lines().find(|l| l.contains("SwapTotal")))
-        //     .unwrap_or("Swap: N/A");
-
-        // // 2. 尝试读取充电状态
-        // let charge_status = std::fs::read_to_string("/sys/class/power_supply/battery/status")
-        //     .map(|s| s.trim().to_string())
-        //     .unwrap_or_else(|_| "N/A".to_string());
-
-        // // 3. 尝试读取电池电流 (判断快充/慢充)
-        // let current_now = std::fs::read_to_string("/sys/class/power_supply/battery/current_now")
-        //     .map(|s| format!("{} mA", s.trim().parse::<i32>().unwrap_or(0) / 1000))
-        //     .unwrap_or_else(|_| "N/A".to_string());
-
-        // 4. 尝试读取 CPU 温度 (尝试两个最常见的 zone)
-        let temp_zone0 = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp")
-            .map(|s| format!("{:.1}°C", s.trim().parse::<f32>().unwrap_or(0.0) / 1000.0))
-            .unwrap_or_else(|_| "err".to_string());
-
-        let temp_zone7 = std::fs::read_to_string("/sys/class/thermal/thermal_zone7/temp")
-            .map(|s| format!("{:.1}°C", s.trim().parse::<f32>().unwrap_or(0.0) / 1000.0))
-            .unwrap_or_else(|_| "err".to_string());
-
-        // 5. 构造显示文本
-        let test_text = vec![
-            Line::from(vec![
-                Span::styled("🔋 Battery: ", Style::default().fg(Color::Green)),
-                // Span::raw(format!("{} ({}) ", bat_capacity, charge_status)),
-                Span::raw(format!("{}", bat_val)),
-                // Span::styled(format!("[{}]", current_now), Style::default().fg(Color::DarkGray)),
-            ]),
-            Line::from(vec![
-                Span::styled("📊 CPU feq: ", Style::default().fg(Color::Red)),
-                Span::raw(format!(" {}  ", feqstr)),
-            ]),
-            Line::from(vec![
-                Span::styled("🌡️ CPU Temp: ", Style::default().fg(Color::Red)),
-                Span::raw(format!("Zone0: {} | Zone7: {}", temp_zone0, temp_zone7)),
-            ]),
-        ];
-
-        f.render_widget(
-            Paragraph::new(test_text).block(
-                Block::default()
-                    .title(" Android Hardware Test (BETA) ")
-                    .borders(Borders::ALL)
-                    .border_style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-            ),
-            area,
-        );
-    }
-
     // --- 辅助采集函数：CPU ---
     fn task_collect_android_cpu() -> AndroidCpuInfo {
         let mut freqs = Vec::with_capacity(8);
@@ -468,6 +380,97 @@ impl InfoComponent {
     /// 每一个小周期发送内存和swap数据元组
     /// 每一个大周期发送磁盘数据向量和ip数据向量    
     fn spawn_monitor_task(glob_send: GlobSend) {
+        tokio::spawn(async move {
+            let mut sys = System::new_all();
+            let mut tick_count: u64 = 0;
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
+
+            // --- [新增] 启动预热：在进入循环前先同步一次数据，让 UI 瞬间填满 ---
+            Self::perform_full_sync(&mut sys, &glob_send);
+
+            loop {
+                interval.tick().await;
+                tick_count = tick_count.wrapping_add(1);
+
+                // 1. 基础数据采集 (每秒仅一次)
+                sys.refresh_memory();
+                let mem_val: MemSwapMB = (
+                    sys.used_memory() / 1024 / 1024,
+                    sys.used_swap() / 1024 / 1024,
+                );
+                let mem_payload = DynamicPayload(Arc::new(mem_val));
+
+                #[cfg(target_os = "android")]
+                let cpu_val = Self::task_collect_android_cpu();
+                #[cfg(target_os = "android")]
+                let cpu_payload = DynamicPayload(Arc::new(cpu_val));
+
+                // 2. 短周期分发
+                let _ = glob_send.send(GlobalEvent::Data {
+                    key: MEM_SWAP,
+                    data: mem_payload.clone(),
+                });
+                #[cfg(target_os = "android")]
+                let _ = glob_send.send(GlobalEvent::Data {
+                    key: ANDROID_CPU,
+                    data: cpu_payload.clone(),
+                });
+
+                // 3. 长周期分发 (复用已包装好的 Arc，不产生额外开销)
+                if tick_count % INFO_UPDATE_INTERVAL_SLOWEST == 1 {
+                    let _ = glob_send.send(GlobalEvent::Data {
+                        key: MEM_SWAP_LONG,
+                        data: mem_payload,
+                    });
+                    #[cfg(target_os = "android")]
+                    {
+                        let _ = glob_send.send(GlobalEvent::Data {
+                            key: ANDROID_CPU_LONG,
+                            data: cpu_payload,
+                        });
+                        // 只有在这里才调用较慢的 battery api
+                        if let Ok(stat) = termux::battery::status() {
+                            let bat_pkg: AndroidBatInfo = (
+                                stat.percentage,
+                                format!("{:?}", stat.status),
+                                stat.temperature,
+                            );
+                            let _ = glob_send.send(GlobalEvent::Data {
+                                key: ANDROID_BAT,
+                                data: DynamicPayload(Arc::new(bat_pkg)),
+                            });
+                        }
+                    }
+                }
+
+                // 4. 中周期分发
+                if tick_count % INFO_UPDATE_INTERVAL_SLOW_TIMES == 1 {
+                    let pkg: DiskIP = (Self::task_collect_disks(), Self::ip_list());
+                    let _ = glob_send.send(GlobalEvent::Data {
+                        key: DISK_IP,
+                        data: DynamicPayload(Arc::new(pkg)),
+                    });
+                }
+            }
+        });
+    }
+
+    // 提取出一个全量同步函数，供初始化和特殊时刻调用
+    fn perform_full_sync(sys: &mut System, glob_send: &GlobSend) {
+        sys.refresh_memory();
+        let mem = (
+            sys.used_memory() / 1024 / 1024,
+            sys.used_swap() / 1024 / 1024,
+        );
+        let _ = glob_send.send(GlobalEvent::Data {
+            key: MEM_SWAP_LONG,
+            data: DynamicPayload(Arc::new(mem)),
+        });
+        // ... 可按需扩展其他预热项
+    }
+
+    fn _spawn_monitor_task(glob_send: GlobSend) {
         tokio::spawn(async move {
             let mut sys = System::new_all();
             let mut tick_count: u64 = 0;
@@ -717,6 +720,25 @@ impl Component for InfoComponent {
 
         Self::spawn_monitor_task(glob_send.clone());
 
+        let mut system_info: String = Default::default();
+        {   
+            let vinf = &[
+                System::cpu_arch(),  
+                System::name().unwrap_or_else(|| "Unknown name".into()),
+                // System::host_name().unwrap_or_else(|| "Unknown host_name".into()),
+                // System::name().unwrap_or_else(|| "Unknown OS".into()),
+                System::kernel_long_version().split('-').collect::<Vec<_>>().first().unwrap_or_else(||&"").to_string(),  
+                System::os_version().unwrap_or_else(|| "".into()),
+            ];
+            for i0 in vinf
+            {
+                system_info.push_str(i0);
+                system_info.push('*');
+            }
+        }
+
+
+
         let output = Self {
             _config: config,
             glob_recv,
@@ -734,6 +756,7 @@ impl Component for InfoComponent {
             cpu_info_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             mem_swap_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
+            system_info,
         };
         output
     }
@@ -822,47 +845,87 @@ impl Component for InfoComponent {
         // 1. 总体纵向分割：顶部图表区(6行) + 下部内容区(剩余)
         // 此时 main_chunks 只有两个索引：0 和 1
         let main_chunks = Layout::vertical([
+            
             Constraint::Min(0),
             Constraint::Length(12),
             Constraint::Length(12),
             Constraint::Length(6),
+            Constraint::Length(1),
         ])
-        .split(area);
+        .split(area);//;
+        
+        let mut main_chunks_cnt = main_chunks.iter();
+        
 
-        // 1. 渲染顶部硬件指标
-        self.render_mem_swap_status(f, main_chunks[1]);
+
+        {
+            if let Some(area) = main_chunks_cnt.next() {
+                // 再次切分列表区域并转为迭代器
+                let list_chunks = Layout::vertical([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(20),
+                ])
+                .split(*area);
+                //.into_iter();
+
+                self.render_disk_list(f, list_chunks[0]);
+
+                {
+                    // 目录渲染
+                    f.render_widget(
+                        Paragraph::new(self.dir_list.join("\n"))
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(" 📂 Directories ")
+                                    .border_style(if self.focus_index == Some(1) {
+                                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Color::Gray)
+                                    }),
+                            )
+                            .scroll((self.scroll_offsets[1], 0)),
+                        list_chunks[1],
+                    );            
+                }
+                self.render_ip_addresses(f, list_chunks[2]);
+            }
+        }
         // 3. 渲染下方列表区（使用 main_chunks[1] 而不是 2）
-        let list_chunks = Layout::vertical([
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
-            Constraint::Percentage(20),
-        ])
-        .split(main_chunks[0]); // 这里必须是 1，因为主布局只有两个块
+        // let list_chunks = Layout::vertical([
+        //     Constraint::Percentage(40),
+        //     Constraint::Percentage(40),
+        //     Constraint::Percentage(20),
+        // ])
+        // .split(main_chunks[1]); // 这里必须是 1，因为主布局只有两个块
 
         // 磁盘渲染
-        self.render_disk_list(f, list_chunks[0]);
 
-        // 目录渲染
-        f.render_widget(
-            Paragraph::new(self.dir_list.join("\n"))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" 📂 Directories ")
-                        .border_style(if self.focus_index == Some(1) {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        }),
-                )
-                .scroll((self.scroll_offsets[1], 0)),
-            list_chunks[1],
-        );
-
-        self.render_ip_addresses(f, list_chunks[2]);
-
-        self.render_cpu_status(f, main_chunks[2]);
-        self.render_battery_status(f, main_chunks[3]);
+        // 剩下的 chunks 严格对应 main_chunks 定义的顺序
+        if let Some(a) = main_chunks_cnt.next() { self.render_mem_swap_status(f, *a); }
+        if let Some(a) = main_chunks_cnt.next() { self.render_cpu_status(f, *a); }
+        if let Some(a) = main_chunks_cnt.next() { self.render_battery_status(f, *a); }
+        {
+            // f.render_widget(
+            //     Paragraph::new(self.system_info.clone())
+            //         .alignment(Alignment::Right)
+            //         .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            //     main_chunks[0]
+            // );
+            if let Some(area) = main_chunks_cnt.next() {
+                f.render_widget(
+                    Paragraph::new(self.system_info.clone())
+                        .alignment(Alignment::Right)
+                        .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                    *area
+                );
+            }
+        }
+        // 1. 渲染顶部硬件指标
+        // self.render_mem_swap_status(f, main_chunks[2]);
+        // self.render_cpu_status(f, main_chunks[3]);
+        // self.render_battery_status(f, main_chunks[4]);
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
