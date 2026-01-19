@@ -832,6 +832,7 @@ impl Component for InfoComponent {
                                 changed = true;
                             }
                         }
+                        
                         _ => {}
                     }
                 }

@@ -1,13 +1,24 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::Sender;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock as ARwLock};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::constants::{TASK_RAW_JSON, get_script_dir};
+use crate::message::{DynamicPayload, GlobalEvent, StatusLevel};
 use crate::{app::{GlobRecv, GlobSend}, config::SharedConfig, ui::component::Component};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::sync::RwLock;
+
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum RestartPolicy {
+    Always,    // 自动重启
+    Warn,      // 弹出警告（通过全局事件发送）
+    Never,     // 仅停止，不做处理
+}
 
 //1. 数据模型与 JSON 定义
 
@@ -24,6 +35,7 @@ pub struct TaskDescriptor {
     pub autostart: bool,
     pub group: String,
     pub log_limit: Option<usize>,
+    pub restart_policy: Option<RestartPolicy>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -36,6 +48,13 @@ pub enum TaskStatus {
 /// 2. 运行时任务对象
 pub struct TaskRuntime {
     pub desc: TaskDescriptor,
+    // 状态必须是可跨线程修改的，否则 render 永远看不到后台的更新
+    pub status: Arc<RwLock<TaskStatus>>, 
+    pub logs: Arc<RwLock<VecDeque<String>>>,
+    pub control_tx: Option<mpsc::Sender<TaskControlMsg>>,
+}
+pub struct _TaskRuntime {
+    pub desc: TaskDescriptor,
     pub status: TaskStatus,
     pub logs: Arc<RwLock<VecDeque<String>>>,
     // 用于向后台协程发送控制指令（停止、输入）
@@ -47,12 +66,6 @@ pub enum TaskControlMsg {
     Stop,
 }
 
-
-
-
-
-
-
 //2. 核心组件实现
 pub struct TaskControlComponent {
     config: SharedConfig,
@@ -63,6 +76,7 @@ pub struct TaskControlComponent {
     view_mode: ViewMode,
     log_scroll: u16,
     glob_send: GlobSend,
+    glob_recv: GlobRecv
 }
 
 #[derive(PartialEq)]
@@ -72,18 +86,45 @@ enum ViewMode {
 }
 
 impl Component for TaskControlComponent {
-    fn init(config: SharedConfig, glob_send: GlobSend, _glob_recv: GlobRecv) -> Self {
+    fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self {
         // 模拟从 JSON 加载过程（实际开发中可使用 std::fs::read_to_string）
-        let raw_json = r#"[
-            {"id": "api", "name": "Backend Server", "command": "ping", "args": ["127.0.0.1"], "autostart": true, "group": "Srv", "log_limit": 500}
-        ]"#;
-        let descs: Vec<TaskDescriptor> = serde_json::from_str(raw_json).unwrap_or_default();
+
+        let mut descs: Vec<TaskDescriptor> = serde_json::from_str(TASK_RAW_JSON).unwrap_or_default();
+
+        // --- 新增：扫描 scripts 目录 ---
+        let script_dir = get_script_dir();
+        if let Ok(entries) = std::fs::read_dir(script_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // 逻辑：必须是文件，且后缀是 .ts
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("ts") {
+                    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                    
+                    // 为脚本创建 Deno 任务描述符
+                    let deno_task = TaskDescriptor {
+                        id: format!("deno_{}", file_stem),
+                        name: format!("🦕 {}", file_stem), // 增加图标区分
+                        command: "deno".to_string(),
+                        // 常用参数：-A (全权限), run, 脚本路径
+                        args: vec!["run".into(), "-A".into(), "--unstable-*".into(), path.to_string_lossy().into_owned()],
+                        cwd: Some(script_dir.to_string_lossy().to_string()),
+                        envs: None,
+                        autostart: false, // 脚本任务建议手动触发
+                        group: "Scripts".to_string(),
+                        log_limit: Some(1000),
+                        restart_policy: Some(RestartPolicy::Never),
+                    };
+                    descs.push(deno_task);
+                }
+            }
+        }
 
         let mut tasks = Vec::new();
         for d in descs {
             let runtime = TaskRuntime {
                 desc: d,
-                status: TaskStatus::Stopped,
+                status: Arc::new(RwLock::new(TaskStatus::Stopped)),
+                    //TaskStatus::Stopped,
                 logs: Arc::new(RwLock::new(VecDeque::with_capacity(1000))),
                 control_tx: None,
             };
@@ -97,6 +138,7 @@ impl Component for TaskControlComponent {
             view_mode: ViewMode::List,
             log_scroll: 0,
             glob_send,
+            glob_recv
         };
 
         // 处理自动启动
@@ -106,8 +148,17 @@ impl Component for TaskControlComponent {
     }
 
     fn update(&mut self) -> bool {
-        // 在这里可以检查 glob_recv 里的任务状态变更消息
-        // 目前简单返回 false，重绘由 handle_key 触发
+    // 假设 self.glob_recv 是 App 自己的消息订阅端
+        while let Ok(event) = self.glob_recv.try_recv() {
+            match event {
+// 只有当收到 Data 且 key 为 "rend" 时才标记需要重绘
+            GlobalEvent::Data { key, .. } if key == "rend" => {
+                return true;
+            }
+                _ => {}
+                // ... 处理其他全局事件
+            }
+        }
         false
     }
 
@@ -136,19 +187,31 @@ impl TaskControlComponent {
     fn auto_start_tasks(&mut self) {
         for i in 0..self.tasks.len() {
             if self.tasks[i].desc.autostart {
-                self.start_task(i);
+                self.start_or_stop_task(i);
             }
         }
     }
 
-    fn start_task(&mut self, idx: usize) {
+    fn start_or_stop_task(&mut self, idx: usize) {
         let task = &mut self.tasks[idx];
-        if let TaskStatus::Running { .. } = task.status { return; }
+        
+        // 1. 停止逻辑
+        if let TaskStatus::Running { .. } = *task.status.read().unwrap() {
+            if let Some(tx) = &task.control_tx {
+                let _ = tx.try_send(TaskControlMsg::Stop);
+            }
+            // 注意：这里不要直接设为 Stopped，让后台协程退出时自动设置更准确
+            let _ = self.glob_send.send(GlobalEvent::Data { key: "rend", data: DynamicPayload(Arc::new(())) });
+            return;
+        }
 
+        // 2. 准备启动
         let desc = task.desc.clone();
         let logs = task.logs.clone();
+        let status_lock = task.status.clone(); // 克隆状态锁给后台
         let (tx, mut rx) = mpsc::channel::<TaskControlMsg>(32);
         task.control_tx = Some(tx);
+        let glob_send = self.glob_send.clone();
 
         tokio::spawn(async move {
             let mut cmd = tokio::process::Command::new(&desc.command);
@@ -161,87 +224,167 @@ impl TaskControlComponent {
             
             match cmd.spawn() {
                 Ok(mut child) => {
-                    let pid = child.id().unwrap_or(0);
-                    let stdout = child.stdout.take().unwrap();
-                    let mut reader = BufReader::new(stdout).lines();
+                    let pid = child.id().expect("Failed to get PID");
+                    
+                    // 【关键更新】：更新 PID 到状态
+                    {
+                        let mut s = status_lock.write().unwrap();
+                        *s = TaskStatus::Running { pid, start_time: std::time::Instant::now() };
+                    }
 
-                    // 这里的日志更新逻辑
+                    let stdout = child.stdout.take().unwrap();
+                    let stderr = child.stderr.take().unwrap(); // 也要捕获错误输出，否则看不到报错
+
+                    // 日志合并读取
+                    let logs_clone = logs.clone();
                     tokio::spawn(async move {
-                        // let mut reader = BufReader::new(stdout).lines();
-                        while let Ok(Some(line)) = reader.next_line().await {
-                            // 使用同步锁写入
+                        use tokio::io::AsyncReadExt;
+                        let mut out_reader = BufReader::new(stdout).lines();
+                        let mut err_reader = BufReader::new(stderr).lines();
+                        // 辅助函数
+                        fn append_log(logs: &Arc<RwLock<VecDeque<String>>>, line: String,glob_send: Sender<GlobalEvent>) {
                             if let Ok(mut l) = logs.write() {
                                 l.push_back(line);
-                                if l.len() > desc.log_limit.unwrap_or(1000) { l.pop_front(); }
+                                // ... limit check
+                                let _ = glob_send.send(GlobalEvent::Data { key: "rend", data: DynamicPayload(Arc::new(())) });
+                            }
+                        }
+                        loop {
+                            let glob_send_a = glob_send.clone();
+                            let glob_send_b = glob_send.clone();                            
+                            tokio::select! {
+                                line = out_reader.next_line() => {
+                                    if let Ok(Some(l)) = line { append_log(&logs, l ,glob_send_a); } else { break; }
+                                }
+                                line = err_reader.next_line() => {
+                                    if let Ok(Some(l)) = line { append_log(&logs, format!("[ERR] {}", l),glob_send_b); } else { break; }
+                                }
                             }
                         }
                     });
 
-                    // 监听控制信号或等待进程结束
-                    tokio::select! {
-                        status = child.wait() => {
-                            // 进程结束逻辑
+
+                    let mut is_manual_stop = false;
+
+                    let exit_result = tokio::select! {
+                        res = child.wait() => res,
+                        Some(TaskControlMsg::Stop) = rx.recv() => {
+                            is_manual_stop = true; // 标记为手动停止
+                            let _ = child.kill().await;
+                            child.wait().await // 确保进程资源被回收
                         }
-                        Some(msg) = rx.recv() => {
-                            if let TaskControlMsg::Stop = msg {
-                                let _ = child.kill().await;
+                    };
+
+                    let mut s = status_lock.write().unwrap();
+                    match exit_result {
+                        Ok(status) => {
+                            if is_manual_stop || status.success() {
+                                // 手动停止或正常退出 (exit code 0)
+                                *s = TaskStatus::Stopped;
+                            } else {
+                                // 非正常退出
+                                let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "Killed by signal".into());
+                                *s = TaskStatus::Failed(format!("Exit Code: {}", code));
+                                
+                                // 只有在非手动停止且配置了 Always 时才重启
+                                if let Some(RestartPolicy::Always) = desc.restart_policy {
+                                    // 这里触发重启逻辑...
+                                }
                             }
+                        }
+                        Err(e) => {
+                            *s = TaskStatus::Failed(e.to_string());
                         }
                     }
                 }
                 Err(e) => {
-                    // 处理失败状态
+                    let mut s = status_lock.write().unwrap();
+                    *s = TaskStatus::Failed(e.to_string());
                 }
             }
         });
-
-        task.status = TaskStatus::Running { pid: 0, start_time: std::time::Instant::now() };
+        let _ = self.glob_send.send(GlobalEvent::Data { key: "rend", data: DynamicPayload(Arc::new(())) });
     }
+
+
 }
 
 
 //4. 渲染与交互细节
 // 使用你提到的迭代器模式重构渲染函数。
 impl TaskControlComponent {
+    // --- 界面修改：上下排列布局 ---
     fn render_main_view(&mut self, f: &mut Frame, area: Rect) {
-        let mut chunks = Layout::horizontal([
-            Constraint::Percentage(40), // 左侧列表
-            Constraint::Percentage(60), // 右侧详情
+        let chunks = Layout::vertical([
+            Constraint::Percentage(50), // 上方任务列表
+            Constraint::Percentage(50), // 下方详情面板
         ]).split(area);
         let mut chunks = chunks.into_iter();
 
-        // 1. 渲染任务列表
+        // 1. 任务列表
         let items: Vec<ListItem> = self.tasks.iter().enumerate().map(|(i, t)| {
-            let style = if i == self.selected_idx {
-                Style::default().bg(Color::DarkGray).fg(Color::Yellow)
-            } else {
-                Style::default()
+            let is_selected = i == self.selected_idx;
+            
+            // 状态文字化
+            let status_guard = t.status.read().unwrap(); // 获取当前状态快照
+            let (status_text, status_style) = match &*status_guard {
+                TaskStatus::Running { .. } => (" RUNNING ", Style::default().bg(Color::Green).fg(Color::Black)),
+                TaskStatus::Stopped => (" STOPPED ", Style::default().bg(Color::DarkGray).fg(Color::White)),
+                TaskStatus::Failed(_) => (" FAILED  ", Style::default().bg(Color::Red).fg(Color::White)),
             };
-            let status_sym = match t.status {
-                TaskStatus::Running { .. } => Span::styled(" ● ", Style::default().fg(Color::Green)),
-                TaskStatus::Stopped => Span::styled(" ○ ", Style::default().fg(Color::Gray)),
-                TaskStatus::Failed(_) => Span::styled(" ✘ ", Style::default().fg(Color::Red)),
-            };
-            ListItem::new(Line::from(vec![status_sym, Span::raw(&t.desc.name)])).style(style)
+
+            let mut line = Line::from(vec![
+                Span::styled(status_text, status_style),
+                Span::raw(format!(" {:<20}", t.desc.name)),
+                Span::styled(format!(" [{}]", t.desc.group), Style::default().fg(Color::DarkGray)),
+            ]);
+
+            if is_selected {
+                line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED).fg(Color::Yellow));
+            }
+            ListItem::new(line)
         }).collect();
 
         if let Some(a) = chunks.next() {
-            f.render_widget(List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks ")), *a);
+            f.render_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title(" ⚙️ Task Manager "))
+                    .highlight_symbol(">> "), 
+                *a
+            );
         }
 
-        // 2. 渲染右侧详情区
+        // 2. 详情面板
         if let Some(a) = chunks.next() {
             if let Some(task) = self.tasks.get(self.selected_idx) {
+
+                let status_guard = task.status.read().unwrap(); 
+        
+                let status_str = match &*status_guard {
+                    TaskStatus::Running { pid, start_time } => {
+                        let elapsed = start_time.elapsed().as_secs();
+                        format!("Running (PID: {}) - Uptime: {}s", pid, elapsed)
+                    },
+                    TaskStatus::Failed(err) => format!("Failed: {}", err),
+                    TaskStatus::Stopped => "Inactive / Stopped".to_string(),
+                };
+
                 let details = vec![
-                    Line::from(vec![Span::raw("ID: "), Span::raw(&task.desc.id)]),
-                    Line::from(vec![Span::raw("Command: "), Span::raw(&task.desc.command)]),
-                    Line::from(vec![Span::raw("Args: "), Span::raw(format!("{:?}", task.desc.args))]),
+                    Line::from(vec![Span::styled("● NAME:    ", Style::default().fg(Color::Cyan)), Span::raw(&task.desc.name)]),
+                    Line::from(vec![Span::styled("● STATUS:  ", Style::default().fg(Color::Cyan)), Span::raw(status_str)]),
+                    Line::from(vec![Span::styled("● COMMAND: ", Style::default().fg(Color::Cyan)), Span::raw(&task.desc.command)]),
+                    Line::from(vec![Span::styled("● ARGS:    ", Style::default().fg(Color::Cyan)), Span::raw(format!("{:?}", task.desc.args))]),
+                    Line::from(""),
+                    Line::from(Span::styled(" [x] Start/Stop   [Enter] View Logs   [↑/↓] Navigate ", Style::default().bg(Color::Blue).fg(Color::White))),
                 ];
-                f.render_widget(Paragraph::new(details).block(Block::default().borders(Borders::ALL).title(" Detail ")), *a);
+                f.render_widget(Paragraph::new(details).block(Block::default().borders(Borders::ALL).title(" 📋 Task Detail ")), *a);
             }
         }
     }
 
+
+
+    // --- 操作修改：按键映射 ---
     fn handle_list_keys(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -252,12 +395,13 @@ impl TaskControlComponent {
                 self.selected_idx = self.selected_idx.checked_sub(1).unwrap_or(self.tasks.len() - 1);
                 true
             }
-            KeyCode::Enter => {
-                // Toggle Start/Stop 逻辑
-                self.start_task(self.selected_idx);
+            // 修改：按下 x 启动或终止
+            KeyCode::Char('x') => {
+                self.start_or_stop_task(self.selected_idx);
                 true
             }
-            KeyCode::Char('l') => {
+            // 修改：按下 Enter 查看日志
+            KeyCode::Enter => {
                 self.view_mode = ViewMode::Log;
                 true
             }
@@ -266,20 +410,7 @@ impl TaskControlComponent {
     }
 
     fn render_full_log(&mut self, f: &mut Frame, area: Rect) {
-    //     if let Some(task) = self.tasks.get(self.selected_idx) {
-    //         // 注意：这里需要同步锁定 logs 进行渲染
-    //         let logs = task.logs.blocking_read();
-    //         let log_lines: Vec<Line> = logs.iter().map(|s| Line::from(s.as_str())).collect();
-            
-    //         f.render_widget(
-    //             Paragraph::new(log_lines)
-    //                 .block(Block::default().borders(Borders::ALL).title(format!(" Logs: {} (Esc to Back) ", task.desc.name)))
-    //                 .scroll((self.log_scroll, 0)),
-    //             area
-    //         );
-    //     }
-    // }
-        // 第 268 行修改如下：
+
         if let Some(task) = self.tasks.get(self.selected_idx) {
             // 使用 std 的 read()，它不会引起 Tokio Panic
             if let Ok(logs) = task.logs.read() {

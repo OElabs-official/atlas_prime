@@ -1,4 +1,5 @@
 use crossterm::event::KeyCode;
+use directories::UserDirs;
 use ratatui::style::Color;
 
 
@@ -138,3 +139,72 @@ pub const MAIN_LAYOUT: [Constraint; 3] = [
 ];
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+
+pub const TASK_RAW_JSON : &str = r#"[
+    {"id": "ps", "name": "ProcessList", "command": "ps", "args": ["aux"], "autostart": false, "group": "Srv", "log_limit": 1024},    
+    {"id": "x11", "name": "Start X Server", "command": "startx", "args": [], "autostart": false, "group": "Sys", "log_limit": 100},
+    {
+    "id": "backup_arch",
+    "name": "Backup ArchLinux",
+    "command": "sh",
+    "args": ["-c", "proot-distro backup archlinux --output ~/archlinux_backup_$(date +%Y_%m_%d).tar"],
+    "autostart": false,
+    "group": "HEAVY",
+    "restart_policy": "Warn",
+    "log_limit": 500
+  },
+  {
+    "id": "miniserve",
+    "name": "File Server (Miniserve)",
+    "command": "miniserve",
+    "args": ["-p", "13670", "-u", "-H", "-U", "-o","overwrite", "-r", "-g", "-C", "-D", "-W", "."],
+    "autostart": false,
+    "group": "SERVICE",
+    "restart_policy": "Always",
+    "log_limit": 1000
+  },
+  {
+    "id": "tx11",
+    "name": "Termux X11 Display",
+    "command": "termux-x11",
+    "args": [":0", "-xstartup", "dbus-launch --exit-with-session startlxqt"],
+    "autostart": false,
+    "group": "LIGHT",
+    "restart_policy": "Never",
+    "log_limit": 200
+  },
+  {
+    "id": "backup_codex",
+    "name": "Backup Code-X",
+    "command": "tar",
+    "args": ["-cvf", "code-x_backup.tar", "code-x"],
+    "autostart": false,
+    "group": "HEAVY",
+    "restart_policy": "Warn",
+    "log_limit": 500
+  }
+]"#;
+
+
+
+use std::sync::OnceLock;
+use std::path::PathBuf;
+
+// 使用标准库原生的 OnceLock 定义全局静态变量
+static SCRIPTS_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn get_script_dir() -> &'static PathBuf {
+    SCRIPTS_PATH.get_or_init(|| {
+        let user_dirs = UserDirs::new().expect("Could not find user directories");
+        // 获取用户主目录下的 script 文件夹 (例如: /home/user/script)
+        let mut path = user_dirs.home_dir().to_path_buf();
+        path.push("script");
+        
+        // 自动创建文件夹，如果不存在的话
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(&path);
+        }
+        path
+    })
+}
