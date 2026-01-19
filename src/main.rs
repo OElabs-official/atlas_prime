@@ -8,6 +8,9 @@ mod message;
 
 use crossterm::event::KeyModifiers;
 use notify::{RecursiveMode, Watcher};
+use ratatui::widgets::{Block, Paragraph};
+use ratatui_image::Resize;
+use std::error::Error;
 use std::path::Path;
 use tokio::sync::broadcast;
 
@@ -181,9 +184,15 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 终端初始化 ---
     enable_raw_mode()?;
+    
+    // --- 2. 显示启动屏 ---
+    // 这里如果加载失败，我们通常选择忽略并继续启动 App
+
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    let _ = show_splash(&mut terminal);    
     let mut reader = EventStream::new(); // 将 crossterm 事件转为异步流
     // let mut render_interval = interval(Duration::from_millis(8));
     // let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -284,3 +293,153 @@ Async Stream,reader (EventStream),终端 -> 主循环,用户交互输入。将�
 Internal MPSC,info.rx (如果有),内部任务 -> 组件,组件私有流。用于组件内部的特定任务（如你之前代码中单独采样的 CPU 频率）。
 
 */
+use std::time::{ Instant};
+use ratatui::prelude::*;
+
+fn show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> 
+where B::Error: 'static {
+    let img_path = "welcome.png";
+    let dyn_img = image::open(img_path)?;
+
+    // 强制使用 halfblocks 模式进行测试，如果这个能居中，再切回 from_query_stdio
+    // Halfblocks 是由字符组成的，Ratatui 对它的控制力最强
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| {
+        Picker::halfblocks()
+    });
+    let start_time = std::time::Instant::now();
+    let duration = std::time::Duration::from_secs(5);
+
+    while start_time.elapsed() < duration {
+        terminal.draw(|f| {
+            let full_area = f.area();
+            
+            // 1. 我们先创建一个 Paragraph 占满全屏，确保背景干净
+            f.render_widget(Block::default().bg(Color::Black), full_area);
+
+            // 2. 动态计算图片尺寸 (保持 1:1)
+            // 假设高度占屏幕 60%
+            let h = (full_area.height as f32 * 0.5 ) as u16;
+            let w = h ; // 字符宽度补偿
+
+            // 3. 使用嵌套 Layout 强行定位中心 Rect
+            let vertical_layout = Layout::vertical([
+                Constraint::Fill(1),      // 上边距
+                Constraint::Length(h),    // 图片高度
+                Constraint::Fill(1),      // 下边距
+            ]).split(full_area);
+
+            let center_area = Layout::horizontal([
+                Constraint::Fill(1),      // 左边距
+                Constraint::Length(w),    // 图片宽度
+                Constraint::Fill(1),      // 右边距
+            ]).split(vertical_layout[1])[1];
+
+            // 4. 关键点：我们不仅给 Image 传 center_area，
+            // 还要确保 Protocol 是针对 center_area 的尺寸生成的
+            if let Ok(protocol) = picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None)) {
+                let image_widget = Image::new(&protocol);
+                
+                // 渲染到 center_area
+                f.render_widget(image_widget, center_area);
+            }
+            
+            // 5. 提示文字放在最下方
+            let text = Paragraph::new("Welcome to AtlasPrime")
+                .alignment(Alignment::Center);
+            f.render_widget(text, vertical_layout[2]);
+        })?;
+
+        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+            if let crossterm::event::Event::Key(_) = crossterm::event::read()? { break; }
+        }
+    }
+    terminal.clear()?;
+    Ok(())
+}
+// 注意：现在主要的 widget 叫 Image
+use ratatui_image::{picker::Picker, protocol::Protocol, Image};
+// 使用泛型 B 并返回通用的 Box<dyn Error>
+fn _show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> 
+where /*
+这个错误是因为 Rust 的编译器在处理 Backend::Error 这一关联类型时，无法确定它是否包含非 'static 的引用。在 terminal.draw(...)? 这里的问号表达式会将 Backend::Error 转换为 Box<dyn Error>，而 Box<dyn Error> 默认要求其内容满足 'static 约束。
+
+按照编译器的提示，我们需要给泛型 B 增加一个 where 子句约束。 */
+    B::Error: 'static {
+    // 1. 加载图片
+    let img_path = "welcome.png";
+    let dyn_img = image::open(img_path)?;
+
+    // 2. 获取 Rect 区域
+    // 在最新版 ratatui 中，size() 返回 Rect
+    let size = terminal.size()?;
+    let area = Rect::new(0, 0, size.width, size.height);
+    // 3. 初始化 Picker
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| {
+        Picker::halfblocks()
+    });
+    // let mut picker = Picker::halfblocks();
+    // 4. 创建协议对象
+    // 注意：Resize::Fit(None) 适配新版 API
+    let mut image_protocol = picker.new_protocol(dyn_img.clone(), area, Resize::Fit(None))?;
+  
+
+    let start_time = std::time::Instant::now();
+    let duration = std::time::Duration::from_secs(5);
+
+    while start_time.elapsed() < duration {
+        terminal.draw(|f| {
+            let full_area = f.area();
+            
+// --- 核心逻辑：计算 1:1 比例的居中区域 ---
+            // 终端一个字符高度约等于两个宽度。对于 1:1 的图片：
+            // 我们假设高度占据屏幕的 80%
+            let img_height = (full_area.height as f32 * 0.8) as u16;
+            // 因为 halfblock 一个字符有两个像素点，为了视觉上 1:1，
+            // 宽度通常需要是高度的 2 倍（字符数）左右，但这里我们让它适配高度
+            let img_width = img_height * 2; 
+
+            // 确保不会溢出屏幕
+            let final_h = img_height.min(full_area.height - 2);
+            let final_w = img_width.min(full_area.width - 2);
+
+            // 使用 Layout 居中
+            let v_chunks = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(final_h),
+                Constraint::Fill(1),
+            ]).split(full_area);
+
+            let center_area = Layout::horizontal([
+                Constraint::Fill(1),
+                Constraint::Length(final_w),
+                Constraint::Fill(1),
+            ]).split(v_chunks[1])[1];
+
+            // 5. 渲染控件
+// Resize::Fit(None) 会在 center_area 内尽可能大地缩放图片并保持比例
+            if let Ok(protocol) = picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None)) {
+                let image_widget = Image::new(&protocol);
+                f.render_widget(image_widget, center_area);
+            }
+            
+            // 可选：添加文字提示
+            f.render_widget(
+                Paragraph::new("Press any key to skip")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::DarkGray)),
+                v_chunks[2]
+            );
+        })?;
+
+        // 6. 事件轮询
+        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+            if let crossterm::event::Event::Key(_) = crossterm::event::read()? {
+                break;
+            }
+        }
+    }
+    
+    // 清理缓冲区，为进入主程序做准备
+    terminal.clear()?;
+    Ok(())
+}
