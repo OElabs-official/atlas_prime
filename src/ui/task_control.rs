@@ -4,13 +4,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock as ARwLock};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _, BufReader};
 use crate::constants::{TASK_RAW_JSON, get_script_dir};
 use crate::message::{DynamicPayload, GlobalEvent, StatusLevel};
 use crate::{app::{GlobRecv, GlobSend}, config::SharedConfig, ui::component::Component};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::sync::RwLock;
+use ansi_to_tui::IntoText; // 引入转换 trait
+
 
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -76,7 +78,9 @@ pub struct TaskControlComponent {
     view_mode: ViewMode,
     log_scroll: u16,
     glob_send: GlobSend,
-    glob_recv: GlobRecv
+    glob_recv: GlobRecv,
+
+    input : String,
 }
 
 #[derive(PartialEq)]
@@ -106,7 +110,7 @@ impl Component for TaskControlComponent {
                         name: format!("🦕 {}", file_stem), // 增加图标区分
                         command: "deno".to_string(),
                         // 常用参数：-A (全权限), run, 脚本路径
-                        args: vec!["run".into(), "-A".into(), "--unstable-*".into(), path.to_string_lossy().into_owned()],
+                        args: vec!["run".into(), "-A".into(), "--unstable-kv".into(), "--unstable-cron".into(),path.to_string_lossy().into_owned()],
                         cwd: Some(script_dir.to_string_lossy().to_string()),
                         envs: None,
                         autostart: false, // 脚本任务建议手动触发
@@ -138,7 +142,8 @@ impl Component for TaskControlComponent {
             view_mode: ViewMode::List,
             log_scroll: 0,
             glob_send,
-            glob_recv
+            glob_recv,
+            input : Default::default(),
         };
 
         // 处理自动启动
@@ -225,8 +230,6 @@ impl TaskControlComponent {
             match cmd.spawn() {
                 Ok(mut child) => {
                     let pid = child.id().expect("Failed to get PID");
-                    
-                    // 【关键更新】：更新 PID 到状态
                     {
                         let mut s = status_lock.write().unwrap();
                         *s = TaskStatus::Running { pid, start_time: std::time::Instant::now() };
@@ -234,21 +237,15 @@ impl TaskControlComponent {
 
                     let stdout = child.stdout.take().unwrap();
                     let stderr = child.stderr.take().unwrap(); // 也要捕获错误输出，否则看不到报错
+                    let mut stdin = child.stdin.take().unwrap(); // 获取 stdin 句柄
 
-                    // 日志合并读取
-                    let logs_clone = logs.clone();
+                    // --- 1. 日志读取协程 (继续保留，因为它只读管道) ---
+                    let logs_for_io = logs.clone();
+                    let glob_for_io = glob_send.clone();
                     tokio::spawn(async move {
-                        use tokio::io::AsyncReadExt;
+                        // use tokio::io::AsyncReadExt as _;
                         let mut out_reader = BufReader::new(stdout).lines();
                         let mut err_reader = BufReader::new(stderr).lines();
-                        // 辅助函数
-                        fn append_log(logs: &Arc<RwLock<VecDeque<String>>>, line: String,glob_send: Sender<GlobalEvent>) {
-                            if let Ok(mut l) = logs.write() {
-                                l.push_back(line);
-                                // ... limit check
-                                let _ = glob_send.send(GlobalEvent::Data { key: "rend", data: DynamicPayload(Arc::new(())) });
-                            }
-                        }
                         loop {
                             let glob_send_a = glob_send.clone();
                             let glob_send_b = glob_send.clone();                            
@@ -262,18 +259,54 @@ impl TaskControlComponent {
                             }
                         }
                     });
+                    // 辅助函数
+                    fn append_log(logs: &Arc<RwLock<VecDeque<String>>>, line: String,glob_send: Sender<GlobalEvent>) {
+                        if let Ok(mut l) = logs.write() {
+                            l.push_back(line);
+                            if l.len() > 1000 { l.pop_front(); }
+                            let _ = glob_send.send(GlobalEvent::Data { key: "rend", data: DynamicPayload(Arc::new(())) });
+                        }
+                    }                    
 
 
                     let mut is_manual_stop = false;
 
-                    let exit_result = tokio::select! {
-                        res = child.wait() => res,
-                        Some(TaskControlMsg::Stop) = rx.recv() => {
-                            is_manual_stop = true; // 标记为手动停止
-                            let _ = child.kill().await;
-                            child.wait().await // 确保进程资源被回收
+                    let exit_result = loop {
+                        tokio::select! {
+                            // 监听进程自然退出
+                            res = child.wait() => {
+                                break res;
+                            }
+                            // 监听 UI 发来的控制消息
+                            Some(msg) = rx.recv() => {
+                                match msg {
+                                    TaskControlMsg::Stdin(text) => {
+                                        let _ = stdin.write_all(text.as_bytes()).await;
+                                        let _ = stdin.write_all(b"\n").await;
+                                        let _ = stdin.flush().await;
+                                    }
+                                    TaskControlMsg::Stop => {
+                                        is_manual_stop = true;
+                                        let _ = child.kill().await;
+                                        // 继续循环，等待 child.wait() 在下一轮被触发以回收资源
+                                    }
+                                }
+                            }
                         }
                     };
+
+
+                    // let exit_result = tokio::select! {
+                    //     res = child.wait() => res,
+                    //     Some(TaskControlMsg::Stop) = rx.recv() => {
+                    //         is_manual_stop = true; // 标记为手动停止
+                    //         let _ = child.kill().await;
+                    //         child.wait().await // 确保进程资源被回收
+                    //     }
+                    // };
+
+
+
 
                     let mut s = status_lock.write().unwrap();
                     match exit_result {
@@ -408,8 +441,81 @@ impl TaskControlComponent {
             _ => false,
         }
     }
-
+    fn handle_log_keys(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.view_mode = ViewMode::List;
+                self.input.clear();
+                true
+            }
+            KeyCode::Enter => {
+                if !self.input.is_empty() {
+                    if let Some(task) = self.tasks.get(self.selected_idx) {
+                        if let Some(tx) = &task.control_tx {
+                            // 发送给进程
+                            let _ = tx.try_send(TaskControlMsg::Stdin(self.input.clone()));
+                            // 同时把输入的内容也显示在日志里，方便确认
+                            if let Ok(mut l) = task.logs.write() {
+                                l.push_back(format!(">>> {}", self.input));
+                            }
+                        }
+                    }
+                    self.input.clear();
+                }
+                true
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                true
+            }
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                true
+            }
+            // 允许通过 PageUp/Down 滚动日志
+            KeyCode::Up => { self.log_scroll = self.log_scroll.saturating_sub(1); true }
+            KeyCode::Down => { self.log_scroll = self.log_scroll.saturating_add(1); true }
+            _ => false,
+        }
+    }
     fn render_full_log(&mut self, f: &mut Frame, area: Rect) {
+        // 划分布局：上方是日志，下方是 3 行高度的输入框
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ]).split(area);
+
+        if let Some(task) = self.tasks.get(self.selected_idx) {
+            // 1. 渲染日志 (上方)
+            if let Ok(logs) = task.logs.read() {
+                let all_logs = logs.iter().cloned().collect::<Vec<_>>().join("\n");
+                
+                // 使用 ansi_to_tui 将其解析为 Ratatui 的 Text 对象
+                // 如果解析失败，回退到普通字符串显示
+                let text = all_logs.into_text().unwrap_or_else(|_| Text::raw(all_logs));
+
+                f.render_widget(
+                    Paragraph::new(text)
+                        .block(Block::default().borders(Borders::ALL).title(format!(" Logs: {} ", task.desc.name)))
+                        .scroll((self.log_scroll, 0)),
+                    chunks[0]
+                );
+            }
+
+            // 2. 渲染输入框 (下方)
+            let input_block = Paragraph::new(self.input.as_str())
+                .style(Style::default().fg(Color::Yellow))
+                .block(Block::default().borders(Borders::ALL).title(" Stdin (Press Enter to Send) "));
+            f.render_widget(input_block, chunks[1]);
+            
+            // 设置光标位置，使其看起来像个真正的输入框
+            f.set_cursor_position(
+(                chunks[1].x + self.input.len() as u16 + 1,
+                chunks[1].y + 1,)
+            );
+        }
+    }
+    fn _render_full_log(&mut self, f: &mut Frame, area: Rect) {
 
         if let Some(task) = self.tasks.get(self.selected_idx) {
             // 使用 std 的 read()，它不会引起 Tokio Panic
@@ -427,7 +533,7 @@ impl TaskControlComponent {
             }
         }
     }
-    fn handle_log_keys(&mut self, key: KeyEvent) -> bool {
+    fn _handle_log_keys(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => { self.view_mode = ViewMode::List; true }
             KeyCode::Up => { self.log_scroll = self.log_scroll.saturating_sub(1); true }

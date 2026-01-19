@@ -21,6 +21,7 @@ futures = "0.3.31"
 notify = "8.2.0"
 smart-default = "0.7.1"
 regex = "1.12.2"
+ansi-to-tui = "8.0.1"
 
 #reqwest = { version = "0.13.1", default-features = false, features = ["json", "webpki-roots"] } # for termux build
 #webpki-roots = "1.0.5"

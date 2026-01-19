@@ -18,8 +18,9 @@ impl TabId {
     pub const ALL: &[Self] = &[
         // Self::Info,
         Self::Welcome,
+        Self::TaskControl,
         Self::Info,
-        Self::TaskControl
+
         // Self::Sessions
     ];
 
@@ -142,6 +143,7 @@ pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 
 
 pub const TASK_RAW_JSON : &str = r#"[
+    {"id": "deno", "name": "🦕DenoConSole", "command": "deno", "args": [], "autostart": false, "group": "Srv", "log_limit": 4096},    
     {"id": "ps", "name": "ProcessList", "command": "ps", "args": ["aux"], "autostart": false, "group": "Srv", "log_limit": 1024},    
     {"id": "x11", "name": "Start X Server", "command": "startx", "args": [], "autostart": false, "group": "Sys", "log_limit": 100},
     {
