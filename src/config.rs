@@ -10,65 +10,11 @@ use std::sync::{Arc, OnceLock};
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::prelude::*;
+
 pub type SharedConfig = Arc<RwLock<Config>>;
 
-// --- 全局静态路径句柄 ---
-static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
-static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
-static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-pub struct AtlasPaths;
-
-impl AtlasPaths {
-    /// 初始化并获取路径映射
-    fn init() {
-        // 1. 确定配置路径 (优先检查当前程序目录下的 override)
-        let exe_dir = env::current_exe()
-            .map(|p| p.parent().unwrap().to_path_buf())
-            .unwrap_or_else(|_| PathBuf::from("."));
-
-        let override_path = exe_dir.join("atlas_cfg_override.json");
-
-        let final_config_path = if override_path.exists() {
-            override_path
-        } else {
-            // 回退到系统标准路径
-            ProjectDirs::from("", "", "atlas")
-                .map(|p| {
-                    let dir = p.config_dir().to_path_buf();
-                    let _ = fs::create_dir_all(&dir);
-                    dir.join("atlas_cfg.json")
-                })
-                .unwrap_or_else(|| PathBuf::from("atlas_cfg.json"))
-        };
-
-        CONFIG_PATH.get_or_init(|| final_config_path);
-
-        // 2. 初始化数据和缓存目录
-        if let Some(proj) = ProjectDirs::from("", "", "atlas") {
-            DATA_DIR.get_or_init(|| {
-                let path = proj.data_dir().to_path_buf();
-                let _ = fs::create_dir_all(&path);
-                path
-            });
-            CACHE_DIR.get_or_init(|| {
-                let path = proj.cache_dir().to_path_buf();
-                let _ = fs::create_dir_all(&path);
-                path
-            });
-        }
-    }
-
-    pub fn config() -> &'static PathBuf {
-        CONFIG_PATH.get_or_init(|| PathBuf::from("atlas_cfg.json"))
-    }
-    pub fn data() -> &'static PathBuf {
-        DATA_DIR.get_or_init(|| PathBuf::from("./data"))
-    }
-    pub fn cache() -> &'static PathBuf {
-        CACHE_DIR.get_or_init(|| PathBuf::from("./cache"))
-    }
-}
 
 /*
 // 在 render 时获取只读锁
@@ -165,14 +111,14 @@ fn default_refresh_rate() -> u64 { 30 }
 */
 
 impl Config {
-    fn get_path() -> Option<PathBuf> {
-        ProjectDirs::from("", "", "atlas").map(|p| {
-            let data_dir = p.data_dir().to_path_buf();
-            // 确保数据目录存在（如果不存在则创建）
-            let _ = fs::create_dir_all(&data_dir);
-            data_dir.join("config.json")
-        })
-    }
+    // fn get_path() -> Option<PathBuf> {
+    //     ProjectDirs::from("", "", "atlas").map(|p| {
+    //         let data_dir = p.data_dir().to_path_buf();
+    //         // 确保数据目录存在（如果不存在则创建）
+    //         let _ = fs::create_dir_all(&data_dir);
+    //         data_dir.join("config.json")
+    //     })
+    // }
 
     /// 损坏处理：备份并重置
     fn handle_broken_config(path: &PathBuf) {
@@ -190,29 +136,11 @@ impl Config {
         let _ = default_config.save();
     }
 
-    /// 处理损坏的配置文件：重命名为 broken_xxxx.json 并新建默认文件
-    fn _handle_broken_config(path: &PathBuf) {
-        let mut broken_path = path.clone();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        broken_path.set_file_name(format!("broken_config_{}.json", timestamp));
-
-        // 重命名旧文件
-        let _ = fs::rename(path, broken_path);
-
-        // 创建新的默认文件
-        let default_config = Self::default();
-        let _ = default_config.save();
-    }
 
     /// 核心加载逻辑：Override > System > Default
-    pub fn load() -> Self {
+    pub fn load_from_disk() -> Self {
         // 确保路径已初始化
-        AtlasPaths::init();
-        let path = AtlasPaths::config();
+        let path = &AtlasPath::get_config_path();
 
         // 1. 尝试读取
         if !path.exists() {
@@ -242,39 +170,6 @@ impl Config {
         }
     }
 
-    pub fn _load() -> Self {
-        //
-        let path = match Self::get_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
-
-        // 1. 如果文件不存在，直接初始化默认配置并保存
-        if !path.exists() {
-            let default_config = Self::default();
-            let _ = default_config.save(); // 我们稍后实现 save
-            return default_config;
-        }
-
-        // 2. 尝试读取并解析
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                match serde_json::from_str::<Self>(&content) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        // 解析失败：配置文件损坏
-                        Self::handle_broken_config(&path);
-                        eprintln!("Config parse error: {}", e);
-                        Self::default()
-                    }
-                }
-            }
-            Err(_) => {
-                // 读取文件失败（可能是权限问题）
-                Self::default()
-            }
-        }
-    }
 
     fn backup_and_recreate(path: &PathBuf) -> std::io::Result<()> {
         let timestamp = std::time::SystemTime::now()
@@ -296,7 +191,7 @@ impl Config {
         Ok(())
     }
     pub fn save(&self) -> std::io::Result<()> {
-        let path = AtlasPaths::config();
+        let path = AtlasPath::get_config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -304,13 +199,5 @@ impl Config {
         fs::write(path, content)
     }
 
-    pub fn _save(&self) -> std::io::Result<()> {
-        if let Some(path) = Self::get_path() {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(path, serde_json::to_string_pretty(self)?)?;
-        }
-        Ok(())
-    }
+
 }

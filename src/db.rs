@@ -2,11 +2,10 @@ use directories::{BaseDirs, ProjectDirs};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use surrealdb::engine::local::{Db, RocksDb};
 use surrealdb::Surreal;
+use surrealdb::engine::local::{Db, RocksDb};
 
 use crate::ui::info::AndroidBatInfo;
-
 
 // 全局数据库实例
 pub static DB: OnceLock<Surreal<Db>> = OnceLock::new();
@@ -23,12 +22,12 @@ struct TelemetryRecord {
 pub fn get_db_dir() -> &'static PathBuf {
     DB_PATH.get_or_init(|| {
         let base_dirs = BaseDirs::new().expect("无法获取系统基础目录");
-        
+
         // 获取数据根目录 (Linux/Android 为 ~/.local/share)
         let mut path = base_dirs.data_dir().to_path_buf();
-        
+
         // 直接在根目录下创建你的项目文件夹
-        path.push("monitor"); 
+        path.push("monitor");
         path.push("db");
 
         if !path.exists() {
@@ -40,21 +39,19 @@ pub fn get_db_dir() -> &'static PathBuf {
 
 pub async fn init_db() -> surrealdb::Result<()> {
     let path = get_db_dir();
-    
+
     // 修复 1: RocksDb 期待的是 PathBuf 或 &Path (实现了 IntoEndpoint)
     // 直接传入 path (它是 &PathBuf) 可能在某些版本下推导有问题
     // 建议直接使用 .as_path() 或 path 变量
     let db = Surreal::new::<RocksDb>(path.as_path()).await?;
-    
+
     db.use_ns("android").use_db("telemetry").await?;
 
     let test_content = serde_json::json!({
-        "cpu_temp": 36.5, 
-        "battery_level": 80, 
+        "cpu_temp": 36.5,
+        "battery_level": 80,
         "battery_temp": 30.0
     });
-
-
 
     // 手动插入一条测试数据
     // let _: Option<serde_json::Value> = db.create("telemetry_history")
@@ -79,28 +76,32 @@ pub async fn record_telemetry(cpu: f32, bat: u8, bat_temp: f64) {
 
         // 在 SurrealDB 中，create 某个 table 返回的是单条记录 Option<T>
         // 如果你需要插入并忽略结果，直接让它推导为 Option 即可
-        let _: Option<serde_json::Value> = db.create("telemetry_history")
+        let _: Option<serde_json::Value> = db
+            .create("telemetry_history")
             .content(record)
             .await
-            .unwrap_or(None); 
+            .unwrap_or(None);
     }
 }
-
 
 pub async fn rotate_data() -> surrealdb::Result<()> {
     if let Some(db) = DB.get() {
         // 例如：只保留最后 10000 条数据，防止手机存储被撑爆
-        let _ = db.query("DELETE telemetry_history ORDER BY id ASC LIMIT 1000").await?;
+        let _ = db
+            .query("DELETE telemetry_history ORDER BY id ASC LIMIT 1000")
+            .await?;
     }
     Ok(())
 }
-
 
 /// 获取最近的历史记录
 pub async fn _get_history(limit: usize) -> Vec<serde_json::Value> {
     if let Some(db) = DB.get() {
         // 尝试查询所有数据
-        let sql = format!("SELECT * FROM telemetry_history ORDER BY id DESC LIMIT {}", limit);
+        let sql = format!(
+            "SELECT * FROM telemetry_history ORDER BY id DESC LIMIT {}",
+            limit
+        );
         let mut res = match db.query(sql).await {
             Ok(r) => r,
             Err(e) => {
@@ -114,7 +115,7 @@ pub async fn _get_history(limit: usize) -> Vec<serde_json::Value> {
             Ok(v) => {
                 // println!("DEBUG: 数据库查询到 {} 条记录", v.length());
                 v
-            },
+            }
             Err(e) => {
                 eprintln!("解析数据失败: {}", e);
                 vec![]
@@ -130,10 +131,10 @@ pub async fn get_history(limit: usize) -> Vec<serde_json::Value> {
         // 使用 type::string(id) 将 RecordId 显式转换为普通 String
         // 同时使用 VALUE 关键字获取干净的对象数组
         let sql = format!(
-            "SELECT *, type::string(id) AS id FROM telemetry_history ORDER BY id DESC LIMIT {}", 
+            "SELECT *, type::string(id) AS id FROM telemetry_history ORDER BY id DESC LIMIT {}",
             limit
         );
-        
+
         let mut res = match db.query(sql).await {
             Ok(r) => r,
             Err(e) => {
@@ -156,19 +157,22 @@ pub async fn get_history(limit: usize) -> Vec<serde_json::Value> {
     }
 }
 
-
 // 这里的类型要对应你的 (u8, String, f64) 结构
 pub async fn get_bat_history_ui(limit: usize) -> Vec<AndroidBatInfo> {
     let raw_data = get_history(limit).await;
-    raw_data.into_iter().map(|v| {
-        (
-            v.get("battery_level").and_then(|l| l.as_u64()).unwrap_or(0) as u8,
-            "History".to_string(), // 数据库里没存状态字符串，可以用占位符
-            v.get("battery_temp").and_then(|t| t.as_f64()).unwrap_or(0.0),
-        )
-    }).collect()
+    raw_data
+        .into_iter()
+        .map(|v| {
+            (
+                v.get("battery_level").and_then(|l| l.as_u64()).unwrap_or(0) as u8,
+                "History".to_string(), // 数据库里没存状态字符串，可以用占位符
+                v.get("battery_temp")
+                    .and_then(|t| t.as_f64())
+                    .unwrap_or(0.0),
+            )
+        })
+        .collect()
 }
-
 
 /*
 3. 处理“数据变大”的策略：索引与分区

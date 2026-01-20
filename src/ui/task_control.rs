@@ -1,4 +1,6 @@
-use crate::constants::{TASK_RAW_JSON, get_script_dir};
+use crate::config::Config;
+use crate::prelude::*;
+use crate::constans::{TASK_RAW_JSON};
 use crate::message::{DynamicPayload, GlobalEvent, StatusLevel};
 use crate::{
     app::{GlobRecv, GlobSend},
@@ -94,15 +96,15 @@ enum ViewMode {
 }
 
 impl Component for TaskControlComponent {
-    fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self {
+    fn init() -> Self {
         // 模拟从 JSON 加载过程（实际开发中可使用 std::fs::read_to_string）
 
         let mut descs: Vec<TaskDescriptor> =
             serde_json::from_str(TASK_RAW_JSON).unwrap_or_default();
 
         // --- 新增：扫描 scripts 目录 ---
-        let script_dir = get_script_dir();
-        if let Ok(entries) = std::fs::read_dir(script_dir) {
+        let script_dir = AtlasPath::get_script_dir();
+        if let Ok(entries) = std::fs::read_dir(&script_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 // 逻辑：必须是文件，且后缀是 .ts
@@ -150,13 +152,13 @@ impl Component for TaskControlComponent {
         }
 
         let mut component = Self {
-            config,
+            config:Config::get(),
             tasks,
             selected_idx: 0,
             view_mode: ViewMode::List,
             log_scroll: 0,
-            glob_send,
-            glob_recv,
+            glob_send:GlobIO::send(),
+            glob_recv:GlobIO::recv(),
             input: Default::default(),
         };
 

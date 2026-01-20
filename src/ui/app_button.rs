@@ -1,9 +1,5 @@
 use crate::{
-    app::{GlobRecv, GlobSend},
-    config::SharedConfig,
-    constants::SPINNER_FRAMES,
-    message::{GlobalEvent, Progress, StatusLevel},
-    ui::component::Component,
+    app::{GlobRecv, GlobSend}, config::SharedConfig, constans::SPINNER_FRAMES, message::{GlobalEvent, Progress, StatusLevel}, prelude::GlobIO, ui::component::Component
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -15,14 +11,16 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 
-pub struct HintComponent {
-    pub config: SharedConfig,
-}
+pub struct HintComponent; 
+// {
+    // pub config: SharedConfig,
+// 
 
 impl Component for HintComponent {
-    fn init(config: SharedConfig, _send: GlobSend, _recv: GlobRecv) -> Self {
-        Self { config }
-    }
+    // fn init(config: SharedConfig, _send: GlobSend, _recv: GlobRecv) -> Self {
+    //     Self { config }
+    // }
+    fn init() -> Self{Self}
 
     fn update(&mut self) -> bool {
         false
@@ -65,14 +63,14 @@ impl Component for HintComponent {
 
 pub struct NotifyComponent {
     current: Option<(String, StatusLevel, Instant)>,
-    rx: GlobRecv,
+    recv: GlobRecv,
 }
 
 impl Component for NotifyComponent {
-    fn init(_config: SharedConfig, _send: GlobSend, recv: GlobRecv) -> Self {
+    fn init() -> Self {
         Self {
             current: None,
-            rx: recv,
+            recv: GlobIO::recv(),
         }
     }
 
@@ -80,7 +78,7 @@ impl Component for NotifyComponent {
         let mut changed = false;
 
         // 1. 接收新消息
-        while let Ok(msg) = self.rx.try_recv() {
+        while let Ok(msg) = self.recv.try_recv() {
             if let GlobalEvent::Status(content, level, _) = msg {
                 self.current = Some((content, level, Instant::now()));
                 changed = true;
@@ -120,22 +118,22 @@ impl Component for NotifyComponent {
 
 pub struct ProgressComponent {
     state: Option<(Progress, StatusLevel)>,
-    rx: GlobRecv,
+    recv: GlobRecv,
     tick_count: u64,
 }
 
 impl Component for ProgressComponent {
-    fn init(_config: SharedConfig, _send: GlobSend, recv: GlobRecv) -> Self {
+    fn init() -> Self {
         Self {
             state: None,
-            rx: recv,
+            recv: GlobIO::recv(),
             tick_count: 0,
         }
     }
 
     fn update(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(msg) = self.rx.try_recv() {
+        while let Ok(msg) = self.recv.try_recv() {
             if let GlobalEvent::Status(_, level, Some(prog)) = msg {
                 self.state = Some((prog, level));
                 changed = true;
@@ -226,25 +224,10 @@ impl Component for ProgressComponent {
     }
 }
 
-pub fn button_components_init(
-    config: SharedConfig,
-    glob_send: GlobSend,
-) -> Vec<Box<dyn Component>> {
+pub fn button_components_init() -> Vec<Box<dyn Component>> {
     vec![
-        Box::new(HintComponent::init(
-            config.clone(),
-            glob_send.clone(),
-            glob_send.subscribe(),
-        )),
-        Box::new(NotifyComponent::init(
-            config.clone(),
-            glob_send.clone(),
-            glob_send.subscribe(),
-        )),
-        Box::new(ProgressComponent::init(
-            config.clone(),
-            glob_send.clone(),
-            glob_send.subscribe(),
-        )),
+        Box::new(HintComponent::init()),
+        Box::new(NotifyComponent::init()),
+        Box::new(ProgressComponent::init()),
     ]
 }

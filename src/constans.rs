@@ -2,6 +2,18 @@ use crossterm::event::KeyCode;
 use directories::{ProjectDirs, UserDirs};
 use ratatui::style::Color;
 
+use ratatui::layout::Constraint;
+use surrealdb::Surreal;
+use surrealdb::engine::local::{Db, RocksDb};
+
+use crate::app::GlobSend;
+use crate::config::SharedConfig;
+use crate::ui::component::Component;
+use crate::ui::info::InfoComponent;
+use crate::ui::task_control::TaskControlComponent;
+use crate::ui::welcome::WelcomeComponent;
+
+
 /// 2. 标签页唯一标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabId {
@@ -31,31 +43,19 @@ impl TabId {
         }
     }
 
-    pub fn init(config: SharedConfig, glob_send: GlobSend) -> Vec<Box<dyn Component>> {
+    pub fn init() -> Vec<Box<dyn Component>> {
         let mut output = vec![];
         for id in TabId::ALL.iter() {
-            let comp = id.gen_component(config.clone(), glob_send.clone());
+            let comp = id.gen_component();
             output.push(comp);
         }
         output
     }
-    fn gen_component(&self, config: SharedConfig, glob_send: GlobSend) -> Box<dyn Component> {
+    fn gen_component(&self) -> Box<dyn Component> {
         match self {
-            Self::Welcome => Box::new(WelcomeComponent::init(
-                config,
-                glob_send.clone(),
-                glob_send.subscribe(),
-            )),
-            Self::Info => Box::new(InfoComponent::init(
-                config,
-                glob_send.clone(),
-                glob_send.subscribe(),
-            )),
-            Self::TaskControl => Box::new(TaskControlComponent::init(
-                config,
-                glob_send.clone(),
-                glob_send.subscribe(),
-            )),
+            Self::Welcome => Box::new(WelcomeComponent::init()),
+            Self::Info => Box::new(InfoComponent::init()),
+            Self::TaskControl => Box::new(TaskControlComponent::init()),
             // Self::Sessions => " [2] Session Manager ",
         }
     }
@@ -108,17 +108,6 @@ pub const INFO_UPDATE_INTERVAL_BASE: u64 = 3;
 pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 5;
 pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 100;
 pub const HISTORY_CAP: usize = 1024;
-
-use ratatui::layout::Constraint;
-use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, RocksDb};
-
-use crate::app::GlobSend;
-use crate::config::SharedConfig;
-use crate::ui::component::Component;
-use crate::ui::info::InfoComponent;
-use crate::ui::task_control::TaskControlComponent;
-use crate::ui::welcome::WelcomeComponent;
 
 /// 底部状态栏的横向布局约束
 /// 0: 按键提示 (Left)
@@ -185,26 +174,3 @@ pub const TASK_RAW_JSON: &str = r#"[
     "log_limit": 500
   }
 ]"#;
-
-use std::path::PathBuf;
-use std::sync::OnceLock;
-
-// 使用标准库原生的 OnceLock 定义全局静态变量
-static SCRIPTS_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-pub fn get_script_dir() -> &'static PathBuf {
-    SCRIPTS_PATH.get_or_init(|| {
-        let user_dirs = UserDirs::new().expect("Could not find user directories");
-        // 获取用户主目录下的 script 文件夹 (例如: /home/user/script)
-        let mut path = user_dirs.home_dir().to_path_buf();
-        path.push("script");
-
-        // 自动创建文件夹，如果不存在的话
-        if !path.exists() {
-            let _ = std::fs::create_dir_all(&path);
-        }
-        path
-    })
-}
-
-

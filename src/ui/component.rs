@@ -14,9 +14,12 @@ pub trait Component: Send + Sync {
     // 事件处理：返回 true 表示消费了事件，阻止冒泡
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool;
 
-    fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self
+    fn init() -> Self
     where
         Self: Sized;
+    // fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self
+    // where
+    //     Self: Sized;
 }
 /*
 “consider moving update to another trait”。 在大型项目中，渲染（Render）和逻辑更新（Update）的生命周期其实是可以分离的。我们可以定义一个不需要动态分发的后台逻辑层。

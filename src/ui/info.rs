@@ -1,12 +1,8 @@
 use crate::{
-    app::{GlobRecv, GlobSend},
-    config::{AppColor, Config, SharedConfig},
-    constants::{
+    app::{GlobRecv, GlobSend}, config::{AppColor, Config, SharedConfig}, constans::{
         HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES,
         INFO_UPDATE_INTERVAL_SLOWEST,
-    },
-    message::{DynamicPayload, GlobalEvent},
-    ui::component::Component,
+    }, message::{DynamicPayload, GlobalEvent}, prelude::{AtlasPath, GlobIO}, ui::component::Component
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use directories::{BaseDirs, UserDirs};
@@ -29,9 +25,7 @@ type IPData = (Vec<String>, Vec<String>);
 type DiskIP = (Vec<DiskInf>, IPData);
 type DiskInf = (String, u64, u64, String);
 pub struct InfoComponent {
-    _config: SharedConfig,
     glob_recv: GlobRecv,
-    _glob_send: GlobSend,
 
     // 数据存储
     mount_points: Vec<DiskInf>,
@@ -339,15 +333,16 @@ impl InfoComponent {
         );
     }
 
-
     /// 在info 初始化时建立长期任务，定期发送系统信息
     /// 每一个小周期发送内存和swap数据元组
     /// 每一个大周期发送磁盘数据向量和ip数据向量    
-    fn spawn_monitor_task(glob_send: GlobSend) {
+    fn spawn_monitor_task() {
         tokio::spawn(async move {
+            let glob_send = GlobIO::send();
             let mut sys = System::new_all();
             let mut tick_count: u64 = 0;
-            let mut interval =  tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
 
             // --- [新增] 启动预热：在进入循环前先同步一次数据，让 UI 瞬间填满 ---
             Self::perform_full_sync(&mut sys, &glob_send);
@@ -404,12 +399,13 @@ impl InfoComponent {
                                 data: DynamicPayload(Arc::new(bat_pkg)),
                             });
                             tokio::spawn(async move {
-                            crate::db::record_telemetry(
-                                cpu_val.1, 
-                                bat_info.percentage, 
-                                bat_info.temperature
-                            ).await;
-                        });
+                                crate::db::record_telemetry(
+                                    cpu_val.1,
+                                    bat_info.percentage,
+                                    bat_info.temperature,
+                                )
+                                .await;
+                            });
                         }
                     }
                 }
@@ -517,22 +513,15 @@ impl InfoComponent {
 }
 
 impl Component for InfoComponent {
-    fn init(
-        config: SharedConfig,
-        glob_send: crate::app::GlobSend,
-        glob_recv: crate::app::GlobRecv,
-    ) -> Self
+    fn init() -> Self
     where
         Self: Sized,
     {
-
         // --- [新增] 同步读取数据库历史数据 ---
         // 获取当前 tokio runtime 句柄来执行异步任务
         let handle = tokio::runtime::Handle::current();
         let db_history = tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                crate::db::get_bat_history_ui(HISTORY_CAP).await
-            })
+            handle.block_on(async { crate::db::get_bat_history_ui(HISTORY_CAP).await })
         });
 
         // 将数据库数据转为 VecDeque，并根据 HISTORY_CAP 填充/截断
@@ -546,7 +535,6 @@ impl Component for InfoComponent {
             bat_history = bat_history.split_off(bat_history.len() - HISTORY_CAP);
         }
 
-
         // 1. 创建组件实例时先订阅，用于后续 update 中接收数据
 
         let mut sys = System::new_all();
@@ -554,7 +542,7 @@ impl Component for InfoComponent {
         let total_mem = sys.total_memory() / 1024 / 1024;
         let total_swap = sys.total_swap() / 1024 / 1024;
 
-        Self::spawn_monitor_task(glob_send.clone());
+        Self::spawn_monitor_task();
 
         let mut system_info: String = Default::default();
         {
@@ -578,19 +566,17 @@ impl Component for InfoComponent {
         }
 
         let output = Self {
-            _config: config,
-            glob_recv,
-            _glob_send: glob_send,
 
+            glob_recv:GlobIO::recv(),
             mount_points: Default::default(),
-            dir_list: Self::collect_dirs(),
+            dir_list: AtlasPath::collect_dirs(),
             ip_list: Default::default(),
             focus_index: Some(0), //
             scroll_offsets: Default::default(),
             // sys,
             total_mem_swap_mb: (total_mem, total_swap),
             mem_swap_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            bat_history,//: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
+            bat_history, //: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             mem_swap_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
@@ -744,7 +730,6 @@ impl Component for InfoComponent {
             self.render_battery_status(f, *a);
         }
         {
-
             if let Some(area) = main_chunks_cnt.next() {
                 f.render_widget(
                     Paragraph::new(self.system_info.clone())
@@ -758,7 +743,6 @@ impl Component for InfoComponent {
                 );
             }
         }
-
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -784,8 +768,7 @@ impl Component for InfoComponent {
     }
 }
 
-impl InfoComponent
-{
+impl InfoComponent {
     // --- 辅助采集函数：CPU ---
     fn task_collect_android_cpu() -> AndroidCpuInfo {
         let mut freqs = Vec::with_capacity(8);
@@ -846,61 +829,5 @@ impl InfoComponent
         (v4_list, v6_list)
     }
 
-    fn collect_dirs() -> Vec<String> {
-        let mut dir_list = Vec::new();
-        // ... (此处填入你旧代码中 BaseDirs 和 UserDirs 的逻辑)
-        if let Some(base_dirs) = BaseDirs::new() {
-            dir_list.push("--- Base Dirs ---".to_string());
-            dir_list.push(format!("Home: {:?}", base_dirs.home_dir()));
-            dir_list.push(format!("Config: {:?}", base_dirs.config_dir()));
-            dir_list.push(format!("Data: {:?}", base_dirs.data_dir()));
-            dir_list.push(format!("Data Local: {:?}", base_dirs.data_local_dir()));
-            dir_list.push(format!("Cache: {:?}", base_dirs.cache_dir()));
-            dir_list.push(format!("Preference: {:?}", base_dirs.preference_dir()));
-
-            if let Some(state) = base_dirs.state_dir() {
-                dir_list.push(format!("State: {:?}", state));
-            }
-            if let Some(exe) = base_dirs.executable_dir() {
-                dir_list.push(format!("Executable: {:?}", exe));
-            }
-            if let Some(run) = base_dirs.runtime_dir() {
-                dir_list.push(format!("Runtime: {:?}", run));
-            }
-        }
-
-        if let Some(user_dirs) = UserDirs::new() {
-            dir_list.push("\n--- User Dirs ---".to_string());
-            dir_list.push(format!("Home: {:?}", user_dirs.home_dir()));
-            if let Some(audio) = user_dirs.audio_dir() {
-                dir_list.push(format!("Audio: {:?}", audio));
-            }
-            if let Some(desktop) = user_dirs.desktop_dir() {
-                dir_list.push(format!("Desktop: {:?}", desktop));
-            }
-            if let Some(doc) = user_dirs.document_dir() {
-                dir_list.push(format!("Document: {:?}", doc));
-            }
-            if let Some(dl) = user_dirs.download_dir() {
-                dir_list.push(format!("Download: {:?}", dl));
-            }
-            if let Some(font) = user_dirs.font_dir() {
-                dir_list.push(format!("Font: {:?}", font));
-            }
-            if let Some(pic) = user_dirs.picture_dir() {
-                dir_list.push(format!("Picture: {:?}", pic));
-            }
-            if let Some(pub_dir) = user_dirs.public_dir() {
-                dir_list.push(format!("Public: {:?}", pub_dir));
-            }
-            if let Some(temp) = user_dirs.template_dir() {
-                dir_list.push(format!("Template: {:?}", temp));
-            }
-            if let Some(vid) = user_dirs.video_dir() {
-                dir_list.push(format!("Video: {:?}", vid));
-            }
-        }
-        dir_list
-    }
 
 }

@@ -1,7 +1,8 @@
-use crate::config::SharedConfig;
-use crate::constants::{APP_TITLE, FOOTER_LAYOUT, TabId};
+use crate::config::{Config, SharedConfig};
+use crate::constans::{APP_TITLE, FOOTER_LAYOUT, TabId};
 // 引入新的 message 定义
 use crate::message::{GlobalEvent, Progress, StatusLevel};
+use crate::prelude::GlobIO;
 use crate::ui::app_button::button_components_init;
 use crate::ui::component::Component;
 
@@ -19,15 +20,7 @@ use tokio::time::{Duration, Instant, Interval, MissedTickBehavior, interval};
 pub type GlobSend = broadcast::Sender<GlobalEvent>;
 pub type GlobRecv = broadcast::Receiver<GlobalEvent>;
 
-/*
-/// App 内部持有的状态快照（用于渲染 Footer）
-pub struct ActiveStatus {
-    pub content: String,
-    pub level: StatusLevel,
-    pub progress: Option<Progress>,
-    pub start_time: Instant,
-}
-*/
+
 pub struct App {
     // --- 基础配置 ---
     pub config: SharedConfig,
@@ -191,14 +184,14 @@ impl Component for App {
 
         false
     }
-    fn init(config: SharedConfig, glob_send: GlobSend, glob_recv: GlobRecv) -> Self
+    fn init() -> Self
     where
         Self: Sized,
     {
         // 3. 初始化标签页 , 由constants.rs定义内所有标签页
-        let components: Vec<Box<dyn Component>> = TabId::init(config.clone(), glob_send.clone());
+        let components: Vec<Box<dyn Component>> = TabId::init();
         let button_components: Vec<Box<dyn Component>> =
-            button_components_init(config.clone(), glob_send.clone());
+            button_components_init();
 
         {
             // 模拟一个全局计时器同步广播
@@ -216,60 +209,19 @@ impl Component for App {
         }
 
         Self {
-            config,
+            config:Config::get(),
             components,
             active_tab: 0,
             // focus_on_content: false,
             re_rend_mark: true,
-            glob_send,
-            glob_recv,
+            glob_send:GlobIO::send(),
+            glob_recv:GlobIO::recv(),
             button_components,
         }
     }
 }
 impl App {
-    /*
-    /// 处理 AppAction 指令
-    fn handle_action(&mut self, action: AppAction) -> bool {
-        match action {
-            AppAction::FocusNext => {
-                // 在 Tab栏 和 内容区 之间切换
-                self.focus_on_content = match self.focus_on_content {
-                    FocusArea::TabBar => FocusArea::MainContent,
-                    FocusArea::MainContent => FocusArea::TabBar,
-                };
-                true
-            }
-            AppAction::SwitchTab(idx) => {
-                if idx < self.components.len() && idx != self.active_tab {
-                    self.active_tab = idx;
-                    true
-                } else {
-                    false
-                }
-            }
-            AppAction::MoveTab(delta) => {
-                let len = self.components.len() as isize;
-                let new_idx = (self.active_tab as isize + delta).rem_euclid(len) as usize;
-                if new_idx != self.active_tab {
-                    self.active_tab = new_idx;
-                    true
-                } else {
-                    false
-                }
-            }
-            AppAction::ClearStatus => {
-                self.current_status = None;
-                true
-            }
-            AppAction::Quit => {
-                // Quit 通常由 main loop 捕获处理，这里只作为状态变更
-                // 如果需要 App 内部处理退出清理，写在这里
-                false
-            }
-        }
-    }
-    */
+
     // --- 渲染相关 ---
 
     pub fn request_render(&mut self) {
@@ -298,40 +250,5 @@ impl App {
         self.request_render(); // 必须加入
     }
 
-    /*  ai 重写
-    fn render_tabs(&self, f: &mut Frame, area: Rect) {
-        let titles: Vec<&str> = TabId::ALL.iter().map(|t| t.title()).collect();
-        let active_id = TabId::from_index(self.active_tab);
 
-        // 根据焦点状态决定 Tab 栏的样式
-        let (border_style, title_style) = if self.focus_on_content == FocusArea::TabBar {
-            (
-                Style::default().fg(Color::Yellow), // 激活时边框黄色
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            )
-        } else {
-            (
-                Style::default().fg(Color::DarkGray), // 失焦时暗淡
-                Style::default().fg(Color::Gray)
-            )
-        };
-
-        let tabs = Tabs::new(titles)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(APP_TITLE)
-                    .title_style(title_style)
-                    .border_style(border_style)
-            )
-            .select(self.active_tab)
-            .highlight_style(
-                Style::default()
-                    .fg(active_id.theme_color())
-                    .add_modifier(Modifier::BOLD)
-            );
-
-        f.render_widget(tabs, area);
-    }
-    */
 }

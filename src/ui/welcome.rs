@@ -1,4 +1,4 @@
-use crate::{config::SharedConfig, constants::ART_LOGO, ui::component::Component};
+use crate::{config::{Config, SharedConfig}, constans::ART_LOGO, ui::component::Component};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use ureq::config;
@@ -17,16 +17,12 @@ impl WelcomeComponent {
 }
 
 impl Component for WelcomeComponent {
-    fn init(
-        config: SharedConfig,
-        glob_send: crate::app::GlobSend,
-        glob_recv: crate::app::GlobRecv,
-    ) -> Self
+    fn init() -> Self
     where
         Self: Sized,
     {
         Self {
-            config,
+            config:Config::get(),
             show_help: false,
             help_scroll: 0,
         }
@@ -45,14 +41,14 @@ impl Component for WelcomeComponent {
 
             // 这里的 area 已经是 App 传过来的全屏 Rect（因为 is_fullscreen 返回了 true）
             let chunks = Layout::vertical([
-                Constraint::Length(crate::constants::ART_LOGO_HEIGHT), // 顶部固定高度给 Logo
+                Constraint::Length(crate::constans::ART_LOGO_HEIGHT), // 顶部固定高度给 Logo
                 Constraint::Length(1),                                 // 留一行空行作为装饰
                 Constraint::Min(0),                                    // 剩余空间全给帮助内容
             ])
             .split(area);
 
             // --- 渲染置顶 Logo ---
-            let logo_lines: Vec<Line> = crate::constants::ART_LOGO
+            let logo_lines: Vec<Line> = crate::constans::ART_LOGO
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(|l| Line::from(Span::styled(l, Style::default().fg(Color::Cyan))))
@@ -64,7 +60,7 @@ impl Component for WelcomeComponent {
             );
 
             // --- 渲染全屏帮助内容 ---
-            let help_text: Vec<Line> = crate::constants::HELP_CONTENT
+            let help_text: Vec<Line> = crate::constans::HELP_CONTENT
                 .iter()
                 .map(|&l| Line::from(l))
                 .collect();
@@ -86,7 +82,7 @@ impl Component for WelcomeComponent {
             // ==========================================
 
             let chunks = Layout::vertical([
-                Constraint::Percentage(crate::constants::GOLDEN_RATIO_PC),
+                Constraint::Percentage(crate::constans::GOLDEN_RATIO_PC),
                 Constraint::Min(0),
             ])
             .split(area);
@@ -94,11 +90,11 @@ impl Component for WelcomeComponent {
             // Logo 弹簧布局：推至黄金分割线上方
             let logo_layout = Layout::vertical([
                 Constraint::Min(0),
-                Constraint::Length(crate::constants::ART_LOGO_HEIGHT),
+                Constraint::Length(crate::constans::ART_LOGO_HEIGHT),
             ])
             .split(chunks[0]);
 
-            let logo_lines: Vec<Line> = crate::constants::ART_LOGO
+            let logo_lines: Vec<Line> = crate::constans::ART_LOGO
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(|l| Line::from(Span::styled(l, Style::default().fg(Color::Cyan))))
@@ -118,14 +114,14 @@ impl Component for WelcomeComponent {
             .split(chunks[1]);
 
             f.render_widget(
-                Paragraph::new(crate::constants::WELCOME_MSG)
+                Paragraph::new(crate::constans::WELCOME_MSG)
                     .alignment(Alignment::Center)
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 sub_chunks[0],
             );
 
             f.render_widget(
-                Paragraph::new(crate::constants::HELP_PROMPT)
+                Paragraph::new(crate::constans::HELP_PROMPT)
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(Color::DarkGray)),
                 sub_chunks[2],
@@ -135,7 +131,7 @@ impl Component for WelcomeComponent {
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            crate::constants::KEY_HELP => {
+            crate::constans::KEY_HELP => {
                 self.show_help = !self.show_help;
                 self.help_scroll = 0; // 切换时重置滚动
                 true
