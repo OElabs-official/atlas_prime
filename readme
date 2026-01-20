@@ -48,4 +48,23 @@ Info 页面：
 
 
 
+🦕 Deno Task Controller TUI
 
+一个基于 Rust 和 Ratatui 开发的高性能终端任务管理工具。专为开发者设计，支持动态脚本扫描、进程交互以及丝滑的视觉体验。
+
+确保你的系统已安装：
+
+    Rust (latest stable)
+
+    Deno (用于执行脚本任务)
+
+2. 获取图片资源
+
+将你的欢迎图片命名为 welcome.png 并放置在项目根目录下。
+
+📝 脚本任务说明
+
+只需将 .ts 脚本放入 scripts 目录，程序启动时会自动识别为如下配置的任务：
+Bash
+
+deno run -A --unstable-kv --unstable-cron [your_script].ts

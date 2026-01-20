@@ -46,3 +46,66 @@ Stack Trace:
   17: __libc_init
 
 
+--- PANIC AT 2026-01-20 17:23:27 ---
+Location: src/main.rs:139:36
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::result::unwrap_failed
+   7: <tokio::runtime::park::CachedParkThread>::block_on::<atlas_prime::main::{closure#0}>
+   8: atlas_prime::main
+   9: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  10: std::rt::lang_start::<()>::{closure#0}
+  11: std::rt::lang_start_internal
+  12: main
+  13: __libc_init
+
+
+--- PANIC AT 2026-01-20 18:01:14 ---
+Location: library/std/src/io/stdio.rs:1165:9
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: std::io::stdio::_eprint
+   7: <ratatui_core::terminal::terminal::Terminal<ratatui_crossterm::CrosstermBackend<std::io::stdio::Stdout>> as core::ops::drop::Drop>::drop
+   8: core::ptr::drop_in_place::<ratatui_core::terminal::terminal::Terminal<ratatui_crossterm::CrosstermBackend<std::io::stdio::Stdout>>>
+   9: <tokio::runtime::park::CachedParkThread>::block_on::<atlas_prime::main::{closure#2}::{closure#0}>
+  10: atlas_prime::main
+  11: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  12: std::rt::lang_start::<()>::{closure#0}
+  13: std::rt::lang_start_internal
+  14: main
+  15: __libc_init
+
+
+--- PANIC AT 2026-01-20 19:17:47 ---
+Location: src/main.rs:139:36
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::result::unwrap_failed
+   7: <tokio::runtime::park::CachedParkThread>::block_on::<atlas_prime::main::{closure#0}>
+   8: <tokio::runtime::runtime::Runtime>::block_on::<atlas_prime::main::{closure#0}>
+   9: atlas_prime::main
+  10: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  11: std::rt::lang_start::<()>::{closure#0}
+  12: std::rt::lang_start_internal
+  13: main
+  14: __libc_init
+
+

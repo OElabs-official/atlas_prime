@@ -20,3 +20,10 @@ Info 长时间表考虑写入数据库持久化
 
 
 对globalevent 建立一堆生成关联函数快速创建
+
+
+media node
+ex2
+rp2040控制 （server/client）
+hcrmi
+blp pkg

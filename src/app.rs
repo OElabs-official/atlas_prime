@@ -104,7 +104,7 @@ impl Component for App {
                     if i == self.active_tab {
                         // 激活状态：加粗、反色或特定高亮色
                         Line::from(Span::styled(
-                            format!(" {} ", t.title()), 
+                            format!(" {} ", t.title()),
                             Style::default()
                                 .fg(Color::Yellow) // 这里可以换成 TabId 定义的 theme_color
                                 .add_modifier(Modifier::BOLD)

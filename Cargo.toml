@@ -10,7 +10,7 @@ rand = "0.9.2"
 sysinfo = "0.37.2"
 local-ip-address = "0.6.8"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.148"
+serde_json = "1.0.149"
 directories = "6.0.0"
 core_affinity = "0.8.3"
 ureq = "3.1.4"
@@ -25,12 +25,14 @@ ansi-to-tui = "8.0.1"
 ratatui-image = "10.0.3"
 image = "0.25.9"
 
+ntex = { version = "2.17.0", features = ["tokio"] }
+
 #reqwest = { version = "0.13.1", default-features = false, features = ["json", "webpki-roots"] } # for termux build
 #webpki-roots = "1.0.5"
-#surrealdb = { version = "2.4.0", features = ["kv-rocksdb"] } # 如果数据量达到 TB 级别，或者需要多机共享，只需将驱动改为 surrealdb = { version = "*", features = ["protocol-http"] } 即可连接到独立的 SurrealDB 服务器，代码逻辑几乎无需改动。
+surrealdb = { version = "2.4.1", features = ["kv-rocksdb"] } # 如果数据量达到 TB 级别，或者需要多机共享，只需将驱动改为 surrealdb = { version = "*", features = ["protocol-http"] } 即可连接到独立的 SurrealDB 服务器，代码逻辑几乎无需改动。
 
 [target.'cfg(target_os = "android")'.dependencies]
 termuxapi = "0.1.1"
 
 # system require :
-# pkg i deno pkg-config chafa
+# pkg i deno pkg-config chafa surreal

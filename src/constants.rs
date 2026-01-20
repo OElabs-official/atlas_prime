@@ -1,15 +1,13 @@
 use crossterm::event::KeyCode;
-use directories::UserDirs;
+use directories::{ProjectDirs, UserDirs};
 use ratatui::style::Color;
-
 
 /// 2. 标签页唯一标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabId {
     Welcome,
     Info,
-    TaskControl
-    // Sessions,
+    TaskControl, // Sessions,
 }
 
 /// 3. 页面注册信息
@@ -20,7 +18,6 @@ impl TabId {
         Self::Welcome,
         Self::TaskControl,
         Self::Info,
-
         // Self::Sessions
     ];
 
@@ -29,7 +26,7 @@ impl TabId {
         match self {
             Self::Welcome => "  Welcome ",
             Self::Info => "  System Info ",
-            Self::TaskControl=> " Task Control ",
+            Self::TaskControl => " Task Control ",
             // Self::Sessions => " [2] Session Manager ",
         }
     }
@@ -58,7 +55,7 @@ impl TabId {
                 config,
                 glob_send.clone(),
                 glob_send.subscribe(),
-            )),            
+            )),
             // Self::Sessions => " [2] Session Manager ",
         }
     }
@@ -92,7 +89,7 @@ pub const ART_LOGO: &str = r#"
 // 2. 帮助区域内容（数组形式，方便翻页）
 pub const ART_LOGO_HEIGHT: u16 = 6;
 pub const HELP_CONTENT: &[&str] = &[
-"--- Navigation ---",
+    "--- Navigation ---",
     "Alt + Left/Right  : Switch between Tabs immediately",
     "Alt + [1-9]       : Jump to specific Tab",
     "Tab               : Cycle focus within the current page",
@@ -113,6 +110,8 @@ pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 100;
 pub const HISTORY_CAP: usize = 1024;
 
 use ratatui::layout::Constraint;
+use surrealdb::Surreal;
+use surrealdb::engine::local::{Db, RocksDb};
 
 use crate::app::GlobSend;
 use crate::config::SharedConfig;
@@ -141,8 +140,7 @@ pub const MAIN_LAYOUT: [Constraint; 3] = [
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-
-pub const TASK_RAW_JSON : &str = r#"[
+pub const TASK_RAW_JSON: &str = r#"[
     {"id": "deno", "name": "🦕DenoConSole", "command": "deno", "args": [], "autostart": false, "group": "Srv", "log_limit": 4096},    
     {"id": "ps", "name": "ProcessList", "command": "ps", "args": ["aux"], "autostart": false, "group": "Srv", "log_limit": 1024},    
     {"id": "x11", "name": "Start X Server", "command": "startx", "args": [], "autostart": false, "group": "Sys", "log_limit": 100},
@@ -188,10 +186,8 @@ pub const TASK_RAW_JSON : &str = r#"[
   }
 ]"#;
 
-
-
-use std::sync::OnceLock;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 // 使用标准库原生的 OnceLock 定义全局静态变量
 static SCRIPTS_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -202,7 +198,7 @@ pub fn get_script_dir() -> &'static PathBuf {
         // 获取用户主目录下的 script 文件夹 (例如: /home/user/script)
         let mut path = user_dirs.home_dir().to_path_buf();
         path.push("script");
-        
+
         // 自动创建文件夹，如果不存在的话
         if !path.exists() {
             let _ = std::fs::create_dir_all(&path);
@@ -210,3 +206,5 @@ pub fn get_script_dir() -> &'static PathBuf {
         path
     })
 }
+
+

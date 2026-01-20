@@ -31,22 +31,30 @@ impl Component for HintComponent {
     fn render(&mut self, f: &mut Frame, area: Rect) {
         let spans = vec![
             // 标签切换提示
-            Span::styled(" Alt + ←/→ ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Alt + ←/→ ",
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Tabs"),
-            
             Span::raw(" | "), // 分隔符
-
             // 焦点内交互提示（既然现在 Tab 给了子组件）
             Span::styled(" Tab ", Style::default().bg(Color::Cyan).fg(Color::Black)),
             Span::raw(" Focus"),
-
             Span::raw(" | "),
-
             // 退出提示
-            Span::styled(" Ctrl+C ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Ctrl+C ",
+                Style::default()
+                    .bg(Color::Red)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Quit"),
         ];
-        
+
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 

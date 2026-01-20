@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 const MEM_SWAP_LONG: &str = "mem_swap_long";
 const ANDROID_CPU_LONG: &str = "android_cpu_long";
 const ANDROID_BAT: &str = "android_bat";
-type AndroidBatInfo = (u8, String, f64); // (电量百分比, 充放电状态String, 电池温度f32)
+pub type AndroidBatInfo = (u8, String, f64); // (电量百分比, 充放电状态String, 电池温度f32)
 const ANDROID_CPU: &str = "android_cpu";
 type AndroidCpuInfo = (Vec<f32>, f32, f32); // (各核心频率Vec<f32>, Zone0温度f32, Zone7温度f32)
 const MEM_SWAP: &str = "mem_swap";
@@ -50,7 +50,7 @@ pub struct InfoComponent {
     cpu_info_history: VecDeque<AndroidCpuInfo>,
     cpu_info_long_history: VecDeque<AndroidCpuInfo>,
 
-    system_info: String,      // 例如: "Android 14"
+    system_info: String, // 例如: "Android 14"
 }
 
 impl InfoComponent {
@@ -62,7 +62,9 @@ impl InfoComponent {
             .borders(Borders::ALL)
             .title(" 🌐 IP Addresses (Left: v4 | Right: v6) ")
             .border_style(if self.focus_index == Some(2) {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             });
@@ -337,44 +339,6 @@ impl InfoComponent {
         );
     }
 
-    // --- 辅助采集函数：CPU ---
-    fn task_collect_android_cpu() -> AndroidCpuInfo {
-        let mut freqs = Vec::with_capacity(8);
-        for i in 0..8 {
-            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
-            let f = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|s| s.trim().parse::<f32>().ok())
-                .map(|f| f / 1_000_000.0)
-                .unwrap_or(0.0);
-            freqs.push(f);
-        }
-        let read_zone = |z| {
-            std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{}/temp", z))
-                .ok()
-                .and_then(|s| s.trim().parse::<f32>().ok())
-                .map(|t| t / 1000.0)
-                .unwrap_or(0.0)
-        };
-        (freqs, read_zone(0), read_zone(7))
-    }
-
-    // --- 辅助采集函数：磁盘 ---
-    fn task_collect_disks() -> Vec<DiskInf> {
-        let mut disks = Disks::new_with_refreshed_list();
-        disks.refresh(true);
-        disks
-            .iter()
-            .map(|d| {
-                (
-                    d.name().to_string_lossy().into_owned(),
-                    d.total_space(),
-                    d.available_space(),
-                    d.mount_point().to_string_lossy().into_owned(),
-                )
-            })
-            .collect()
-    }
 
     /// 在info 初始化时建立长期任务，定期发送系统信息
     /// 每一个小周期发送内存和swap数据元组
@@ -383,8 +347,7 @@ impl InfoComponent {
         tokio::spawn(async move {
             let mut sys = System::new_all();
             let mut tick_count: u64 = 0;
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
+            let mut interval =  tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
 
             // --- [新增] 启动预热：在进入循环前先同步一次数据，让 UI 瞬间填满 ---
             Self::perform_full_sync(&mut sys, &glob_send);
@@ -404,7 +367,7 @@ impl InfoComponent {
                 #[cfg(target_os = "android")]
                 let cpu_val = Self::task_collect_android_cpu();
                 #[cfg(target_os = "android")]
-                let cpu_payload = DynamicPayload(Arc::new(cpu_val));
+                let cpu_payload = DynamicPayload(Arc::new(cpu_val.clone()));
 
                 // 2. 短周期分发
                 let _ = glob_send.send(GlobalEvent::Data {
@@ -430,16 +393,23 @@ impl InfoComponent {
                             data: cpu_payload,
                         });
                         // 只有在这里才调用较慢的 battery api
-                        if let Ok(stat) = termux::battery::status() {
+                        if let Ok(bat_info) = termux::battery::status() {
                             let bat_pkg: AndroidBatInfo = (
-                                stat.percentage,
-                                format!("{:?}", stat.status),
-                                stat.temperature,
+                                bat_info.percentage,
+                                format!("{:?}", bat_info.status),
+                                bat_info.temperature,
                             );
                             let _ = glob_send.send(GlobalEvent::Data {
                                 key: ANDROID_BAT,
                                 data: DynamicPayload(Arc::new(bat_pkg)),
                             });
+                            tokio::spawn(async move {
+                            crate::db::record_telemetry(
+                                cpu_val.1, 
+                                bat_info.percentage, 
+                                bat_info.temperature
+                            ).await;
+                        });
                         }
                     }
                 }
@@ -468,84 +438,6 @@ impl InfoComponent {
             data: DynamicPayload(Arc::new(mem)),
         });
         // ... 可按需扩展其他预热项
-    }
-
-    fn _spawn_monitor_task(glob_send: GlobSend) {
-        tokio::spawn(async move {
-            let mut sys = System::new_all();
-            let mut tick_count: u64 = 0;
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
-
-            loop {
-                interval.tick().await;
-                tick_count += 1;
-
-                // 1. 统一采集当前时刻所有基础数据
-                sys.refresh_memory();
-                let mem_pkg: MemSwapMB = (
-                    sys.used_memory() / 1024 / 1024,
-                    sys.used_swap() / 1024 / 1024,
-                );
-
-                #[cfg(target_os = "android")]
-                let cpu_pkg = Self::task_collect_android_cpu();
-
-                // 2. 发送短周期数据 (每秒)
-                let _ = glob_send.send(GlobalEvent::Data {
-                    key: MEM_SWAP,
-                    data: DynamicPayload(Arc::new(mem_pkg)),
-                });
-
-                #[cfg(target_os = "android")]
-                let _ = glob_send.send(GlobalEvent::Data {
-                    key: ANDROID_CPU,
-                    data: DynamicPayload(Arc::new(cpu_pkg.clone())),
-                });
-
-                // 3. 处理长周期逻辑 (直接复用上面采集好的 pkg)
-                if tick_count % INFO_UPDATE_INTERVAL_SLOWEST == 1 {
-                    // 内存长趋势
-                    let _ = glob_send.send(GlobalEvent::Data {
-                        key: MEM_SWAP_LONG,
-                        data: DynamicPayload(Arc::new(mem_pkg)),
-                    });
-
-                    #[cfg(target_os = "android")]
-                    {
-                        // CPU长趋势 (复用)
-                        let _ = glob_send.send(GlobalEvent::Data {
-                            key: ANDROID_CPU_LONG,
-                            data: DynamicPayload(Arc::new(cpu_pkg)),
-                        });
-
-                        // 电池 (仅长周期采集，因为 termuxapi 较慢)
-                        if let Ok(stat) = termux::battery::status() {
-                            let bat_pkg: AndroidBatInfo = (
-                                stat.percentage,
-                                format!("{:?}", stat.status),
-                                stat.temperature,
-                            );
-                            let _ = glob_send.send(GlobalEvent::Data {
-                                key: ANDROID_BAT,
-                                data: DynamicPayload(Arc::new(bat_pkg)),
-                            });
-                        }
-                    }
-                }
-
-                // 4. 处理中周期逻辑 (磁盘和 IP)
-                if tick_count % INFO_UPDATE_INTERVAL_SLOW_TIMES == 1 {
-                    let disk_data = Self::task_collect_disks();
-                    let ips = Self::ip_list();
-                    let pkg: DiskIP = (disk_data, ips);
-                    let _ = glob_send.send(GlobalEvent::Data {
-                        key: DISK_IP,
-                        data: DynamicPayload(Arc::new(pkg)),
-                    });
-                }
-            }
-        });
     }
 
     fn render_disk_list(&self, f: &mut Frame, area: Rect) {
@@ -622,84 +514,6 @@ impl InfoComponent {
 
         f.render_widget(list, area);
     }
-
-    fn ip_list() -> (Vec<String>, Vec<String>) {
-        let mut v4_list = Vec::new();
-        let mut v6_list = Vec::new();
-
-        if let Ok(ips) = local_ip_address::list_afinet_netifas() {
-            for (name, ip) in ips {
-                let entry = format!("{}: {}", name, ip);
-                if ip.is_ipv4() {
-                    v4_list.push(entry);
-                } else if ip.is_ipv6() {
-                    // v6 地址通常较长，可以做简单截断或处理
-                    v6_list.push(entry);
-                }
-            }
-        } else {
-            v4_list.push("Error getting IPs".to_string());
-        }
-
-        (v4_list, v6_list)
-    }
-
-    fn collect_dirs() -> Vec<String> {
-        let mut dir_list = Vec::new();
-        // ... (此处填入你旧代码中 BaseDirs 和 UserDirs 的逻辑)
-        if let Some(base_dirs) = BaseDirs::new() {
-            dir_list.push("--- Base Dirs ---".to_string());
-            dir_list.push(format!("Home: {:?}", base_dirs.home_dir()));
-            dir_list.push(format!("Config: {:?}", base_dirs.config_dir()));
-            dir_list.push(format!("Data: {:?}", base_dirs.data_dir()));
-            dir_list.push(format!("Data Local: {:?}", base_dirs.data_local_dir()));
-            dir_list.push(format!("Cache: {:?}", base_dirs.cache_dir()));
-            dir_list.push(format!("Preference: {:?}", base_dirs.preference_dir()));
-
-            if let Some(state) = base_dirs.state_dir() {
-                dir_list.push(format!("State: {:?}", state));
-            }
-            if let Some(exe) = base_dirs.executable_dir() {
-                dir_list.push(format!("Executable: {:?}", exe));
-            }
-            if let Some(run) = base_dirs.runtime_dir() {
-                dir_list.push(format!("Runtime: {:?}", run));
-            }
-        }
-
-        if let Some(user_dirs) = UserDirs::new() {
-            dir_list.push("\n--- User Dirs ---".to_string());
-            dir_list.push(format!("Home: {:?}", user_dirs.home_dir()));
-            if let Some(audio) = user_dirs.audio_dir() {
-                dir_list.push(format!("Audio: {:?}", audio));
-            }
-            if let Some(desktop) = user_dirs.desktop_dir() {
-                dir_list.push(format!("Desktop: {:?}", desktop));
-            }
-            if let Some(doc) = user_dirs.document_dir() {
-                dir_list.push(format!("Document: {:?}", doc));
-            }
-            if let Some(dl) = user_dirs.download_dir() {
-                dir_list.push(format!("Download: {:?}", dl));
-            }
-            if let Some(font) = user_dirs.font_dir() {
-                dir_list.push(format!("Font: {:?}", font));
-            }
-            if let Some(pic) = user_dirs.picture_dir() {
-                dir_list.push(format!("Picture: {:?}", pic));
-            }
-            if let Some(pub_dir) = user_dirs.public_dir() {
-                dir_list.push(format!("Public: {:?}", pub_dir));
-            }
-            if let Some(temp) = user_dirs.template_dir() {
-                dir_list.push(format!("Template: {:?}", temp));
-            }
-            if let Some(vid) = user_dirs.video_dir() {
-                dir_list.push(format!("Video: {:?}", vid));
-            }
-        }
-        dir_list
-    }
 }
 
 impl Component for InfoComponent {
@@ -711,6 +525,28 @@ impl Component for InfoComponent {
     where
         Self: Sized,
     {
+
+        // --- [新增] 同步读取数据库历史数据 ---
+        // 获取当前 tokio runtime 句柄来执行异步任务
+        let handle = tokio::runtime::Handle::current();
+        let db_history = tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                crate::db::get_bat_history_ui(HISTORY_CAP).await
+            })
+        });
+
+        // 将数据库数据转为 VecDeque，并根据 HISTORY_CAP 填充/截断
+        let mut bat_history = VecDeque::from(db_history);
+        // 如果数据库数据不足，补齐默认值，确保 UI 渲染不越界
+        while bat_history.len() < HISTORY_CAP {
+            bat_history.push_front(Default::default());
+        }
+        // 如果多了，截取最新的
+        if bat_history.len() > HISTORY_CAP {
+            bat_history = bat_history.split_off(bat_history.len() - HISTORY_CAP);
+        }
+
+
         // 1. 创建组件实例时先订阅，用于后续 update 中接收数据
 
         let mut sys = System::new_all();
@@ -721,23 +557,25 @@ impl Component for InfoComponent {
         Self::spawn_monitor_task(glob_send.clone());
 
         let mut system_info: String = Default::default();
-        {   
+        {
             let vinf = &[
-                System::cpu_arch(),  
+                System::cpu_arch(),
                 System::name().unwrap_or_else(|| "Unknown name".into()),
                 // System::host_name().unwrap_or_else(|| "Unknown host_name".into()),
                 // System::name().unwrap_or_else(|| "Unknown OS".into()),
-                System::kernel_long_version().split('-').collect::<Vec<_>>().first().unwrap_or_else(||&"").to_string(),  
+                System::kernel_long_version()
+                    .split('-')
+                    .collect::<Vec<_>>()
+                    .first()
+                    .unwrap_or_else(|| &"")
+                    .to_string(),
                 System::os_version().unwrap_or_else(|| "".into()),
             ];
-            for i0 in vinf
-            {
+            for i0 in vinf {
                 system_info.push_str(i0);
                 system_info.push('*');
             }
         }
-
-
 
         let output = Self {
             _config: config,
@@ -752,7 +590,7 @@ impl Component for InfoComponent {
             // sys,
             total_mem_swap_mb: (total_mem, total_swap),
             mem_swap_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            bat_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
+            bat_history,//: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             mem_swap_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
@@ -832,7 +670,7 @@ impl Component for InfoComponent {
                                 changed = true;
                             }
                         }
-                        
+
                         _ => {}
                     }
                 }
@@ -846,18 +684,15 @@ impl Component for InfoComponent {
         // 1. 总体纵向分割：顶部图表区(6行) + 下部内容区(剩余)
         // 此时 main_chunks 只有两个索引：0 和 1
         let main_chunks = Layout::vertical([
-            
             Constraint::Min(0),
             Constraint::Length(12),
             Constraint::Length(12),
             Constraint::Length(6),
             Constraint::Length(1),
         ])
-        .split(area);//;
-        
-        let mut main_chunks_cnt = main_chunks.iter();
-        
+        .split(area); //;
 
+        let mut main_chunks_cnt = main_chunks.iter();
 
         {
             if let Some(area) = main_chunks_cnt.next() {
@@ -881,52 +716,49 @@ impl Component for InfoComponent {
                                     .borders(Borders::ALL)
                                     .title(" 📂 Directories ")
                                     .border_style(if self.focus_index == Some(1) {
-                                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                                        Style::default()
+                                            .fg(Color::Yellow)
+                                            .add_modifier(Modifier::BOLD)
                                     } else {
                                         Style::default().fg(Color::Gray)
                                     }),
                             )
                             .scroll((self.scroll_offsets[1], 0)),
                         list_chunks[1],
-                    );            
+                    );
                 }
                 self.render_ip_addresses(f, list_chunks[2]);
             }
         }
-        // 3. 渲染下方列表区（使用 main_chunks[1] 而不是 2）
-        // let list_chunks = Layout::vertical([
-        //     Constraint::Percentage(40),
-        //     Constraint::Percentage(40),
-        //     Constraint::Percentage(20),
-        // ])
-        // .split(main_chunks[1]); // 这里必须是 1，因为主布局只有两个块
 
         // 磁盘渲染
 
         // 剩下的 chunks 严格对应 main_chunks 定义的顺序
-        if let Some(a) = main_chunks_cnt.next() { self.render_mem_swap_status(f, *a); }
-        if let Some(a) = main_chunks_cnt.next() { self.render_cpu_status(f, *a); }
-        if let Some(a) = main_chunks_cnt.next() { self.render_battery_status(f, *a); }
+        if let Some(a) = main_chunks_cnt.next() {
+            self.render_mem_swap_status(f, *a);
+        }
+        if let Some(a) = main_chunks_cnt.next() {
+            self.render_cpu_status(f, *a);
+        }
+        if let Some(a) = main_chunks_cnt.next() {
+            self.render_battery_status(f, *a);
+        }
         {
-            // f.render_widget(
-            //     Paragraph::new(self.system_info.clone())
-            //         .alignment(Alignment::Right)
-            //         .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-            //     main_chunks[0]
-            // );
+
             if let Some(area) = main_chunks_cnt.next() {
                 f.render_widget(
                     Paragraph::new(self.system_info.clone())
                         .alignment(Alignment::Right)
-                        .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-                    *area
+                        .style(
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    *area,
                 );
             }
         }
-        // 1. 渲染顶部硬件指标
-        // self.render_mem_swap_status(f, main_chunks[2]);
-        // self.render_cpu_status(f, main_chunks[3]);
-        // self.render_battery_status(f, main_chunks[4]);
+
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -950,4 +782,125 @@ impl Component for InfoComponent {
             false
         }
     }
+}
+
+impl InfoComponent
+{
+    // --- 辅助采集函数：CPU ---
+    fn task_collect_android_cpu() -> AndroidCpuInfo {
+        let mut freqs = Vec::with_capacity(8);
+        for i in 0..8 {
+            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
+            let f = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|f| f / 1_000_000.0)
+                .unwrap_or(0.0);
+            freqs.push(f);
+        }
+        let read_zone = |z| {
+            std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{}/temp", z))
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|t| t / 1000.0)
+                .unwrap_or(0.0)
+        };
+        (freqs, read_zone(0), read_zone(7))
+    }
+
+    // --- 辅助采集函数：磁盘 ---
+    fn task_collect_disks() -> Vec<DiskInf> {
+        let mut disks = Disks::new_with_refreshed_list();
+        disks.refresh(true);
+        disks
+            .iter()
+            .map(|d| {
+                (
+                    d.name().to_string_lossy().into_owned(),
+                    d.total_space(),
+                    d.available_space(),
+                    d.mount_point().to_string_lossy().into_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn ip_list() -> (Vec<String>, Vec<String>) {
+        let mut v4_list = Vec::new();
+        let mut v6_list = Vec::new();
+
+        if let Ok(ips) = local_ip_address::list_afinet_netifas() {
+            for (name, ip) in ips {
+                let entry = format!("{}: {}", name, ip);
+                if ip.is_ipv4() {
+                    v4_list.push(entry);
+                } else if ip.is_ipv6() {
+                    // v6 地址通常较长，可以做简单截断或处理
+                    v6_list.push(entry);
+                }
+            }
+        } else {
+            v4_list.push("Error getting IPs".to_string());
+        }
+
+        (v4_list, v6_list)
+    }
+
+    fn collect_dirs() -> Vec<String> {
+        let mut dir_list = Vec::new();
+        // ... (此处填入你旧代码中 BaseDirs 和 UserDirs 的逻辑)
+        if let Some(base_dirs) = BaseDirs::new() {
+            dir_list.push("--- Base Dirs ---".to_string());
+            dir_list.push(format!("Home: {:?}", base_dirs.home_dir()));
+            dir_list.push(format!("Config: {:?}", base_dirs.config_dir()));
+            dir_list.push(format!("Data: {:?}", base_dirs.data_dir()));
+            dir_list.push(format!("Data Local: {:?}", base_dirs.data_local_dir()));
+            dir_list.push(format!("Cache: {:?}", base_dirs.cache_dir()));
+            dir_list.push(format!("Preference: {:?}", base_dirs.preference_dir()));
+
+            if let Some(state) = base_dirs.state_dir() {
+                dir_list.push(format!("State: {:?}", state));
+            }
+            if let Some(exe) = base_dirs.executable_dir() {
+                dir_list.push(format!("Executable: {:?}", exe));
+            }
+            if let Some(run) = base_dirs.runtime_dir() {
+                dir_list.push(format!("Runtime: {:?}", run));
+            }
+        }
+
+        if let Some(user_dirs) = UserDirs::new() {
+            dir_list.push("\n--- User Dirs ---".to_string());
+            dir_list.push(format!("Home: {:?}", user_dirs.home_dir()));
+            if let Some(audio) = user_dirs.audio_dir() {
+                dir_list.push(format!("Audio: {:?}", audio));
+            }
+            if let Some(desktop) = user_dirs.desktop_dir() {
+                dir_list.push(format!("Desktop: {:?}", desktop));
+            }
+            if let Some(doc) = user_dirs.document_dir() {
+                dir_list.push(format!("Document: {:?}", doc));
+            }
+            if let Some(dl) = user_dirs.download_dir() {
+                dir_list.push(format!("Download: {:?}", dl));
+            }
+            if let Some(font) = user_dirs.font_dir() {
+                dir_list.push(format!("Font: {:?}", font));
+            }
+            if let Some(pic) = user_dirs.picture_dir() {
+                dir_list.push(format!("Picture: {:?}", pic));
+            }
+            if let Some(pub_dir) = user_dirs.public_dir() {
+                dir_list.push(format!("Public: {:?}", pub_dir));
+            }
+            if let Some(temp) = user_dirs.template_dir() {
+                dir_list.push(format!("Template: {:?}", temp));
+            }
+            if let Some(vid) = user_dirs.video_dir() {
+                dir_list.push(format!("Video: {:?}", vid));
+            }
+        }
+        dir_list
+    }
+
 }

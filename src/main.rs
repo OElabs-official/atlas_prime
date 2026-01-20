@@ -3,8 +3,9 @@ mod config;
 mod constants;
 mod ui;
 mod utils;
-//mod db;
+mod db;
 mod message;
+mod server;
 
 use crossterm::event::KeyModifiers;
 use notify::{RecursiveMode, Watcher};
@@ -129,12 +130,25 @@ fn setup_panic_hook() {
 fn main() {
     // 初始化崩溃钩子
     setup_panic_hook();
+    // 1. 初始化数据库 (Tokio runtime 之外也可以通过 runtime 句柄操作)
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build().unwrap();
+    
+    rt.block_on(async {
+        crate::db::init_db().await.expect("DB Init Failed");
+    });
+
+    std::thread::spawn(|| {
+            let _ = crate::server::run_server();
+        });
 
     // 创建异步运行时
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("无法创建 Tokio 运行时");
+
 
     // 在运行时中捕获逻辑错误
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -184,15 +198,19 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 终端初始化 ---
     enable_raw_mode()?;
-    
+
     // --- 2. 显示启动屏 ---
     // 这里如果加载失败，我们通常选择忽略并继续启动 App
-
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    let _ = show_splash(&mut terminal);    
+    let _ = show_splash(&mut terminal);
+    // if let Err(e) = crate::db::init_db().await {
+    //     // 这里可以发送一个 GlobalEvent::Status 告知 UI 数据库启动失败
+    //     eprintln!("Database initialization failed: {}", e);
+    // }
+
     let mut reader = EventStream::new(); // 将 crossterm 事件转为异步流
     // let mut render_interval = interval(Duration::from_millis(8));
     // let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -200,10 +218,8 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut render_clock = interval(Duration::from_millis(8)); // 约 60FPS，用于平滑渲染 ,glob
 
-    loop 
-    {
-        tokio::select! 
-        {
+    loop {
+        tokio::select! {
             /*
             如果后台数据更新极快（比如一个高频传感器每秒发 1000 次数据），background_rx 会不停地往 render_tx 塞任务，导致 CPU 依然爆表
             我们需要一个 “节流阀”：无论收到多少重绘请求，在一定时间内（比如 16ms，即 60FPS）只允许渲染一次。
@@ -211,7 +227,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
             // --- 核心修改：渲染分支 唯一的渲染出口 ---
             // 每一帧(16ms)都检查是否需要重绘
-            _ = render_clock.tick() => 
+            _ = render_clock.tick() =>
             {
                 // should_draw 应该检查:
                 // 1. 之前有没有 request_render()
@@ -223,11 +239,11 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // 2. 真正的异步按键流：完全不使用 sleep    分支 A：交互事件
-            maybe_event = reader.next() => 
+            maybe_event = reader.next() =>
             {
-                match maybe_event 
+                match maybe_event
                 {
-                    Some(Ok(Event::Key(key))) => 
+                    Some(Ok(Event::Key(key))) =>
                     {
                         // 1. 只有绝对全局的退出键（如 Ctrl+C 或特定 Q）在这里拦截
                         // 如果你想让子组件也能处理 'q'，就把这一行也删掉，全部交给 app.handle_key
@@ -293,78 +309,85 @@ Async Stream,reader (EventStream),终端 -> 主循环,用户交互输入。将�
 Internal MPSC,info.rx (如果有),内部任务 -> 组件,组件私有流。用于组件内部的特定任务（如你之前代码中单独采样的 CPU 频率）。
 
 */
-use std::time::{ Instant};
 use ratatui::prelude::*;
+use std::time::Instant;
 
-fn show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> 
-where B::Error: 'static {
+fn show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
+where
+    B::Error: 'static,
+{
     let img_path = "welcome.png";
     let dyn_img = image::open(img_path)?;
 
     // 强制使用 halfblocks 模式进行测试，如果这个能居中，再切回 from_query_stdio
     // Halfblocks 是由字符组成的，Ratatui 对它的控制力最强
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| {
-        Picker::halfblocks()
-    });
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let start_time = std::time::Instant::now();
     let duration = std::time::Duration::from_secs(5);
 
     while start_time.elapsed() < duration {
         terminal.draw(|f| {
             let full_area = f.area();
-            
+
             // 1. 我们先创建一个 Paragraph 占满全屏，确保背景干净
             f.render_widget(Block::default().bg(Color::Black), full_area);
 
             // 2. 动态计算图片尺寸 (保持 1:1)
             // 假设高度占屏幕 60%
-            let h = (full_area.height as f32 * 0.5 ) as u16;
-            let w = h ; // 字符宽度补偿
+            let h = (full_area.height as f32 * 0.5) as u16;
+            let w = h; // 字符宽度补偿
 
             // 3. 使用嵌套 Layout 强行定位中心 Rect
             let vertical_layout = Layout::vertical([
-                Constraint::Fill(1),      // 上边距
-                Constraint::Length(h),    // 图片高度
-                Constraint::Fill(1),      // 下边距
-            ]).split(full_area);
+                Constraint::Fill(1),   // 上边距
+                Constraint::Length(h), // 图片高度
+                Constraint::Fill(1),   // 下边距
+            ])
+            .split(full_area);
 
             let center_area = Layout::horizontal([
-                Constraint::Fill(1),      // 左边距
-                Constraint::Length(w),    // 图片宽度
-                Constraint::Fill(1),      // 右边距
-            ]).split(vertical_layout[1])[1];
+                Constraint::Fill(1),   // 左边距
+                Constraint::Length(w), // 图片宽度
+                Constraint::Fill(1),   // 右边距
+            ])
+            .split(vertical_layout[1])[1];
 
             // 4. 关键点：我们不仅给 Image 传 center_area，
             // 还要确保 Protocol 是针对 center_area 的尺寸生成的
-            if let Ok(protocol) = picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None)) {
+            if let Ok(protocol) =
+                picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None))
+            {
                 let image_widget = Image::new(&protocol);
-                
+
                 // 渲染到 center_area
                 f.render_widget(image_widget, center_area);
             }
-            
+
             // 5. 提示文字放在最下方
-            let text = Paragraph::new("Welcome to AtlasPrime")
-                .alignment(Alignment::Center);
+            let text = Paragraph::new("Welcome to AtlasPrime").alignment(Alignment::Center);
             f.render_widget(text, vertical_layout[2]);
         })?;
 
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
-            if let crossterm::event::Event::Key(_) = crossterm::event::read()? { break; }
+            if let crossterm::event::Event::Key(_) = crossterm::event::read()? {
+                break;
+            }
         }
     }
     terminal.clear()?;
     Ok(())
 }
 // 注意：现在主要的 widget 叫 Image
-use ratatui_image::{picker::Picker, protocol::Protocol, Image};
+use ratatui_image::{Image, picker::Picker, protocol::Protocol};
 // 使用泛型 B 并返回通用的 Box<dyn Error>
-fn _show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> 
-where /*
-这个错误是因为 Rust 的编译器在处理 Backend::Error 这一关联类型时，无法确定它是否包含非 'static 的引用。在 terminal.draw(...)? 这里的问号表达式会将 Backend::Error 转换为 Box<dyn Error>，而 Box<dyn Error> 默认要求其内容满足 'static 约束。
+fn _show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
+where
+    /*
+    这个错误是因为 Rust 的编译器在处理 Backend::Error 这一关联类型时，无法确定它是否包含非 'static 的引用。在 terminal.draw(...)? 这里的问号表达式会将 Backend::Error 转换为 Box<dyn Error>，而 Box<dyn Error> 默认要求其内容满足 'static 约束。
 
-按照编译器的提示，我们需要给泛型 B 增加一个 where 子句约束。 */
-    B::Error: 'static {
+    按照编译器的提示，我们需要给泛型 B 增加一个 where 子句约束。 */
+    B::Error: 'static,
+{
     // 1. 加载图片
     let img_path = "welcome.png";
     let dyn_img = image::open(img_path)?;
@@ -374,14 +397,11 @@ where /*
     let size = terminal.size()?;
     let area = Rect::new(0, 0, size.width, size.height);
     // 3. 初始化 Picker
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| {
-        Picker::halfblocks()
-    });
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     // let mut picker = Picker::halfblocks();
     // 4. 创建协议对象
     // 注意：Resize::Fit(None) 适配新版 API
     let mut image_protocol = picker.new_protocol(dyn_img.clone(), area, Resize::Fit(None))?;
-  
 
     let start_time = std::time::Instant::now();
     let duration = std::time::Duration::from_secs(5);
@@ -389,14 +409,14 @@ where /*
     while start_time.elapsed() < duration {
         terminal.draw(|f| {
             let full_area = f.area();
-            
-// --- 核心逻辑：计算 1:1 比例的居中区域 ---
+
+            // --- 核心逻辑：计算 1:1 比例的居中区域 ---
             // 终端一个字符高度约等于两个宽度。对于 1:1 的图片：
             // 我们假设高度占据屏幕的 80%
             let img_height = (full_area.height as f32 * 0.8) as u16;
             // 因为 halfblock 一个字符有两个像素点，为了视觉上 1:1，
             // 宽度通常需要是高度的 2 倍（字符数）左右，但这里我们让它适配高度
-            let img_width = img_height * 2; 
+            let img_width = img_height * 2;
 
             // 确保不会溢出屏幕
             let final_h = img_height.min(full_area.height - 2);
@@ -407,27 +427,31 @@ where /*
                 Constraint::Fill(1),
                 Constraint::Length(final_h),
                 Constraint::Fill(1),
-            ]).split(full_area);
+            ])
+            .split(full_area);
 
             let center_area = Layout::horizontal([
                 Constraint::Fill(1),
                 Constraint::Length(final_w),
                 Constraint::Fill(1),
-            ]).split(v_chunks[1])[1];
+            ])
+            .split(v_chunks[1])[1];
 
             // 5. 渲染控件
-// Resize::Fit(None) 会在 center_area 内尽可能大地缩放图片并保持比例
-            if let Ok(protocol) = picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None)) {
+            // Resize::Fit(None) 会在 center_area 内尽可能大地缩放图片并保持比例
+            if let Ok(protocol) =
+                picker.new_protocol(dyn_img.clone(), center_area, Resize::Fit(None))
+            {
                 let image_widget = Image::new(&protocol);
                 f.render_widget(image_widget, center_area);
             }
-            
+
             // 可选：添加文字提示
             f.render_widget(
                 Paragraph::new("Press any key to skip")
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(Color::DarkGray)),
-                v_chunks[2]
+                v_chunks[2],
             );
         })?;
 
@@ -438,7 +462,7 @@ where /*
             }
         }
     }
-    
+
     // 清理缓冲区，为进入主程序做准备
     terminal.clear()?;
     Ok(())
