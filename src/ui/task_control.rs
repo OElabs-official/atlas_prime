@@ -100,7 +100,7 @@ impl Component for TaskControlComponent {
         // 模拟从 JSON 加载过程（实际开发中可使用 std::fs::read_to_string）
 
         let mut descs: Vec<TaskDescriptor> =
-            serde_json::from_str(TASK_RAW_JSON).unwrap_or_default();
+            serde_json::from_str(&AtlasPath::read_task_json().unwrap_or_default()).unwrap_or_default();
 
         // --- 新增：扫描 scripts 目录 ---
         let script_dir = AtlasPath::get_script_dir();
@@ -323,14 +323,7 @@ impl TaskControlComponent {
                         }
                     };
 
-                    // let exit_result = tokio::select! {
-                    //     res = child.wait() => res,
-                    //     Some(TaskControlMsg::Stop) = rx.recv() => {
-                    //         is_manual_stop = true; // 标记为手动停止
-                    //         let _ = child.kill().await;
-                    //         child.wait().await // 确保进程资源被回收
-                    //     }
-                    // };
+
 
                     let mut s = status_lock.write().unwrap();
                     match exit_result {
@@ -598,21 +591,7 @@ impl TaskControlComponent {
             f.set_cursor_position((chunks[1].x + self.input.len() as u16 + 1, chunks[1].y + 1));
         }
     }
-    fn _render_full_log(&mut self, f: &mut Frame, area: Rect) {
-        if let Some(task) = self.tasks.get(self.selected_idx) {
-            // 使用 std 的 read()，它不会引起 Tokio Panic
-            if let Ok(logs) = task.logs.read() {
-                let log_lines: Vec<Line> = logs.iter().map(|s| Line::from(s.as_str())).collect();
 
-                f.render_widget(
-                    Paragraph::new(log_lines)
-                        .block(Block::default().borders(Borders::ALL).title(" Logs "))
-                        .scroll((self.log_scroll, 0)),
-                    area,
-                );
-            }
-        }
-    }
     fn _handle_log_keys(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {

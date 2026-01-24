@@ -104,9 +104,9 @@ pub const HELP_CONTENT: &[&str] = &[
 pub const GOLDEN_RATIO_PC: u16 = 62; // 61.8%
 pub const KEY_HELP: KeyCode = KeyCode::Char('h');
 
-pub const INFO_UPDATE_INTERVAL_BASE: u64 = 3;
+pub const INFO_UPDATE_INTERVAL_BASE: u64 = 1;
 pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 5;
-pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 100;
+pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 10;
 pub const HISTORY_CAP: usize = 1024;
 
 /// 底部状态栏的横向布局约束
@@ -126,6 +126,9 @@ pub const MAIN_LAYOUT: [Constraint; 3] = [
     Constraint::Min(0),    // 内容区自适应
     Constraint::Length(1), // 状态栏高度
 ];
+
+pub const DB_DFT_NS:&str = "atlas_core";
+pub const DB_DFT_DB:&str = "system";
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 

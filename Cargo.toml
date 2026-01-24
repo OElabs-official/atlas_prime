@@ -26,8 +26,7 @@ ratatui-image = "10.0.3"
 image = "0.25.9"
 
 ntex = { version = "2.17.0", features = ["tokio"] }
-
-#reqwest = { version = "0.13.1", default-features = false, features = ["json", "webpki-roots"] } # for termux build
+reqwest = { version = "0.13.1", features = ["json", "http2","native-tls","webpki-roots"], default-features = false }# for termux build
 #webpki-roots = "1.0.5"
 surrealdb = { version = "2.4.1", features = ["kv-rocksdb"] } # 如果数据量达到 TB 级别，或者需要多机共享，只需将驱动改为 surrealdb = { version = "*", features = ["protocol-http"] } 即可连接到独立的 SurrealDB 服务器，代码逻辑几乎无需改动。
 

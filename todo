@@ -16,15 +16,29 @@ Info 加入电池计量，充电，cpu稳定等
 
 Info 长时间表考虑写入数据库持久化
 
-先不要生成代码，我们讨论一下下一个标签页的设计:
+
 
 
 对globalevent 建立一堆生成关联函数快速创建
+测试globalevent 的通知输出，开始时启动一个线程，十秒后输出一些文字
 
 termux Noti
 
-media node
-ex2
+
 rp2040控制 （server/client）
-hcrmi
 blp pkg
+
+database 页面
+media node 页面
+ex2 页面    hcrmi
+
+database:
+    存放的数据：
+        安卓信息
+        html数据（dom，url，访问时间）
+        知识库？
+        geojsnon 数据
+        anime
+
+
+Database record failed: Serialization error: invalid type: enum, expected any valid JSON valueuelueeuee

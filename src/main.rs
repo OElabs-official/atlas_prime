@@ -17,6 +17,7 @@ use std::path::Path;
 use tokio::sync::broadcast;
 
 use crate::config::SharedConfig;
+use crate::db::AtlasDB;
 use crate::message::{GlobalEvent, StatusLevel};
 
 use crate::prelude::{AtlasPath, GlobIO};
@@ -146,7 +147,17 @@ fn main() {
         .unwrap();
 
     rt.block_on(async {
-        crate::db::init_db().await.expect("DB Init Failed");
+        AtlasDB::init().await.expect("AtlasDB Initialization Failed");
+
+        // 2. 临时热修复逻辑
+        // println!("正在检查并修复旧数据结构...");
+        // let fix_query = "UPDATE telemetry_history SET timestamp = time::now() WHERE timestamp = NONE";
+        // if let Err(e) = AtlasDB::get().query(fix_query).await {
+        //     eprintln!("修复失败: {}", e);
+        // } else {
+        //     println!("旧数据结构同步完成！");
+        // }
+
     });
 
     std::thread::spawn(|| {

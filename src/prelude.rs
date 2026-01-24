@@ -182,6 +182,30 @@ impl AtlasPath {
     }
 
 
+    pub fn get_task_path() -> PathBuf {
+        let p = Self::get();
+        // 建议存放在 proj_dir (项目数据目录) 下，与 db 目录同级
+        let path = p.home_dir.join("atlas_task.json");
+        
+        // 确保父目录存在
+        // if let Some(parent) = path.parent() {
+        //     let _ = fs::create_dir_all(parent);
+        // }
+        path
+    }
+
+    /// 从磁盘读取任务文件的原始字符串
+    pub fn read_task_json() -> std::io::Result<String> {
+        let path = Self::get_task_path();
+        
+        // 如果文件不存在，返回空字符串或错误，这里采取返回空字符串并创建文件的策略（或根据需求调整）
+        if !path.exists() {
+            return Ok(String::new());
+        }
+        
+        fs::read_to_string(path)
+    }
+
 }
 
 
@@ -236,11 +260,7 @@ static GLOBAL_CONFIG: OnceLock<SharedConfig> = OnceLock::new();
 impl Config {
     /// 初始化全局配置
     pub fn init() {
-        GLOBAL_CONFIG.get_or_init(|| {
-            let path = AtlasPath::get_config_path();
-            
-            Arc::new(RwLock::new(Config::load_from_disk()))
-        });
+        GLOBAL_CONFIG.get_or_init(|| {Arc::new(RwLock::new(Config::load_from_disk()))});
     }
 
     /// 获取全局配置句柄
@@ -256,9 +276,6 @@ impl Config {
         if let Some(cfg_lock) = GLOBAL_CONFIG.get() {
             let cfg = cfg_lock.read().await;//.unwrap();
             cfg.save()?;
-            // let path = AtlasPath::get_config_path();
-            // let content = serde_json::to_string_pretty(&*cfg).unwrap();
-            // fs::write(path, content)?;
         }
         Ok(())
     }

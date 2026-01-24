@@ -7,6 +7,7 @@ use crate::{
 use crossterm::event::{KeyCode, KeyEvent};
 use directories::{BaseDirs, UserDirs};
 use ratatui::{prelude::*, symbols::block, widgets::*};
+use serde::Serialize;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use sysinfo::{Disks, System};
 use tokio::sync::{broadcast, mpsc};
@@ -398,14 +399,26 @@ impl InfoComponent {
                                 key: ANDROID_BAT,
                                 data: DynamicPayload(Arc::new(bat_pkg)),
                             });
+
+                            // 采集完数据后的逻辑
+                            // 2. 构造持久化记录 (包含 CPU, MEM, BAT)
+                            let record = TelemetryRecord::new(cpu_val.clone(), mem_val, &bat_info);
+                            // 3. 异步存入数据库
                             tokio::spawn(async move {
-                                crate::db::record_telemetry(
-                                    cpu_val.1,
-                                    bat_info.percentage,
-                                    bat_info.temperature,
-                                )
-                                .await;
+                                if let Err(e) = record.save().await {
+                                    // 现在的错误应该会被 record.save 内部处理，
+                                    // 如果还有错误，通常是数据库连接中断
+                                    eprintln!("AtlasDB Save Fail: {}", e);
+                                }
                             });
+                            // tokio::spawn(async move {
+                            //     crate::db::record_telemetry(
+                            //         cpu_val.1,
+                            //         bat_info.percentage,
+                            //         bat_info.temperature,
+                            //     )
+                            //     .await;
+                            // });
                         }
                     }
                 }
@@ -520,10 +533,31 @@ impl Component for InfoComponent {
         // --- [新增] 同步读取数据库历史数据 ---
         // 获取当前 tokio runtime 句柄来执行异步任务
         let handle = tokio::runtime::Handle::current();
-        let db_history = tokio::task::block_in_place(|| {
-            handle.block_on(async { crate::db::get_bat_history_ui(HISTORY_CAP).await })
+        // let db_history = tokio::task::block_in_place(|| {
+        //     handle.block_on(async { crate::db::get_bat_history_ui(HISTORY_CAP).await })
+        // });
+
+        // 1. 同步加载所有历史数据
+        let (db_cpu, db_mem, db_bat) = tokio::task::block_in_place(|| {
+            handle.block_on(async { 
+                TelemetryRecord::fetch_and_distribute(HISTORY_CAP).await 
+            })
         });
 
+        // 2. 补齐逻辑（提取为辅助闭包）
+        let pad_queue = |mut q: VecDeque<_>, cap: usize| {
+            while q.len() < cap {
+                // 这里使用 Default::default() 是安全的
+                q.push_front(Default::default());
+            }
+            if q.len() > cap {
+                q = q.split_off(q.len() - cap);
+            }
+            q
+        };
+
+        /*
+        
         // 将数据库数据转为 VecDeque，并根据 HISTORY_CAP 填充/截断
         let mut bat_history = VecDeque::from(db_history);
         // 如果数据库数据不足，补齐默认值，确保 UI 渲染不越界
@@ -534,9 +568,10 @@ impl Component for InfoComponent {
         if bat_history.len() > HISTORY_CAP {
             bat_history = bat_history.split_off(bat_history.len() - HISTORY_CAP);
         }
+        */
 
         // 1. 创建组件实例时先订阅，用于后续 update 中接收数据
-
+        
         let mut sys = System::new_all();
         sys.refresh_all();
         let total_mem = sys.total_memory() / 1024 / 1024;
@@ -576,7 +611,7 @@ impl Component for InfoComponent {
             // sys,
             total_mem_swap_mb: (total_mem, total_swap),
             mem_swap_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            bat_history, //: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
+            bat_history: pad_queue(db_bat, HISTORY_CAP), //: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             mem_swap_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
             cpu_info_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
@@ -830,4 +865,243 @@ impl InfoComponent {
     }
 
 
+}
+
+use serde::{Deserialize};
+use chrono::{DateTime, Utc};
+use crate::db::AtlasDB; 
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TelemetryRecord {
+    pub timestamp: String,//DateTime<Utc>,
+    
+    // CPU 相关
+    pub cpu_freqs: Vec<f32>,
+    pub cpu_temp_avg: f32, // 取多个 Zone 的平均或特定值
+    
+    // 内存相关
+    pub mem_used_mb: u64,
+    pub swap_used_mb: u64,
+    
+    // 电池相关
+    pub battery_level: u8,
+    pub battery_temp: f64,
+    pub battery_status: String, // 关键：存储 String 而不是 Enum
+}
+
+impl TelemetryRecord {
+    pub fn new(
+        cpu_info: AndroidCpuInfo, 
+        mem_info: MemSwapMB, 
+        bat_info: &termux::battery::BatteryStatus // 传入引用
+    ) -> Self {
+        Self {
+            timestamp: Utc::now().to_rfc3339(),
+            cpu_freqs: cpu_info.0,
+            cpu_temp_avg: cpu_info.1,
+            mem_used_mb: mem_info.0,
+            swap_used_mb: mem_info.1,
+            battery_level: bat_info.percentage,
+            battery_temp: bat_info.temperature,
+            // 彻底修复 Enum 序列化错误：转为字符串存储
+            battery_status: format!("{:?}", bat_info.status), 
+        }
+    }
+
+    pub async fn save(&self) -> surrealdb::Result<()> {
+        AtlasDB::record_to("android", "telemetry", "telemetry_history", self.clone()).await
+    }
+
+    /// 从数据库获取历史并分发到各个 UI 队列
+    pub async fn fetch_and_distribute(limit: usize) -> (
+        VecDeque<AndroidCpuInfo>, 
+        VecDeque<MemSwapMB>, 
+        VecDeque<AndroidBatInfo>
+    ) {
+        let sql = format!("SELECT * FROM telemetry_history ORDER BY timestamp DESC LIMIT {}", limit);
+        let db = AtlasDB::get();
+        
+        let mut cpu_q = VecDeque::new();
+        let mut mem_q = VecDeque::new();
+        let mut bat_q = VecDeque::new();
+
+        if let Ok(mut res) = db.query(sql).await {
+            let records: Vec<TelemetryRecord> = res.take(0).unwrap_or_default();
+            
+            // 数据库里是 DESC (最新的在前)，UI 渲染通常需要最新的在后
+            for r in records.into_iter().rev() {
+                cpu_q.push_back((r.cpu_freqs, r.cpu_temp_avg, 0.0)); // 兼容原类型
+                mem_q.push_back((r.mem_used_mb, r.swap_used_mb));
+                bat_q.push_back((r.battery_level, r.battery_status, r.battery_temp));
+            }
+        }
+        (cpu_q, mem_q, bat_q)
+    }
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct _TelemetryRecord {
+    pub cpu_temp: f32,
+    pub battery_level: u8,
+    pub battery_temp: f64,
+    // 建议加上时间戳，方便后续做图表和降采样
+    // 如果没有这个字段，SurrealDB 默认只有生成时间，但显式记录更方便
+    #[serde(default = "Utc::now")] 
+    pub timestamp: DateTime<Utc>,
+}
+
+impl _TelemetryRecord {
+    /// 构造函数
+    pub fn new(cpu_temp: f32, battery_level: u8, battery_temp: f64) -> Self {
+        Self {
+            cpu_temp,
+            battery_level,
+            battery_temp,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// 实例方法：将当前这条记录保存到数据库
+    pub async fn save(&self) -> surrealdb::Result<()> {
+        // 直接调用 AtlasDB 的通用写入接口
+        // 这里我们指定 context 为 android/telemetry
+        AtlasDB::record_to("android", "telemetry", "telemetry_history", self.clone()).await
+    }
+
+    /// 关联函数：获取最近的 N 条历史记录
+    pub async fn fetch_recent(limit: usize) -> Vec<Self> {
+        let sql = format!(
+            "SELECT * FROM telemetry_history ORDER BY timestamp DESC LIMIT {}",
+            limit
+        );
+
+        let db = AtlasDB::get();
+        
+        // 1. 执行查询
+        let mut response = match db.query(sql).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("InfoTab: History Query Failed: {}", e);
+                return vec![];
+            }
+        };
+
+        // 2. 解析结果
+        // 使用 Option<Vec<Self>> 来安全接收，避免 QueryResult 类型推导错误
+        let result: Option<Vec<_TelemetryRecord>> = response.take(0).unwrap_or(None);
+        
+        result.unwrap_or_default()
+    }
+
+    /// 转换辅助函数：将结构体转为 UI 需要的 Tuple 格式
+    /// 对应原来的 get_bat_history_ui 逻辑
+    pub fn to_ui_info(&self) -> AndroidBatInfo {
+        (
+            self.battery_level,
+            "History".to_string(), // 历史记录通常没有即时状态，或者需要额外存字段
+            self.battery_temp,
+        )
+    }
+
+    /// 批量获取并转换为 UI 格式
+    pub async fn fetch_ui_history(limit: usize) -> Vec<AndroidBatInfo> {
+        let records = Self::fetch_recent(limit).await;
+        records.into_iter().map(|r| r.to_ui_info()).collect()
+    }
+}
+
+/* 
+// for database
+
+// 内部结构体用于写入，方便后期维护和扩展
+#[derive(Serialize)]
+struct TelemetryRecord {
+    cpu_temp: f32,
+    battery_level: u8,
+    battery_temp: f64,
+}
+
+pub async fn record_telemetry(cpu: f32, bat: u8, bat_temp: f64) {
+    if let Some(db) = DB_INSTANCE.get() {
+        // 修复 2: .create() 在 2.x 中返回的是 Option<T> 或特定的 Result
+        // 我们通常只需要知道是否写入成功，不需要强制转换成 Vec
+        let record = TelemetryRecord {
+            cpu_temp: cpu,
+            battery_level: bat,
+            battery_temp: bat_temp,
+        };
+
+        // 在 SurrealDB 中，create 某个 table 返回的是单条记录 Option<T>
+        // 如果你需要插入并忽略结果，直接让它推导为 Option 即可
+        let _: Option<serde_json::Value> = db
+            .create("telemetry_history")
+            .content(record)
+            .await
+            .unwrap_or(None);
+    }
+}
+
+/// 获取最近的历史记录
+pub async fn get_history(limit: usize) -> Vec<serde_json::Value> {
+    if let Some(db) = DB_INSTANCE.get() {
+        // 使用 type::string(id) 将 RecordId 显式转换为普通 String
+        // 同时使用 VALUE 关键字获取干净的对象数组
+        let sql = format!(
+            "SELECT *, type::string(id) AS id FROM telemetry_history ORDER BY id DESC LIMIT {}",
+            limit
+        );
+
+        let mut res = match db.query(sql).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SQL 语法错误: {}", e);
+                return vec![];
+            }
+        };
+
+        // 获取第一个语句的结果
+        match res.take::<Vec<serde_json::Value>>(0) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("核心解析失败: {:?}", e);
+                // 如果还是解析失败，尝试打印第一条数据的原始形态，看看到底是什么
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    }
+}
+
+
+// 这里的类型要对应你的 (u8, String, f64) 结构
+pub async fn get_bat_history_ui(limit: usize) -> Vec<AndroidBatInfo> {
+    let raw_data = get_history(limit).await;
+    raw_data
+        .into_iter()
+        .map(|v| {
+            (
+                v.get("battery_level").and_then(|l| l.as_u64()).unwrap_or(0) as u8,
+                "History".to_string(), // 数据库里没存状态字符串，可以用占位符
+                v.get("battery_temp")
+                    .and_then(|t| t.as_f64())
+                    .unwrap_or(0.0),
+            )
+        })
+        .collect()
+}
+        
+*/
+
+// 3. 主程序调用示例 (Rust Client)
+// 现在主程序采集到数据后，只需调用这个简单的 HTTP 逻辑，再也不会有 Enum 报错了：
+// 在 info.rs 的监控任务中
+async fn report_telemetry(record: TelemetryRecord) {
+    let client = reqwest::Client::new();
+    let _ = client
+        .post("http://127.0.0.1:8080/api/v1/db/android/telemetry/history")
+        .json(&record) // 这里会自动序列化成纯 JSON
+        .send()
+        .await;
 }
