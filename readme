@@ -44,7 +44,27 @@ Info 页面：
 常量配置：
 
 数据库：
+1. 核心架构变更
 
+    网关化 (Gateway Pattern)：主程序不再直接持有数据库会话状态，而是通过 localhost:8080 进行通信。
+
+    上下文无关 (Contextless)：AtlasDB::get_stats 等函数现在显式接收 ns 和 db 参数，消除了单例状态竞争风险。
+
+    自动建库逻辑：在 api_db_writer 路由中集成了 DEFINE NAMESPACE/DATABASE IF NOT EXISTS，实现了真正的动态存储分配。
+
+2. 数据库逻辑下沉
+
+    底层引擎化：AtlasDB 缩减为纯粹的存储启动器与原始 SQL 执行器。
+
+    业务逻辑解耦：删除了硬编码表名（如 telemetry_history）的辅助函数。
+
+    类型安全保障：利用 HTTP 协议层的 JSON 强制转换，彻底规避了 SurrealDB Rust Driver 在处理枚举类型（Enum）时的序列化报错。
+
+3. AI 与外部兼容性
+
+    动态 SQL 接口：新增 /api/v1/db/query 路由，允许 AI 代理（如运行在 Termux 上的 Python 脚本）直接执行 SQL 任务。
+
+    读写安全过滤：在网关层初步实现了针对 AI 查询的只读过滤逻辑。
 
 
 

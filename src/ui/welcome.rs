@@ -1,7 +1,7 @@
 use crate::{config::{Config, SharedConfig}, constans::ART_LOGO, ui::component::Component};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
-use ureq::config;
+
 
 pub struct WelcomeComponent {
     pub config: SharedConfig, // 持有共享引用的拷贝，开销极小

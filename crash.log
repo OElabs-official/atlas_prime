@@ -264,3 +264,53 @@ Stack Trace:
   23: __start_thread
 
 
+--- PANIC AT 2026-01-26 12:31:20 ---
+Location: src/db.rs:77:28
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::handle::Handle>::block_on_inner<<atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::init::{closure#0}::{closure#0}>::{closure#0}, alloc::vec::Vec<atlas_prime::ui::info::TelemetryRecord>>
+   8: tokio::runtime::scheduler::multi_thread::worker::block_in_place::<<atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::init::{closure#0}, alloc::vec::Vec<atlas_prime::ui::info::TelemetryRecord>>
+   9: <atlas_prime::constans::TabId>::init
+  10: <atlas_prime::app::App as atlas_prime::ui::component::Component>::init
+  11: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::multi_thread::MultiThread>::block_on<atlas_prime::main::{closure#2}::{closure#0}>::{closure#0}, ()>
+  12: <tokio::runtime::runtime::Runtime>::block_on::<atlas_prime::main::{closure#2}::{closure#0}>
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+
+--- PANIC AT 2026-01-26 12:31:40 ---
+Location: src/db.rs:77:28
+Error: Unknown Panic
+Stack Trace:
+   0: atlas_prime::setup_panic_hook::{closure#0}
+   1: std::panicking::panic_with_hook
+   2: std::panicking::panic_handler::{closure#0}
+   3: std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>
+   4: __rustc::rust_begin_unwind
+   5: core::panicking::panic_fmt
+   6: core::option::expect_failed
+   7: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::handle::Handle>::block_on_inner<<atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::init::{closure#0}::{closure#0}>::{closure#0}, alloc::vec::Vec<atlas_prime::ui::info::TelemetryRecord>>
+   8: tokio::runtime::scheduler::multi_thread::worker::block_in_place::<<atlas_prime::ui::info::InfoComponent as atlas_prime::ui::component::Component>::init::{closure#0}, alloc::vec::Vec<atlas_prime::ui::info::TelemetryRecord>>
+   9: <atlas_prime::constans::TabId>::init
+  10: <atlas_prime::app::App as atlas_prime::ui::component::Component>::init
+  11: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::multi_thread::MultiThread>::block_on<atlas_prime::main::{closure#2}::{closure#0}>::{closure#0}, ()>
+  12: <tokio::runtime::runtime::Runtime>::block_on::<atlas_prime::main::{closure#2}::{closure#0}>
+  13: atlas_prime::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: main
+  18: __libc_init
+
+

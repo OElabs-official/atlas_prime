@@ -1,23 +1,28 @@
 use crate::{
     app::{GlobRecv, GlobSend}, config::{AppColor, Config, SharedConfig}, constans::{
-        HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES,
-        INFO_UPDATE_INTERVAL_SLOWEST,
+        DATABASE_NAME, DB_DFT_DB, DB_DFT_NS, HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES, INFO_UPDATE_INTERVAL_SLOWEST
     }, message::{DynamicPayload, GlobalEvent}, prelude::{AtlasPath, GlobIO}, ui::component::Component
 };
+use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
 use directories::{BaseDirs, UserDirs};
 use ratatui::{prelude::*, symbols::block, widgets::*};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use sysinfo::{Disks, System};
 use tokio::sync::{broadcast, mpsc};
+use crate::db::Mongo;
+
+const COLL_NAME: &str = "telemetry_history"; // database collections
+
+
 // 增加长周期数据 Key
 const MEM_SWAP_LONG: &str = "mem_swap_long";
 const ANDROID_CPU_LONG: &str = "android_cpu_long";
 const ANDROID_BAT: &str = "android_bat";
 pub type AndroidBatInfo = (u8, String, f64); // (电量百分比, 充放电状态String, 电池温度f32)
 const ANDROID_CPU: &str = "android_cpu";
-type AndroidCpuInfo = (Vec<f32>, f32, f32); // (各核心频率Vec<f32>, Zone0温度f32, Zone7温度f32)
+type CpuInfo = (Vec<f32>, f32, f32); // (各核心频率Vec<f32>, Zone0温度f32, Zone7温度f32)
 const MEM_SWAP: &str = "mem_swap";
 type MemSwapMB = (u64, u64);
 const DISK_IP: &str = "disk_ip";
@@ -42,13 +47,14 @@ pub struct InfoComponent {
     mem_swap_long_history: VecDeque<(u64, u64)>,
     // Android 专用数据存储
     bat_history: VecDeque<AndroidBatInfo>,
-    cpu_info_history: VecDeque<AndroidCpuInfo>,
-    cpu_info_long_history: VecDeque<AndroidCpuInfo>,
+    cpu_info_history: VecDeque<CpuInfo>,
+    cpu_info_long_history: VecDeque<CpuInfo>,
 
     system_info: String, // 例如: "Android 14"
 }
 
-impl InfoComponent {
+impl InfoComponent // rende part uis
+{
     fn render_ip_addresses(&self, f: &mut Frame, area: Rect) {
         let (v4, v6) = &self.ip_list;
 
@@ -334,120 +340,7 @@ impl InfoComponent {
         );
     }
 
-    /// 在info 初始化时建立长期任务，定期发送系统信息
-    /// 每一个小周期发送内存和swap数据元组
-    /// 每一个大周期发送磁盘数据向量和ip数据向量    
-    fn spawn_monitor_task() {
-        tokio::spawn(async move {
-            let glob_send = GlobIO::send();
-            let mut sys = System::new_all();
-            let mut tick_count: u64 = 0;
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
 
-            // --- [新增] 启动预热：在进入循环前先同步一次数据，让 UI 瞬间填满 ---
-            Self::perform_full_sync(&mut sys, &glob_send);
-
-            loop {
-                interval.tick().await;
-                tick_count = tick_count.wrapping_add(1);
-
-                // 1. 基础数据采集 (每秒仅一次)
-                sys.refresh_memory();
-                let mem_val: MemSwapMB = (
-                    sys.used_memory() / 1024 / 1024,
-                    sys.used_swap() / 1024 / 1024,
-                );
-                let mem_payload = DynamicPayload(Arc::new(mem_val));
-
-                #[cfg(target_os = "android")]
-                let cpu_val = Self::task_collect_android_cpu();
-                #[cfg(target_os = "android")]
-                let cpu_payload = DynamicPayload(Arc::new(cpu_val.clone()));
-
-                // 2. 短周期分发
-                let _ = glob_send.send(GlobalEvent::Data {
-                    key: MEM_SWAP,
-                    data: mem_payload.clone(),
-                });
-                #[cfg(target_os = "android")]
-                let _ = glob_send.send(GlobalEvent::Data {
-                    key: ANDROID_CPU,
-                    data: cpu_payload.clone(),
-                });
-
-                // 3. 长周期分发 (复用已包装好的 Arc，不产生额外开销)
-                if tick_count % INFO_UPDATE_INTERVAL_SLOWEST == 1 {
-                    let _ = glob_send.send(GlobalEvent::Data {
-                        key: MEM_SWAP_LONG,
-                        data: mem_payload,
-                    });
-                    #[cfg(target_os = "android")]
-                    {
-                        let _ = glob_send.send(GlobalEvent::Data {
-                            key: ANDROID_CPU_LONG,
-                            data: cpu_payload,
-                        });
-                        // 只有在这里才调用较慢的 battery api
-                        if let Ok(bat_info) = termux::battery::status() {
-                            let bat_pkg: AndroidBatInfo = (
-                                bat_info.percentage,
-                                format!("{:?}", bat_info.status),
-                                bat_info.temperature,
-                            );
-                            let _ = glob_send.send(GlobalEvent::Data {
-                                key: ANDROID_BAT,
-                                data: DynamicPayload(Arc::new(bat_pkg)),
-                            });
-
-                            // 采集完数据后的逻辑
-                            // 2. 构造持久化记录 (包含 CPU, MEM, BAT)
-                            let record = TelemetryRecord::new(cpu_val.clone(), mem_val, &bat_info);
-                            // 3. 异步存入数据库
-                            tokio::spawn(async move {
-                                if let Err(e) = record.save().await {
-                                    // 现在的错误应该会被 record.save 内部处理，
-                                    // 如果还有错误，通常是数据库连接中断
-                                    eprintln!("AtlasDB Save Fail: {}", e);
-                                }
-                            });
-                            // tokio::spawn(async move {
-                            //     crate::db::record_telemetry(
-                            //         cpu_val.1,
-                            //         bat_info.percentage,
-                            //         bat_info.temperature,
-                            //     )
-                            //     .await;
-                            // });
-                        }
-                    }
-                }
-
-                // 4. 中周期分发
-                if tick_count % INFO_UPDATE_INTERVAL_SLOW_TIMES == 1 {
-                    let pkg: DiskIP = (Self::task_collect_disks(), Self::ip_list());
-                    let _ = glob_send.send(GlobalEvent::Data {
-                        key: DISK_IP,
-                        data: DynamicPayload(Arc::new(pkg)),
-                    });
-                }
-            }
-        });
-    }
-
-    // 提取出一个全量同步函数，供初始化和特殊时刻调用
-    fn perform_full_sync(sys: &mut System, glob_send: &GlobSend) {
-        sys.refresh_memory();
-        let mem = (
-            sys.used_memory() / 1024 / 1024,
-            sys.used_swap() / 1024 / 1024,
-        );
-        let _ = glob_send.send(GlobalEvent::Data {
-            key: MEM_SWAP_LONG,
-            data: DynamicPayload(Arc::new(mem)),
-        });
-        // ... 可按需扩展其他预热项
-    }
 
     fn render_disk_list(&self, f: &mut Frame, area: Rect) {
         // --- 1. 使用缓存数据，不再调用 Disks::new() ---
@@ -526,99 +419,71 @@ impl InfoComponent {
 }
 
 impl Component for InfoComponent {
-    fn init() -> Self
-    where
-        Self: Sized,
-    {
-        // --- [新增] 同步读取数据库历史数据 ---
-        // 获取当前 tokio runtime 句柄来执行异步任务
-        let handle = tokio::runtime::Handle::current();
-        // let db_history = tokio::task::block_in_place(|| {
-        //     handle.block_on(async { crate::db::get_bat_history_ui(HISTORY_CAP).await })
-        // });
+fn init() -> Self
+where
+    Self: Sized,
+{
+    let handle = tokio::runtime::Handle::current();
 
-        // 1. 同步加载所有历史数据
-        let (db_cpu, db_mem, db_bat) = tokio::task::block_in_place(|| {
-            handle.block_on(async { 
-                TelemetryRecord::fetch_and_distribute(HISTORY_CAP).await 
-            })
-        });
+    // --- 1. 从 MongoDB 异步拉取最近的记录并转换为同步结果 ---
+    let db_records: Vec<TelemetryRecord> = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            // 使用你定义的 DATABASE_NAME
+            crate::db::Mongo::fetch_recent::<TelemetryRecord>(DATABASE_NAME, COLL_NAME, HISTORY_CAP as i64).await
+        })
+    });
 
-        // 2. 补齐逻辑（提取为辅助闭包）
-        let pad_queue = |mut q: VecDeque<_>, cap: usize| {
-            while q.len() < cap {
-                // 这里使用 Default::default() 是安全的
-                q.push_front(Default::default());
-            }
-            if q.len() > cap {
-                q = q.split_off(q.len() - cap);
-            }
-            q
-        };
+    // --- 2. 转换数据为 UI 队列 ---
+    let mut db_cpu = VecDeque::with_capacity(HISTORY_CAP);
+    let mut db_mem = VecDeque::with_capacity(HISTORY_CAP);
+    let mut db_bat = VecDeque::with_capacity(HISTORY_CAP);
 
-        /*
-        
-        // 将数据库数据转为 VecDeque，并根据 HISTORY_CAP 填充/截断
-        let mut bat_history = VecDeque::from(db_history);
-        // 如果数据库数据不足，补齐默认值，确保 UI 渲染不越界
-        while bat_history.len() < HISTORY_CAP {
-            bat_history.push_front(Default::default());
-        }
-        // 如果多了，截取最新的
-        if bat_history.len() > HISTORY_CAP {
-            bat_history = bat_history.split_off(bat_history.len() - HISTORY_CAP);
-        }
-        */
-
-        // 1. 创建组件实例时先订阅，用于后续 update 中接收数据
-        
-        let mut sys = System::new_all();
-        sys.refresh_all();
-        let total_mem = sys.total_memory() / 1024 / 1024;
-        let total_swap = sys.total_swap() / 1024 / 1024;
-
-        Self::spawn_monitor_task();
-
-        let mut system_info: String = Default::default();
-        {
-            let vinf = &[
-                System::cpu_arch(),
-                System::name().unwrap_or_else(|| "Unknown name".into()),
-                // System::host_name().unwrap_or_else(|| "Unknown host_name".into()),
-                // System::name().unwrap_or_else(|| "Unknown OS".into()),
-                System::kernel_long_version()
-                    .split('-')
-                    .collect::<Vec<_>>()
-                    .first()
-                    .unwrap_or_else(|| &"")
-                    .to_string(),
-                System::os_version().unwrap_or_else(|| "".into()),
-            ];
-            for i0 in vinf {
-                system_info.push_str(i0);
-                system_info.push('*');
-            }
-        }
-
-        let output = Self {
-
-            glob_recv:GlobIO::recv(),
-            mount_points: Default::default(),
-            dir_list: AtlasPath::collect_dirs(),
-            ip_list: Default::default(),
-            focus_index: Some(0), //
-            scroll_offsets: Default::default(),
-            // sys,
-            total_mem_swap_mb: (total_mem, total_swap),
-            mem_swap_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            bat_history: pad_queue(db_bat, HISTORY_CAP), //: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            cpu_info_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            mem_swap_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            cpu_info_long_history: VecDeque::from(vec![Default::default(); HISTORY_CAP]),
-            system_info,
-        };
-        output
+    // MongoDB 返回的是 DESC 排序，UI 需要按时间轴从左往右（从旧到新），所以 rev 迭代
+    for r in db_records.into_iter().rev() {
+        db_cpu.push_back(r.cpu_data);
+        db_mem.push_back(r.mem_swap);
+        db_bat.push_back(r.battery_data);
     }
+
+    // 补齐逻辑：确保队列长度达到 HISTORY_CAP
+    while db_cpu.len() < HISTORY_CAP { db_cpu.push_front(Default::default()); }
+    while db_mem.len() < HISTORY_CAP { db_mem.push_front(Default::default()); }
+    while db_bat.len() < HISTORY_CAP { db_bat.push_front(Default::default()); }
+
+    // --- 3. 获取系统静态信息 ---
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    let system_info = format!("{}*{}*{}*{}", 
+        System::cpu_arch(),
+        System::name().unwrap_or_default(),
+        System::kernel_long_version().split('-').next().unwrap_or(""),
+        System::os_version().unwrap_or_default()
+    );
+
+    // --- 4. 启动后台采样 ---
+    Self::spawn_monitor_task();
+
+    Self {
+        glob_recv: GlobIO::recv(),
+        mount_points: Default::default(),
+        dir_list: AtlasPath::collect_dirs(),
+        ip_list: Default::default(),
+        focus_index: Some(0),
+        scroll_offsets: [0, 0, 0],
+        total_mem_swap_mb: (sys.total_memory() / 1024 / 1024, sys.total_swap() / 1024 / 1024),
+        
+        mem_swap_history: db_mem.clone(),
+        mem_swap_long_history: db_mem,
+        
+        cpu_info_history: db_cpu.clone(),
+        cpu_info_long_history: db_cpu,
+        
+        bat_history: db_bat,
+        system_info,
+    }
+}
+    
+
 
     /// 接受广播定期回传的信息
     fn update(&mut self) -> bool {
@@ -655,7 +520,7 @@ impl Component for InfoComponent {
                         }
                         // --- 3. CPU 核心、温度 (短周期) ---
                         ANDROID_CPU => {
-                            if let Some(pkg) = data.0.downcast_ref::<AndroidCpuInfo>() {
+                            if let Some(pkg) = data.0.downcast_ref::<CpuInfo>() {
                                 self.cpu_info_history.push_back(pkg.clone());
                                 if self.cpu_info_history.len() > HISTORY_CAP {
                                     self.cpu_info_history.pop_front();
@@ -665,7 +530,7 @@ impl Component for InfoComponent {
                         }
                         // --- 4. CPU 核心、温度 (长周期) ---
                         ANDROID_CPU_LONG => {
-                            if let Some(pkg) = data.0.downcast_ref::<AndroidCpuInfo>() {
+                            if let Some(pkg) = data.0.downcast_ref::<CpuInfo>() {
                                 self.cpu_info_long_history.push_back(pkg.clone());
                                 if self.cpu_info_long_history.len() > HISTORY_CAP {
                                     self.cpu_info_long_history.pop_front();
@@ -803,27 +668,143 @@ impl Component for InfoComponent {
     }
 }
 
-impl InfoComponent {
-    // --- 辅助采集函数：CPU ---
-    fn task_collect_android_cpu() -> AndroidCpuInfo {
-        let mut freqs = Vec::with_capacity(8);
-        for i in 0..8 {
-            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
-            let f = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|s| s.trim().parse::<f32>().ok())
-                .map(|f| f / 1_000_000.0)
-                .unwrap_or(0.0);
-            freqs.push(f);
+
+
+impl InfoComponent { // 辅助采集函数
+
+
+    /// 在info 初始化时建立长期任务，定期发送系统信息
+    fn spawn_monitor_task() {
+        tokio::spawn(async move {
+            let glob_send = GlobIO::send();
+            let mut sys = System::new_all();
+            let mut tick_count: u64 = 0;
+            let mut interval = tokio::time::interval(Duration::from_secs(INFO_UPDATE_INTERVAL_BASE));
+
+            // 启动预热
+            Self::perform_full_sync(&mut sys, &glob_send);
+
+            loop {
+                interval.tick().await;
+                tick_count = tick_count.wrapping_add(1);
+
+                // --- 1. 基础数据采集 (每秒) ---
+                sys.refresh_memory();
+                let mem_val: MemSwapMB = (
+                    sys.used_memory() / 1024 / 1024,
+                    sys.used_swap() / 1024 / 1024,
+                );
+                let cpu_val = Self::task_collect_cpu();
+
+                // 包装为 Arc Payload
+                let mem_payload = DynamicPayload(Arc::new(mem_val));
+                let cpu_payload = DynamicPayload(Arc::new(cpu_val.clone()));
+
+                // --- 2. 短周期分发 (实时 UI) ---
+                let _ = glob_send.send(GlobalEvent::Data { key: MEM_SWAP, data: mem_payload.clone() });
+                let _ = glob_send.send(GlobalEvent::Data { key: ANDROID_CPU, data: cpu_payload.clone() });
+
+                // --- 3. 长周期处理 (数据库存储 + 历史分发) ---
+                if tick_count % INFO_UPDATE_INTERVAL_SLOWEST == 1 {
+                    let bat_val = Self::task_collect_battery();
+                    let bat_payload = DynamicPayload(Arc::new(bat_val.clone()));
+
+                    // A. 构造持久化记录 (结构与发送一致)
+                    let record = TelemetryRecord {
+                        timestamp: Utc::now().to_rfc3339(),
+                        cpu_data: cpu_val, 
+                        mem_swap: mem_val,
+                        battery_data: bat_val,
+                    };
+
+                    // B. 异步存入 MongoDB (使用全局 DATABASE_NAME)
+                    let _ = Mongo::save(DATABASE_NAME, COLL_NAME, record).await;
+
+                    // C. 分发长周期 Payload
+                    let _ = glob_send.send(GlobalEvent::Data { key: MEM_SWAP_LONG, data: mem_payload });
+                    let _ = glob_send.send(GlobalEvent::Data { key: ANDROID_CPU_LONG, data: cpu_payload });
+                    let _ = glob_send.send(GlobalEvent::Data { key: ANDROID_BAT, data: bat_payload });
+                }
+
+                // --- 4. 中周期分发 (磁盘与网络) ---
+                if tick_count % INFO_UPDATE_INTERVAL_SLOW_TIMES == 1 {
+                    let pkg: DiskIP = (Self::task_collect_disks(), Self::ip_list());
+                    let _ = glob_send.send(GlobalEvent::Data {
+                        key: DISK_IP,
+                        data: DynamicPayload(Arc::new(pkg)),
+                    });
+                }
+            }
+        });
+    }
+
+
+
+    // 提取出一个全量同步函数，供初始化和特殊时刻调用
+    fn perform_full_sync(sys: &mut System, glob_send: &GlobSend) {
+        sys.refresh_memory();
+        let mem = (
+            sys.used_memory() / 1024 / 1024,
+            sys.used_swap() / 1024 / 1024,
+        );
+        let _ = glob_send.send(GlobalEvent::Data {
+            key: MEM_SWAP_LONG,
+            data: DynamicPayload(Arc::new(mem)),
+        });
+        // ... 可按需扩展其他预热项
+    }
+
+    fn task_collect_battery() -> AndroidBatInfo 
+    {
+        #[cfg(target_os = "android")]
+        {
+            // 尝试调用 termux-api 获取电池状态
+            if let Ok(bat_info) = termux::battery::status() {
+                (
+                    bat_info.percentage,
+                    format!("{:?}", bat_info.status),
+                    bat_info.temperature,
+                )
+            } else {
+                // 如果 termux-api 调用失败（例如未安装 API 包），返回默认值
+                (0, "Unknown".to_string(), 0.0)
+            }            
         }
-        let read_zone = |z| {
-            std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{}/temp", z))
-                .ok()
-                .and_then(|s| s.trim().parse::<f32>().ok())
-                .map(|t| t / 1000.0)
-                .unwrap_or(0.0)
-        };
-        (freqs, read_zone(0), read_zone(7))
+        #[cfg(not(target_os = "android"))]
+        {
+            (100, "AC-Powered".to_string(), 35.0)
+        }
+
+}
+    
+    // --- CPU ---
+    fn task_collect_cpu() -> CpuInfo {
+        #[cfg(target_os = "android")]
+        {
+            let mut freqs = Vec::with_capacity(8);
+            for i in 0..8 {
+                let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", i);
+                let f = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f32>().ok())
+                    .map(|f| f / 1_000_000.0)
+                    .unwrap_or(0.0);
+                freqs.push(f);
+            }
+            let read_zone = |z| {
+                std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{}/temp", z))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f32>().ok())
+                    .map(|t| t / 1000.0)
+                    .unwrap_or(0.0)
+            };
+            (freqs, read_zone(0), read_zone(7))            
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            (vec![0.0; 8], 0.0, 0.0)
+        }
+
     }
 
     // --- 辅助采集函数：磁盘 ---
@@ -867,241 +848,158 @@ impl InfoComponent {
 
 }
 
-use serde::{Deserialize};
-use chrono::{DateTime, Utc};
-use crate::db::AtlasDB; 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TelemetryRecord {
-    pub timestamp: String,//DateTime<Utc>,
+    pub timestamp: String, // 改为 String 提高序列化兼容性
+    pub cpu_data: CpuInfo,
+    pub mem_swap: MemSwapMB,
+    pub battery_data: AndroidBatInfo,
+}
+
+
+
+
+
+
+
+
+
+
+
+
+// use serde::{Deserialize};
+// use chrono::{DateTime, Utc};
+
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// #[serde(rename_all = "snake_case")]
+// pub struct TelemetryRecord {
+//     pub timestamp: String,//DateTime<Utc>,
     
-    // CPU 相关
-    pub cpu_freqs: Vec<f32>,
-    pub cpu_temp_avg: f32, // 取多个 Zone 的平均或特定值
+//     pub cpu_data : AndroidCpuInfo,
+//     // CPU 相关
+//     // pub cpu_freqs: Vec<f32>,
+//     // pub cpu_temp_a: f32, 
+//     // pub cpu_temp_b: f32,
+
+
+//     // 内存相关
+//     pub mem_swap : MemSwapMB,
+//     // pub mem_used_mb: u64,
+//     // pub swap_used_mb: u64,
     
-    // 内存相关
-    pub mem_used_mb: u64,
-    pub swap_used_mb: u64,
-    
-    // 电池相关
-    pub battery_level: u8,
-    pub battery_temp: f64,
-    pub battery_status: String, // 关键：存储 String 而不是 Enum
-}
+//     // 电池相关
+//     pub battery_data: AndroidBatInfo,
+//     // pub battery_level: u8,
+//     // pub battery_status: String, // 关键：存储 String 而不是 Enum
+//     // pub battery_temp: f64,
+   
+// }
 
-impl TelemetryRecord {
-    pub fn new(
-        cpu_info: AndroidCpuInfo, 
-        mem_info: MemSwapMB, 
-        bat_info: &termux::battery::BatteryStatus // 传入引用
-    ) -> Self {
-        Self {
-            timestamp: Utc::now().to_rfc3339(),
-            cpu_freqs: cpu_info.0,
-            cpu_temp_avg: cpu_info.1,
-            mem_used_mb: mem_info.0,
-            swap_used_mb: mem_info.1,
-            battery_level: bat_info.percentage,
-            battery_temp: bat_info.temperature,
-            // 彻底修复 Enum 序列化错误：转为字符串存储
-            battery_status: format!("{:?}", bat_info.status), 
-        }
-    }
+// #[derive(serde::Deserialize)]
+// struct SurrealQueryResult {
+//     result: Vec<TelemetryRecord>,
+//     status: String,
+// }
 
-    pub async fn save(&self) -> surrealdb::Result<()> {
-        AtlasDB::record_to("android", "telemetry", "telemetry_history", self.clone()).await
-    }
+// impl TelemetryRecord {
+//     pub fn new(cpu: AndroidCpuInfo, mem: MemSwapMB, bat: &termux::battery::BatteryStatus) -> Self {
+//         Self {
+//             timestamp: chrono::Utc::now().to_rfc3339(),
+//             cpu_data: cpu,
+//             mem_swap: mem,
+//             battery_data: (
+//                 bat.percentage,
+//                 format!("{:?}", bat.status),
+//                 bat.temperature,
+//             ),
+//         }
+//     }
 
-    /// 从数据库获取历史并分发到各个 UI 队列
-    pub async fn fetch_and_distribute(limit: usize) -> (
-        VecDeque<AndroidCpuInfo>, 
-        VecDeque<MemSwapMB>, 
-        VecDeque<AndroidBatInfo>
-    ) {
-        let sql = format!("SELECT * FROM telemetry_history ORDER BY timestamp DESC LIMIT {}", limit);
-        let db = AtlasDB::get();
+//     /// 方案 B：通过 HTTP POST 发送到 Ntex 网关
+//     pub async fn save(&self) -> Result<(), reqwest::Error> {
+//         // let client = reqwest::Client::new();
+//         // // 显式路径：/api/v1/db/{ns}/{db}/{table}
+//         // let url = format!(
+//         //     "http://127.0.0.1:2000/api/v1/db/{}/{}/telemetry_history",
+//         //     DB_DFT_NS,
+//         //     DB_DFT_DB
+//         // );
+
+//         // client.post(url)
+//         //     .json(self) 
+//         //     .send()
+//         //     .await?;
+//         Ok(())
+//     }
+
+//     // pub async fn save_to_db(&self) -> Result<(), String> {
+//     //     Mongo::save(DB_NAME, COLL_NAME, self).await
+//     // }
+
+
+
+//     // /// 核心重构：同时拉取短周期和长周期数据
+//     // /// 由于目前我们只有一张表，长周期数据可以通过更宽的时间跨度或 LIMIT 来获取
+//     // pub async fn fetch_and_distribute(limit: usize) -> (
+//     //     VecDeque<AndroidCpuInfo>, 
+//     //     VecDeque<MemSwapMB>, 
+//     //     VecDeque<AndroidBatInfo>
+//     // ) {
+//     //     let client = reqwest::Client::new();
+//     //     // 修正 1：URL 现在包含 ns 和 db
+//     //     let url = format!("http://127.0.0.1:2000/api/v1/db/query/{}/{}", DB_DFT_NS, DB_DFT_DB);
         
-        let mut cpu_q = VecDeque::new();
-        let mut mem_q = VecDeque::new();
-        let mut bat_q = VecDeque::new();
+//     //     // 修正 2：简化 SQL，移除 USE 语句
+//     //     let sql = format!("SELECT * FROM telemetry_history ORDER BY timestamp DESC LIMIT {};", limit);
 
-        if let Ok(mut res) = db.query(sql).await {
-            let records: Vec<TelemetryRecord> = res.take(0).unwrap_or_default();
-            
-            // 数据库里是 DESC (最新的在前)，UI 渲染通常需要最新的在后
-            for r in records.into_iter().rev() {
-                cpu_q.push_back((r.cpu_freqs, r.cpu_temp_avg, 0.0)); // 兼容原类型
-                mem_q.push_back((r.mem_used_mb, r.swap_used_mb));
-                bat_q.push_back((r.battery_level, r.battery_status, r.battery_temp));
-            }
-        }
-        (cpu_q, mem_q, bat_q)
-    }
-}
+//     //     let mut cpu_q = VecDeque::new();
+//     //     let mut mem_q = VecDeque::new();
+//     //     let mut bat_q = VecDeque::new();
 
+//     //     if let Ok(resp) = client.post(url).body(sql).send().await {
+//     //         // 修正 3：处理 SurrealDB 嵌套的 JSON 返回格式 [ { result: [...], status: "OK" } ]
+//     //         if let Ok(response_wrapper) = resp.json::<Vec<SurrealQueryResult>>().await {
+//     //             if let Some(first_query) = response_wrapper.get(0) {
+//     //                 for r in first_query.result.clone().into_iter().rev() {
+//     //                     cpu_q.push_back(r.cpu_data);
+//     //                     mem_q.push_back(r.mem_swap);
+//     //                     bat_q.push_back(r.battery_data);
+//     //                 }
+//     //             }
+//     //         }
+//     //     }
+//     //     (cpu_q, mem_q, bat_q)
+//     // }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct _TelemetryRecord {
-    pub cpu_temp: f32,
-    pub battery_level: u8,
-    pub battery_temp: f64,
-    // 建议加上时间戳，方便后续做图表和降采样
-    // 如果没有这个字段，SurrealDB 默认只有生成时间，但显式记录更方便
-    #[serde(default = "Utc::now")] 
-    pub timestamp: DateTime<Utc>,
-}
+//     /// 将结构体中的元组数据提取出来，适配 UI 队列
+//     /// 返回值：(CPU信息, 内存信息, 电池信息)
+//     // pub fn to_ui_models(self) -> (AndroidCpuInfo, MemSwapMB, AndroidBatInfo) {
+//     //     (
+//     //         self.cpu_data, 
+//     //         self.mem_swap, 
+//     //         self.battery_data
+//     //     )
+//     // }
 
-impl _TelemetryRecord {
-    /// 构造函数
-    pub fn new(cpu_temp: f32, battery_level: u8, battery_temp: f64) -> Self {
-        Self {
-            cpu_temp,
-            battery_level,
-            battery_temp,
-            timestamp: Utc::now(),
-        }
-    }
-
-    /// 实例方法：将当前这条记录保存到数据库
-    pub async fn save(&self) -> surrealdb::Result<()> {
-        // 直接调用 AtlasDB 的通用写入接口
-        // 这里我们指定 context 为 android/telemetry
-        AtlasDB::record_to("android", "telemetry", "telemetry_history", self.clone()).await
-    }
-
-    /// 关联函数：获取最近的 N 条历史记录
-    pub async fn fetch_recent(limit: usize) -> Vec<Self> {
-        let sql = format!(
-            "SELECT * FROM telemetry_history ORDER BY timestamp DESC LIMIT {}",
-            limit
-        );
-
-        let db = AtlasDB::get();
-        
-        // 1. 执行查询
-        let mut response = match db.query(sql).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("InfoTab: History Query Failed: {}", e);
-                return vec![];
-            }
-        };
-
-        // 2. 解析结果
-        // 使用 Option<Vec<Self>> 来安全接收，避免 QueryResult 类型推导错误
-        let result: Option<Vec<_TelemetryRecord>> = response.take(0).unwrap_or(None);
-        
-        result.unwrap_or_default()
-    }
-
-    /// 转换辅助函数：将结构体转为 UI 需要的 Tuple 格式
-    /// 对应原来的 get_bat_history_ui 逻辑
-    pub fn to_ui_info(&self) -> AndroidBatInfo {
-        (
-            self.battery_level,
-            "History".to_string(), // 历史记录通常没有即时状态，或者需要额外存字段
-            self.battery_temp,
-        )
-    }
-
-    /// 批量获取并转换为 UI 格式
-    pub async fn fetch_ui_history(limit: usize) -> Vec<AndroidBatInfo> {
-        let records = Self::fetch_recent(limit).await;
-        records.into_iter().map(|r| r.to_ui_info()).collect()
-    }
-}
-
-/* 
-// for database
-
-// 内部结构体用于写入，方便后期维护和扩展
-#[derive(Serialize)]
-struct TelemetryRecord {
-    cpu_temp: f32,
-    battery_level: u8,
-    battery_temp: f64,
-}
-
-pub async fn record_telemetry(cpu: f32, bat: u8, bat_temp: f64) {
-    if let Some(db) = DB_INSTANCE.get() {
-        // 修复 2: .create() 在 2.x 中返回的是 Option<T> 或特定的 Result
-        // 我们通常只需要知道是否写入成功，不需要强制转换成 Vec
-        let record = TelemetryRecord {
-            cpu_temp: cpu,
-            battery_level: bat,
-            battery_temp: bat_temp,
-        };
-
-        // 在 SurrealDB 中，create 某个 table 返回的是单条记录 Option<T>
-        // 如果你需要插入并忽略结果，直接让它推导为 Option 即可
-        let _: Option<serde_json::Value> = db
-            .create("telemetry_history")
-            .content(record)
-            .await
-            .unwrap_or(None);
-    }
-}
-
-/// 获取最近的历史记录
-pub async fn get_history(limit: usize) -> Vec<serde_json::Value> {
-    if let Some(db) = DB_INSTANCE.get() {
-        // 使用 type::string(id) 将 RecordId 显式转换为普通 String
-        // 同时使用 VALUE 关键字获取干净的对象数组
-        let sql = format!(
-            "SELECT *, type::string(id) AS id FROM telemetry_history ORDER BY id DESC LIMIT {}",
-            limit
-        );
-
-        let mut res = match db.query(sql).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("SQL 语法错误: {}", e);
-                return vec![];
-            }
-        };
-
-        // 获取第一个语句的结果
-        match res.take::<Vec<serde_json::Value>>(0) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("核心解析失败: {:?}", e);
-                // 如果还是解析失败，尝试打印第一条数据的原始形态，看看到底是什么
-                vec![]
-            }
-        }
-    } else {
-        vec![]
-    }
-}
+// }
 
 
-// 这里的类型要对应你的 (u8, String, f64) 结构
-pub async fn get_bat_history_ui(limit: usize) -> Vec<AndroidBatInfo> {
-    let raw_data = get_history(limit).await;
-    raw_data
-        .into_iter()
-        .map(|v| {
-            (
-                v.get("battery_level").and_then(|l| l.as_u64()).unwrap_or(0) as u8,
-                "History".to_string(), // 数据库里没存状态字符串，可以用占位符
-                v.get("battery_temp")
-                    .and_then(|t| t.as_f64())
-                    .unwrap_or(0.0),
-            )
-        })
-        .collect()
-}
-        
-*/
+
+
+
+
+
+
 
 // 3. 主程序调用示例 (Rust Client)
 // 现在主程序采集到数据后，只需调用这个简单的 HTTP 逻辑，再也不会有 Enum 报错了：
 // 在 info.rs 的监控任务中
-async fn report_telemetry(record: TelemetryRecord) {
-    let client = reqwest::Client::new();
-    let _ = client
-        .post("http://127.0.0.1:8080/api/v1/db/android/telemetry/history")
-        .json(&record) // 这里会自动序列化成纯 JSON
-        .send()
-        .await;
-}
+// async fn report_telemetry(record: TelemetryRecord) {
+//     let client = reqwest::Client::new();
+//     let _ = client
+//         .post("http://127.0.0.1:2000/api/v1/db/android/telemetry/history")
+//         .json(&record) // 这里会自动序列化成纯 JSON
+//         .send()
+//         .await;
+// }

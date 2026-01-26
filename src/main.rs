@@ -17,7 +17,7 @@ use std::path::Path;
 use tokio::sync::broadcast;
 
 use crate::config::SharedConfig;
-use crate::db::AtlasDB;
+use crate::db::Mongo;
 use crate::message::{GlobalEvent, StatusLevel};
 
 use crate::prelude::{AtlasPath, GlobIO};
@@ -134,45 +134,37 @@ fn setup_panic_hook() {
 }
 
 fn main() {
+    setup_panic_hook();    
     AtlasPath::init(); 
     GlobIO::init();
     Config::init();// check
 
-    // 初始化崩溃钩子
-    setup_panic_hook();
-    // 1. 初始化数据库 (Tokio runtime 之外也可以通过 runtime 句柄操作)
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    rt.block_on(async {
-        AtlasDB::init().await.expect("AtlasDB Initialization Failed");
-
-        // 2. 临时热修复逻辑
-        // println!("正在检查并修复旧数据结构...");
-        // let fix_query = "UPDATE telemetry_history SET timestamp = time::now() WHERE timestamp = NONE";
-        // if let Err(e) = AtlasDB::get().query(fix_query).await {
-        //     eprintln!("修复失败: {}", e);
-        // } else {
-        //     println!("旧数据结构同步完成！");
-        // }
-
-    });
-
-    std::thread::spawn(|| {
+    std::thread::spawn(|| { // ntex server
         let _ = crate::server::run_server();
     });
 
     // 创建异步运行时
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let tui_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("无法创建 Tokio 运行时");
 
     // 在运行时中捕获逻辑错误
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        runtime.block_on(async {
+        tui_runtime.block_on(async {
+
+            // 2. 从 dbpass.json 读取凭据
+            let (user, pass) = AtlasPath::read_db_credentials();
+            
+            // 3. 初始化 MongoDB 连接
+            if let Err(e) = Mongo::init(&user, &pass, "127.0.0.1", 27017).await {
+                eprintln!("🔥 Database connection failed: {}", e);
+                return;
+            }
+            
+            println!("🍃 Connected to MongoDB as user: {}", user);
+
+
             if let Err(e) = run_app().await {
                 eprintln!("应用逻辑错误: {}", e);
             }

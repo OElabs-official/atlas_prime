@@ -3,8 +3,6 @@ use directories::{ProjectDirs, UserDirs};
 use ratatui::style::Color;
 
 use ratatui::layout::Constraint;
-use surrealdb::Surreal;
-use surrealdb::engine::local::{Db, RocksDb};
 
 use crate::app::GlobSend;
 use crate::config::SharedConfig;
@@ -105,8 +103,8 @@ pub const GOLDEN_RATIO_PC: u16 = 62; // 61.8%
 pub const KEY_HELP: KeyCode = KeyCode::Char('h');
 
 pub const INFO_UPDATE_INTERVAL_BASE: u64 = 1;
-pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 5;
-pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 10;
+pub const INFO_UPDATE_INTERVAL_SLOW_TIMES: u64 = 8;
+pub const INFO_UPDATE_INTERVAL_SLOWEST: u64 = 30;
 pub const HISTORY_CAP: usize = 1024;
 
 /// 底部状态栏的横向布局约束
@@ -131,6 +129,10 @@ pub const DB_DFT_NS:&str = "atlas_core";
 pub const DB_DFT_DB:&str = "system";
 
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+
+pub const DATABASE_NAME : &str = "atlas_prmime";
+
 
 pub const TASK_RAW_JSON: &str = r#"[
     {"id": "deno", "name": "🦕DenoConSole", "command": "deno", "args": [], "autostart": false, "group": "Srv", "log_limit": 4096},    
