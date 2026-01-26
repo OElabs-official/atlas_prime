@@ -2,7 +2,7 @@ use crate::config::{Config, SharedConfig};
 use crate::constans::{APP_TITLE, FOOTER_LAYOUT, TabId};
 // 引入新的 message 定义
 use crate::message::{GlobalEvent, Progress, StatusLevel};
-use crate::prelude::GlobIO;
+use crate::prelude::{GlobIO, GlobRecv, GlobSend};
 use crate::ui::app_button::button_components_init;
 use crate::ui::component::Component;
 
@@ -17,8 +17,7 @@ use ratatui::{
 use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant, Interval, MissedTickBehavior, interval};
 
-pub type GlobSend = broadcast::Sender<GlobalEvent>;
-pub type GlobRecv = broadcast::Receiver<GlobalEvent>;
+
 
 
 pub struct App {

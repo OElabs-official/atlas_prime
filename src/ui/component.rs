@@ -1,5 +1,4 @@
 use crate::{
-    app::{GlobRecv, GlobSend},
     config::{Config, SharedConfig},
 };
 use ratatui::{Frame, layout::Rect};

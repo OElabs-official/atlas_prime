@@ -3,7 +3,6 @@ use crate::prelude::*;
 use crate::constans::{TASK_RAW_JSON};
 use crate::message::{DynamicPayload, GlobalEvent, StatusLevel};
 use crate::{
-    app::{GlobRecv, GlobSend},
     config::SharedConfig,
     ui::component::Component,
 };

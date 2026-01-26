@@ -6,13 +6,13 @@ edition = "2024"
 [dependencies]
 crossterm = {version="0.29.0",features=["event-stream"]}
 ratatui = { version = "0.30.0", features = ["all-widgets"] }
-rand = "0.9.2"
+# rand = "0.9.2"
 sysinfo = "0.38.0"
 local-ip-address = "0.6.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 directories = "6.0.0"
-core_affinity = "0.8.3"
+# core_affinity = "0.8.3"
 #ureq = "3.1.4"
 tokio = { version = "1.49.0", features = ["full"] }
 backtrace = "0.3.76"
@@ -20,20 +20,20 @@ chrono = "0.4.43"
 futures = "0.3.31"
 notify = "8.2.0"
 smart-default = "0.7.1"
-regex = "1.12.2"
+# regex = "1.12.2"
 ansi-to-tui = "8.0.1"
 ratatui-image = "10.0.4"
 image = "0.25.9"
 
-ntex = { version = "2.17.0", features = ["tokio"] }
-reqwest = { version = "0.13.1", features = ["json", "http2","native-tls","webpki-roots"], default-features = false }# for termux build
+# ntex = { version = "2.17.0", features = ["tokio"] }
+# reqwest = { version = "0.13.1", features = ["json", "http2","native-tls","webpki-roots"], default-features = false }# for termux build
 #webpki-roots = "1.0.5"
 #surrealdb = { version = "2.4.1", features = ["kv-rocksdb"] } # 如果数据量达到 TB 级别，或者需要多机共享，只需将驱动改为 surrealdb = { version = "*", features = ["protocol-http"] } 即可连接到独立的 SurrealDB 服务器，代码逻辑几乎无需改动。
-mongodb = { version = "3.5.0", features = ["snappy-compression"] }
-bson = "3.1.0"
+# mongodb = { version = "3.5.0", features = ["snappy-compression"] }
+# bson = "3.1.0"
 # sqlx = "0.8.6"
-sqlx = { version = "0.8.6", features = [ "runtime-tokio", "tls-native-tls","postgres", "sqlite" ] }
-
+# sqlx = { version = "0.8.6", features = [ "runtime-tokio", "tls-native-tls","postgres", "sqlite" ] }
+sqlx = { version = "0.8.6", features = [ "runtime-tokio",  "sqlite" ] }
 
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -41,3 +41,11 @@ termuxapi = "0.1.1"
 
 # system require :
 # pkg i deno pkg-config chafa surreal
+
+[profile.release]
+opt-level = "z"      # 专门针对体积进行优化 (z 表示压缩体积，s 也可以)
+lto = true           # 开启链接时优化 (Link Time Optimization)
+codegen-units = 1    # 减少并行编译单元，增加优化空间
+panic = "abort"      # 移除栈回溯展开代码 (极其显著减小体积)
+strip = true         # 自动从二进制文件中剔除符号信息 (Symbol Table)
+

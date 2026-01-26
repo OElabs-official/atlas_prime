@@ -1,5 +1,5 @@
 use crate::{
-    app::{GlobRecv, GlobSend}, config::SharedConfig, constans::SPINNER_FRAMES, message::{GlobalEvent, Progress, StatusLevel}, prelude::GlobIO, ui::component::Component
+    message::{GlobalEvent, Progress, StatusLevel}, prelude::{GlobIO, GlobRecv}, ui::component::Component
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -151,6 +151,8 @@ impl Component for ProgressComponent {
         changed
     }
 
+    
+
     fn render(&mut self, f: &mut Frame, area: Rect) {
         let (prog, level) = match &self.state {
             Some(s) => s,
@@ -204,16 +206,12 @@ impl Component for ProgressComponent {
                 f.render_widget(Paragraph::new(text).alignment(Alignment::Right), chunks[1]);
             }
             Progress::Loading => {
-                // 渲染 Loading 动画
-                let frame_idx = (self.tick_count / 10) as usize % SPINNER_FRAMES.len();
-                let spinner = SPINNER_FRAMES[frame_idx];
-
-                let text = format!("{} Loading...", spinner);
+                // 🚀 简化：不再渲染 Spinner，仅显示静态文字
                 f.render_widget(
-                    Paragraph::new(text)
-                        .style(Style::default().fg(color))
+                    Paragraph::new(" ● Loading... ")
+                        .style(Style::default().fg(color).add_modifier(Modifier::ITALIC))
                         .alignment(Alignment::Right),
-                    area, // Loading 状态直接占满整个区域靠右显示
+                    area,
                 );
             }
         }

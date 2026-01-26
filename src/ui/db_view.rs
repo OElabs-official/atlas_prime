@@ -1,60 +1,58 @@
 use crate::{
-    app::{GlobIO, GlobRecv},
-    config::{Config, SharedConfig},
+    config::{Config, SharedConfig}, 
+    message::{DynamicPayload, GlobalEvent}, 
+    prelude::{GlobIO, GlobRecv}, 
     ui::component::Component,
+    // 假设常量定义在 constants 或 prelude 中，请根据实际位置调整
+    constans::{INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES} 
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
-const DB_UPDATE_INTERVAL: u64 = 10; // 每 10 秒刷新一次
-const DB_STATS_KEY: &str = "db_stats_data";
+const SQLITE_STATS_KEY: &str = "sqlite_table_stats";
 
-// 数据类型：(集合名称, 文档数量)
-type CollectionInfo = (String, u64);
-type DbStatsData = Vec<CollectionInfo>;
+#[derive(Clone, Debug)]
+pub struct TableStat {
+    pub name: String,
+    pub count: i64,
+}
 
 pub struct DatabaseComponent {
     pub config: SharedConfig,
     glob_recv: GlobRecv,
-    
-    // UI 状态
-    collections: DbStatsData,
+    tables: Vec<TableStat>,
     table_state: TableState,
-    last_refresh: Instant,
     is_loading: bool,
 }
+
 impl Component for DatabaseComponent {
-    fn init() -> Self
-    where
-        Self: Sized,
-    {
+    fn init() -> Self {
         let inst = Self {
             config: Config::get(),
             glob_recv: GlobIO::recv(),
-            collections: Vec::new(),
+            tables: Vec::new(),
             table_state: TableState::default(),
-            last_refresh: Instant::now(),
             is_loading: true,
         };
 
-        // 启动首次及后续的定期刷新任务
-        Self::spawn_refresh_task();
-
+        // 启动自动化周期抓取任务
+        Self::spawn_periodic_monitor();
         inst
     }
 
     fn update(&mut self) -> bool {
         let mut changed = false;
-        // 检查是否有新的数据库统计数据到达
         while let Ok(event) = self.glob_recv.try_recv() {
-            if let crate::app::GlobalEvent::Data { key, data } = event {
-                if key == DB_STATS_KEY {
-                    if let Ok(stats) = data.downcast::<DbStatsData>() {
-                        self.collections = (*stats).clone();
+            if let GlobalEvent::Data { key, data } = event {
+                if key == SQLITE_STATS_KEY {
+                    if let Ok(stats) = data.0.downcast::<Vec<TableStat>>() {
+                        self.tables = (*stats).clone();
                         self.is_loading = false;
-                        self.last_refresh = Instant::now();
+                        if self.table_state.selected().is_none() && !self.tables.is_empty() {
+                            self.table_state.select(Some(0));
+                        }
                         changed = true;
                     }
                 }
@@ -65,61 +63,60 @@ impl Component for DatabaseComponent {
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
         let chunks = Layout::vertical([
-            Constraint::Length(3), // 标题栏
-            Constraint::Min(0),    // 内容区
-            Constraint::Length(1), // 状态栏
+            Constraint::Length(3), // Header
+            Constraint::Min(0),    // Table
+            Constraint::Length(1), // Footer/Hint
         ])
         .split(area);
 
-        // --- 1. 标题渲染 ---
-        let header = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(" MongoDB Explorer ");
-        
-        let title_text = format!(" Database: atlas_prmime | Total Collections: {}", self.collections.len());
-        f.render_widget(Paragraph::new(title_text).block(header).alignment(Alignment::Center), chunks[0]);
+        // 1. Header
+        let db_path = crate::prelude::AtlasPath::get().proj_dir.join("atlas_prime.db");
+        f.render_widget(
+            Paragraph::new(format!(" 📂 DB Path: {} ", db_path.display()))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Blue))),
+            chunks[0],
+        );
 
-        // --- 2. 集合表格渲染 ---
-        let header_cells = ["Collection Name", "Document Count"]
+        // 2. Table
+        let header_cells = ["Table Name", "Row Count"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-        let header_row = Row::new(header_cells).height(1).bottom_margin(1);
-
-        let rows = self.collections.iter().map(|(name, count)| {
+        
+        let rows = self.tables.iter().map(|t| {
             Row::new(vec![
-                Cell::from(name.clone()).style(Style::default().fg(Color::White)),
-                Cell::from(count.to_string()).style(Style::default().fg(Color::Green)),
+                Cell::from(t.name.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(t.count.to_string()).style(Style::default().fg(Color::Green)),
             ])
         });
 
         let table = Table::new(rows, [Constraint::Percentage(70), Constraint::Percentage(30)])
-            .header(header_row)
-            .block(Block::default().borders(Borders::LEFT | Borders::RIGHT))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::REVERSED))
+            .header(Row::new(header_cells).height(1).bottom_margin(1))
+            .block(Block::default().title(" Schema Overview ").borders(Borders::LEFT | Borders::RIGHT))
+            .highlight_style(Style::default().bg(Color::Rgb(50, 50, 50)))
             .highlight_symbol(">> ");
 
         f.render_stateful_widget(table, chunks[1], &mut self.table_state);
 
-        // --- 3. 底部状态栏 ---
-        let status_msg = if self.is_loading {
-            " Loading data from MongoDB... ".to_string()
+        // 3. Footer
+        let refresh_sec = INFO_UPDATE_INTERVAL_BASE * INFO_UPDATE_INTERVAL_SLOW_TIMES;
+        let hint = if self.is_loading {
+            " Loading database schema... ".into()
         } else {
-            format!(" Last updated: {:?} ago | Press 'r' to refresh ", self.last_refresh.elapsed())
+            format!(" Auto-refresh every {}s | 'r' to force | ↑↓ to move ", refresh_sec)
         };
-        f.render_widget(Paragraph::new(status_msg).style(Style::default().fg(Color::DarkGray)), chunks[2]);
+        f.render_widget(Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)), chunks[2]);
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('r') => {
                 self.is_loading = true;
-                Self::spawn_refresh_task();
+                Self::spawn_fetch_stats();
                 true
             }
             KeyCode::Up => {
                 let i = match self.table_state.selected() {
-                    Some(i) => if i == 0 { self.collections.len().saturating_sub(1) } else { i - 1 },
+                    Some(i) => if i == 0 { self.tables.len().saturating_sub(1) } else { i - 1 },
                     None => 0,
                 };
                 self.table_state.select(Some(i));
@@ -127,7 +124,7 @@ impl Component for DatabaseComponent {
             }
             KeyCode::Down => {
                 let i = match self.table_state.selected() {
-                    Some(i) => if i >= self.collections.len().saturating_sub(1) { 0 } else { i + 1 },
+                    Some(i) => if i >= self.tables.len().saturating_sub(1) { 0 } else { i + 1 },
                     None => 0,
                 };
                 self.table_state.select(Some(i));
@@ -137,33 +134,45 @@ impl Component for DatabaseComponent {
         }
     }
 }
+
 impl DatabaseComponent {
-    fn spawn_refresh_task() {
+    /// 核心逻辑：计算刷新周期并建立后台长线任务
+    fn spawn_periodic_monitor() {
+        tokio::spawn(async move {
+            let interval_duration = Duration::from_secs(INFO_UPDATE_INTERVAL_BASE * INFO_UPDATE_INTERVAL_SLOW_TIMES);
+            let mut interval = tokio::time::interval(interval_duration);
+            
+            loop {
+                interval.tick().await;
+                Self::spawn_fetch_stats();
+            }
+        });
+    }
+
+    fn spawn_fetch_stats() {
         tokio::spawn(async move {
             let glob_send = GlobIO::send();
-            let client = crate::db::Mongo::client().await;
-            let db = client.database(crate::ui::info::DATABASE_NAME); // 使用之前的常量
+            let pool = crate::db::Database::pool();
 
-            let mut stats: DbStatsData = Vec::new();
+            let table_names: Vec<String> = sqlx::query_scalar(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
-            // 获取所有集合名称
-            if let Ok(names) = db.list_collection_names().await {
-                for name in names {
-                    // 获取每个集合的文档估算数量
-                    let count = db.collection::<serde_json::Value>(&name)
-                        .estimated_document_count()
-                        .await
-                        .unwrap_or(0);
-                    stats.push((name, count));
-                }
+            let mut stats = Vec::new();
+            for name in table_names {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}", name))
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or(0);
+                stats.push(TableStat { name, count });
             }
 
-            // 排序：按文档数量降序
-            stats.sort_by(|a, b| b.1.cmp(&a.1));
-
-            let _ = glob_send.send(crate::app::GlobalEvent::Data {
-                key: DB_STATS_KEY,
-                data: crate::app::DynamicPayload(Arc::new(stats)),
+            let _ = glob_send.send(GlobalEvent::Data {
+                key: SQLITE_STATS_KEY,
+                data: DynamicPayload(Arc::new(stats)),
             });
         });
     }

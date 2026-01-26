@@ -5,3 +5,4 @@ pub mod info;
 //pub mod settings;
 pub mod task_control;
 pub mod welcome;
+pub mod db_view;

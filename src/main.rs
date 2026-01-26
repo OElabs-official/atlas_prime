@@ -3,9 +3,9 @@ mod config;
 mod constans;
 mod db;
 mod message;
-mod server;
+// mod server;
 mod ui;
-mod utils;
+// mod utils;
 mod prelude;
 
 use crossterm::event::KeyModifiers;
@@ -17,7 +17,7 @@ use std::path::Path;
 use tokio::sync::broadcast;
 
 use crate::config::SharedConfig;
-use crate::message::{GlobalEvent, StatusLevel};
+use crate::message::{GlobalEvent, Progress, StatusLevel};
 
 use crate::prelude::{AtlasPath, GlobIO};
 use crate::{app::App, config::Config, ui::component::Component};
@@ -138,9 +138,9 @@ fn main() {
     GlobIO::init();
     Config::init();// check
 
-    std::thread::spawn(|| { // ntex server
-        let _ = crate::server::run_server();
-    });
+    // std::thread::spawn(|| { // ntex server
+    //     let _ = crate::server::run_server();
+    // });
 
     // 创建异步运行时
     let tui_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -207,7 +207,47 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     let _ = show_splash(&mut terminal);
 
+        // 测试底部通知
+        // tokio::spawn(async move {
+        //     let glob_send = GlobIO::send();
+            
+        //     // --- 测试 1: 初始 Loading 状态 ---
+        //     let _ = glob_send.send(GlobalEvent::Status(
+        //         "Initializing System...".to_string(), 
+        //         StatusLevel::Info, 
+        //         Some(Progress::Loading)
+        //     ));
+        //     tokio::time::sleep(Duration::from_secs(5)).await;
 
+        //     // --- 测试 2: 任务计数进度 (0/5 -> 5/5) ---
+        //     for i in 0..=5 {
+        //         let _ = glob_send.send(GlobalEvent::Status(
+        //             format!("Processing batch {}...", i),
+        //             StatusLevel::Info,
+        //             Some(Progress::TaskCount(i, 5))
+        //         ));
+        //         tokio::time::sleep(Duration::from_millis(200)).await;
+        //     }
+
+        //     // --- 测试 3: 百分比进度 + 成功通知 ---
+        //     for p in (0..=100).step_by(2) {
+        //         let _ = glob_send.send(GlobalEvent::Status(
+        //             "Uploading telemetry data...".to_string(),
+        //             StatusLevel::Success,
+        //             Some(Progress::Percent(p))
+        //         ));
+        //         tokio::time::sleep(Duration::from_millis(200)).await;
+        //     }
+
+        //     // --- 测试 4: 弹出错误提示 (应触发 60s 长保留) ---
+        //     let _ = glob_send.send(GlobalEvent::Status(
+        //         "SQLite Write Timeout! Check disk space.".to_string(),
+        //         StatusLevel::Error,
+        //         None // 进度条会消失，只显示文字
+        //     ));
+        // });
+
+    
     let mut reader = EventStream::new(); // 将 crossterm 事件转为异步流
 
     let mut render_clock = interval(Duration::from_millis(8)); // 约 60FPS，用于平滑渲染 ,glob
@@ -308,7 +348,9 @@ fn show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Err
 where
     B::Error: 'static,
 {
-    let img_path = "welcome.png";
+    let mut img_path = AtlasPath::get().base_data_dir.clone();
+    img_path.push("welcome.png");
+    // let img_path = "welcome.png";
     let dyn_img = image::open(img_path)?;
 
     // 强制使用 halfblocks 模式进行测试，如果这个能居中，再切回 from_query_stdio
@@ -356,7 +398,7 @@ where
             }
 
             // 5. 提示文字放在最下方
-            let text = Paragraph::new("Powered by |Ratatui|Ntex|MongoDB|Deno|").alignment(Alignment::Center);
+            let text = Paragraph::new("Powered by |Ratatui|Ntex|Sqlx|Deno|").alignment(Alignment::Center);
             f.render_widget(text, vertical_layout[2]);
         })?;
 
@@ -372,3 +414,5 @@ where
 // 注意：现在主要的 widget 叫 Image
 
 // 使用泛型 B 并返回通用的 Box<dyn Error>
+
+

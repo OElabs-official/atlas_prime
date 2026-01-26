@@ -4,9 +4,9 @@ use ratatui::style::Color;
 
 use ratatui::layout::Constraint;
 
-use crate::app::GlobSend;
 use crate::config::SharedConfig;
 use crate::ui::component::Component;
+use crate::ui::db_view::DatabaseComponent;
 use crate::ui::info::InfoComponent;
 use crate::ui::task_control::TaskControlComponent;
 use crate::ui::welcome::WelcomeComponent;
@@ -18,6 +18,7 @@ pub enum TabId {
     Welcome,
     Info,
     TaskControl, // Sessions,
+    SQL,
 }
 
 /// 3. 页面注册信息
@@ -28,18 +29,22 @@ impl TabId {
         Self::Welcome,
         Self::TaskControl,
         Self::Info,
+        Self::SQL
+        
         // Self::Sessions
     ];
 
     /// 对应的显示标题
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Welcome => "  Welcome ",
-            Self::Info => "  System Info ",
-            Self::TaskControl => " Task Control ",
+            Self::Welcome => " Welcome ",
+            Self::Info => " System ",
+            Self::TaskControl => " Task ",
+            Self::SQL=>" DB ",
+
             // Self::Sessions => " [2] Session Manager ",
         }
-    }
+    } 
 
     pub fn init() -> Vec<Box<dyn Component>> {
         let mut output = vec![];
@@ -54,22 +59,11 @@ impl TabId {
             Self::Welcome => Box::new(WelcomeComponent::init()),
             Self::Info => Box::new(InfoComponent::init()),
             Self::TaskControl => Box::new(TaskControlComponent::init()),
+            Self::SQL=>Box::new(DatabaseComponent::init()),
             // Self::Sessions => " [2] Session Manager ",
         }
     }
-    /// 页面对应的主色调（可选，用于联动状态栏）
-    // pub fn theme_color(&self) -> Color {
-    //     match self {
-    //         Self::Welcome => Color::Cyan,
-    //         Self::Info => Color::Green,
-    //         Self::Sessions => Color::Magenta,
-    //     }
-    // }
 
-    /// 从索引转换
-    pub fn from_index(index: usize) -> Self {
-        Self::ALL.get(index).copied().unwrap_or(Self::Welcome)
-    }
 }
 
 // 2. 界面文字内容
@@ -87,13 +81,6 @@ pub const ART_LOGO: &str = r#"
 // 2. 帮助区域内容（数组形式，方便翻页）
 pub const ART_LOGO_HEIGHT: u16 = 6;
 pub const HELP_CONTENT: &[&str] = &[
-    "--- Navigation ---",
-    "Alt + Left/Right  : Switch between Tabs immediately",
-    "Alt + [1-9]       : Jump to specific Tab",
-    "Tab               : Cycle focus within the current page",
-    "",
-    "--- Actions ---",
-    "Up/Down Arrows    : Scroll lists or content",
     "Esc               : Clear notifications or close popups",
     "Ctrl + C          : Force quit Atlas (Safety Exit)",
 ];
@@ -128,10 +115,10 @@ pub const MAIN_LAYOUT: [Constraint; 3] = [
 // pub const DB_DFT_NS:&str = "atlas_core";
 // pub const DB_DFT_DB:&str = "system";
 
-pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 
-pub const DATABASE_NAME : &str = "atlas_prime";
+pub const DATABASE_FILE : &str = "atlas_prime.db";
 
 
 pub const TASK_RAW_JSON: &str = r#"[

@@ -1,5 +1,7 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+use crate::prelude::GlobIO;
+
 #[derive(Clone, Debug)]
 pub enum GlobalEvent {
     /// 数据更新：用于组件内容填充 (Deno -> Component)
@@ -38,48 +40,52 @@ pub enum Progress {
     TaskCount(u32, u32), // (当前, 总数)
     Loading,
 }
-/*
-#[derive(Clone, Debug)]
-pub enum _GlobalEvent {
-    SyncProgress(ProgressType),
-    Notify(String, NotificationLevel),
-    ClearError, // 用于手动清除错误信号
-    PushData {
-        key: &'static str, // 例如 "public_ip"
-        data: DynamicPayload,
-    },
+
+
+impl GlobIO {
+    /// 模拟 println! -> 发送 Info 级别的通知
+    pub fn info<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Info,
+            None,
+        ));
+    }
+
+    /// 模拟成功提示
+    pub fn success<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Success,
+            None,
+        ));
+    }
+
+    /// 模拟警告提示
+    pub fn warn<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Warning,
+            None,
+        ));
+    }
+
+    /// 模拟 eprintln! -> 发送 Error 级别的通知
+    pub fn error<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Error,
+            None,
+        ));
+    }
+
+    /// 快捷发送带进度的状态
+    pub fn progress<S: Into<String>>(msg: S, level: StatusLevel, prog: Progress) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            level,
+            Some(prog),
+        ));
+    }
 }
 
-#[derive(Clone, Debug)]
-pub enum ProgressType {
-    Percentage(u16),     // 0-100%
-    TaskCount(u32, u32), // (当前, 总数)
-    Indeterminate,       // 未知进度 (显示为 [...])
-}
-
-
-// src/message.rs
-#[derive(Clone, Debug)]
-pub enum NotificationLevel {
-    Info,    // 绿色/蓝色
-    Warning, // 黄色
-    Error,   // 红色 (需手动清除)
-}
-*/
-
-/*
-
-#[derive(Clone, Debug)]
-pub enum AppAction {
-    /// 切换标签页
-    SwitchTab(usize),
-    /// 强制退出程序
-    Quit,
-    /// 手动清除当前的 Footer 状态
-    ClearStatus,
-    /// 重新加载配置文件
-    ReloadConfig,
-    /// 弹出模态框（如果未来有 UI 叠加层需求）
-    SetOverlay(bool),
-}
- */

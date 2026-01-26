@@ -1,6 +1,7 @@
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool, Row};
 use std::sync::OnceLock;
 use std::str::FromStr;
+use crate::constans::DATABASE_FILE;
 use crate::prelude::AtlasPath;
 
 static SQLITE_POOL: OnceLock<SqlitePool> = OnceLock::new();
@@ -12,7 +13,7 @@ impl Database {
     pub async fn init() -> Result<(), String> {
         if SQLITE_POOL.get().is_some() { return Ok(()); }
 
-        let db_path = AtlasPath::get().proj_dir.join("atlas_prime.db");
+        let db_path = AtlasPath::get().proj_dir.join(DATABASE_FILE);
         let opt = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
             .map_err(|e| e.to_string())?
             .create_if_missing(true);
