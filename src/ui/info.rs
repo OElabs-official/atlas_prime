@@ -1,6 +1,6 @@
 use crate::{
     app::{GlobRecv, GlobSend}, config::{AppColor, Config, SharedConfig}, constans::{
-        DATABASE_NAME, DB_DFT_DB, DB_DFT_NS, HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES, INFO_UPDATE_INTERVAL_SLOWEST
+        DATABASE_NAME,  HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES, INFO_UPDATE_INTERVAL_SLOWEST
     }, message::{DynamicPayload, GlobalEvent}, prelude::{AtlasPath, GlobIO}, ui::component::Component
 };
 use chrono::{DateTime, Utc};
@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use sysinfo::{Disks, System};
 use tokio::sync::{broadcast, mpsc};
-use crate::db::Mongo;
+// use crate::db::Mongo;
+use sqlx::{sqlite::SqliteRow, Row};
+
 
 const COLL_NAME: &str = "telemetry_history"; // database collections
 
@@ -419,71 +421,53 @@ impl InfoComponent // rende part uis
 }
 
 impl Component for InfoComponent {
-fn init() -> Self
-where
-    Self: Sized,
-{
-    let handle = tokio::runtime::Handle::current();
+    fn init() -> Self
+    where
+        Self: Sized,
+    {
+        // 1. 瞬间初始化空队列
+        let mut db_cpu = VecDeque::with_capacity(HISTORY_CAP);
+        let mut db_mem = VecDeque::with_capacity(HISTORY_CAP);
+        let mut db_bat = VecDeque::with_capacity(HISTORY_CAP);
 
-    // --- 1. 从 MongoDB 异步拉取最近的记录并转换为同步结果 ---
-    let db_records: Vec<TelemetryRecord> = tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            // 使用你定义的 DATABASE_NAME
-            crate::db::Mongo::fetch_recent::<TelemetryRecord>(DATABASE_NAME, COLL_NAME, HISTORY_CAP as i64).await
-        })
-    });
+        // 默认补齐，保证渲染不崩溃
+        for _ in 0..HISTORY_CAP {
+            db_cpu.push_back(Default::default());
+            db_mem.push_back(Default::default());
+            db_bat.push_back(Default::default());
+        }
 
-    // --- 2. 转换数据为 UI 队列 ---
-    let mut db_cpu = VecDeque::with_capacity(HISTORY_CAP);
-    let mut db_mem = VecDeque::with_capacity(HISTORY_CAP);
-    let mut db_bat = VecDeque::with_capacity(HISTORY_CAP);
+        // 2. 瞬间获取系统静态信息
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let system_info = format!("{}*{}*{}*{}", 
+            System::cpu_arch(),
+            System::name().unwrap_or_default(),
+            System::kernel_long_version().split('-').next().unwrap_or(""),
+            System::os_version().unwrap_or_default()
+        );
 
-    // MongoDB 返回的是 DESC 排序，UI 需要按时间轴从左往右（从旧到新），所以 rev 迭代
-    for r in db_records.into_iter().rev() {
-        db_cpu.push_back(r.cpu_data);
-        db_mem.push_back(r.mem_swap);
-        db_bat.push_back(r.battery_data);
+        // 3. 关键：启动两个异步任务，一个抓取历史，一个持续监控
+        Self::spawn_history_fetch_task(); // 新增：后台抓历史
+        Self::spawn_monitor_task();       // 持续采样
+
+        Self {
+            glob_recv: GlobIO::recv(),
+            mount_points: Default::default(),
+            dir_list: AtlasPath::collect_dirs(),
+            ip_list: Default::default(),
+            focus_index: Some(0),
+            scroll_offsets: [0, 0, 0],
+            total_mem_swap_mb: (sys.total_memory() / 1024 / 1024, sys.total_swap() / 1024 / 1024),
+            mem_swap_history: db_mem.clone(),
+            mem_swap_long_history: db_mem,
+            cpu_info_history: db_cpu.clone(),
+            cpu_info_long_history: db_cpu,
+            bat_history: db_bat,
+            system_info,
+        }
     }
-
-    // 补齐逻辑：确保队列长度达到 HISTORY_CAP
-    while db_cpu.len() < HISTORY_CAP { db_cpu.push_front(Default::default()); }
-    while db_mem.len() < HISTORY_CAP { db_mem.push_front(Default::default()); }
-    while db_bat.len() < HISTORY_CAP { db_bat.push_front(Default::default()); }
-
-    // --- 3. 获取系统静态信息 ---
-    let mut sys = System::new_all();
-    sys.refresh_all();
-    let system_info = format!("{}*{}*{}*{}", 
-        System::cpu_arch(),
-        System::name().unwrap_or_default(),
-        System::kernel_long_version().split('-').next().unwrap_or(""),
-        System::os_version().unwrap_or_default()
-    );
-
-    // --- 4. 启动后台采样 ---
-    Self::spawn_monitor_task();
-
-    Self {
-        glob_recv: GlobIO::recv(),
-        mount_points: Default::default(),
-        dir_list: AtlasPath::collect_dirs(),
-        ip_list: Default::default(),
-        focus_index: Some(0),
-        scroll_offsets: [0, 0, 0],
-        total_mem_swap_mb: (sys.total_memory() / 1024 / 1024, sys.total_swap() / 1024 / 1024),
         
-        mem_swap_history: db_mem.clone(),
-        mem_swap_long_history: db_mem,
-        
-        cpu_info_history: db_cpu.clone(),
-        cpu_info_long_history: db_cpu,
-        
-        bat_history: db_bat,
-        system_info,
-    }
-}
-    
-
 
     /// 接受广播定期回传的信息
     fn update(&mut self) -> bool {
@@ -496,8 +480,28 @@ where
         // 持续尝试接收来自全局通道的所有事件
         while let Ok(event) = self.glob_recv.try_recv() {
             match event {
+
                 GlobalEvent::Data { key, data } => {
                     match key {
+                        // 在 update 的 match key 逻辑中增加：
+                        "HISTORY_REFILL" => {
+                            if let Some(records) = data.0.downcast_ref::<Vec<TelemetryRecord>>() {
+                                self.cpu_info_history.clear();
+                                self.mem_swap_history.clear();
+                                self.bat_history.clear();
+                                
+                                for r in records.iter().rev() {
+                                    self.cpu_info_history.push_back(r.cpu_data.clone());
+                                    self.mem_swap_history.push_back(r.mem_swap);
+                                    self.bat_history.push_back(r.battery_data.clone());
+                                }
+                                // 再次补齐，防止数据量不足 HISTORY_CAP
+                                while self.cpu_info_history.len() < HISTORY_CAP { self.cpu_info_history.push_front(Default::default()); }
+                                // ... 对其他队列执行相同补齐操作
+                                changed = true;
+                            }
+                        }
+
                         // --- 1. 内存与 Swap (短周期) ---
                         MEM_SWAP => {
                             if let Some(pkg) = data.0.downcast_ref::<MemSwapMB>() {
@@ -718,7 +722,13 @@ impl InfoComponent { // 辅助采集函数
                     };
 
                     // B. 异步存入 MongoDB (使用全局 DATABASE_NAME)
-                    let _ = Mongo::save(DATABASE_NAME, COLL_NAME, record).await;
+                    // let _ = Mongo::save(DATABASE_NAME, COLL_NAME, record).await;
+                    let record_to_save = record.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = record_to_save.save_to_db().await {
+                                    // 可以通过 glob_send 发送一个错误通知给 UI
+                                }
+                    });
 
                     // C. 分发长周期 Payload
                     let _ = glob_send.send(GlobalEvent::Data { key: MEM_SWAP_LONG, data: mem_payload });
@@ -738,7 +748,27 @@ impl InfoComponent { // 辅助采集函数
         });
     }
 
+    fn spawn_history_fetch_task() {
+        tokio::spawn(async move {
+            let glob_send = GlobIO::send();
+            
+            // 1. 先确保表已存在（SQLite 启动极快，这里调用是安全的）
+            if let Err(e) = TelemetryRecord::init_table().await {
+                eprintln!("🔴 SQL Table Init Error: {}", e);
+                return;
+            }
 
+            // 2. 异步拉取历史
+            let db_records = TelemetryRecord::fetch_recent(HISTORY_CAP as i64).await;
+            
+            if !db_records.is_empty() {
+                let _ = glob_send.send(GlobalEvent::Data {
+                    key: "HISTORY_REFILL", 
+                    data: DynamicPayload(Arc::new(db_records)) 
+                });
+            }
+        });
+    }
 
     // 提取出一个全量同步函数，供初始化和特殊时刻调用
     fn perform_full_sync(sys: &mut System, glob_send: &GlobSend) {
@@ -857,7 +887,55 @@ pub struct TelemetryRecord {
     pub battery_data: AndroidBatInfo,
 }
 
+impl TelemetryRecord {
+    /// 初始化表结构
+    pub async fn init_table() -> Result<(), String> {
+        let ddl = r#"
+            CREATE TABLE IF NOT EXISTS telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                cpu_data TEXT NOT NULL,
+                mem_swap TEXT NOT NULL,
+                battery_data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry(timestamp);
+        "#;
+        crate::db::Database::setup_table(ddl).await
+    }
 
+    /// 存储记录到 SQLite
+    pub async fn save_to_db(&self) -> Result<(), String> {
+        let pool = crate::db::Database::pool();
+        sqlx::query("INSERT INTO telemetry (timestamp, cpu_data, mem_swap, battery_data) VALUES (?, ?, ?, ?)")
+            .bind(&self.timestamp)
+            .bind(serde_json::to_string(&self.cpu_data).unwrap_or_default())
+            .bind(serde_json::to_string(&self.mem_swap).unwrap_or_default())
+            .bind(serde_json::to_string(&self.battery_data).unwrap_or_default())
+            .execute(pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// 从 SQLite 获取最近记录
+    pub async fn fetch_recent(limit: i64) -> Vec<Self> {
+        let pool = crate::db::Database::pool();
+        let rows = sqlx::query("SELECT timestamp, cpu_data, mem_swap, battery_data FROM telemetry ORDER BY timestamp DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+        rows.into_iter().filter_map(|row: SqliteRow| {
+            Some(Self {
+                timestamp: row.get("timestamp"),
+                cpu_data: serde_json::from_str(row.get("cpu_data")).ok()?,
+                mem_swap: serde_json::from_str(row.get("mem_swap")).ok()?,
+                battery_data: serde_json::from_str(row.get("battery_data")).ok()?,
+            })
+        }).collect()
+    }
+}
 
 
 

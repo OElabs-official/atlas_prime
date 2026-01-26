@@ -17,7 +17,6 @@ use std::path::Path;
 use tokio::sync::broadcast;
 
 use crate::config::SharedConfig;
-use crate::db::Mongo;
 use crate::message::{GlobalEvent, StatusLevel};
 
 use crate::prelude::{AtlasPath, GlobIO};
@@ -152,18 +151,12 @@ fn main() {
     // 在运行时中捕获逻辑错误
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         tui_runtime.block_on(async {
-
-            // 2. 从 dbpass.json 读取凭据
-            let (user, pass) = AtlasPath::read_db_credentials();
             
-            // 3. 初始化 MongoDB 连接
-            if let Err(e) = Mongo::init(&user, &pass, "127.0.0.1", 27017).await {
-                eprintln!("🔥 Database connection failed: {}", e);
+            // 2. 初始化全局数据库连接池 (唯一一次)
+            if let Err(e) = crate::db::Database::init().await {
+                eprintln!("🔥 数据库启动失败: {}", e);
                 return;
             }
-            
-            println!("🍃 Connected to MongoDB as user: {}", user);
-
 
             if let Err(e) = run_app().await {
                 eprintln!("应用逻辑错误: {}", e);
@@ -363,7 +356,7 @@ where
             }
 
             // 5. 提示文字放在最下方
-            let text = Paragraph::new("Welcome to AtlasPrime").alignment(Alignment::Center);
+            let text = Paragraph::new("Powered by |Ratatui|Ntex|MongoDB|Deno|").alignment(Alignment::Center);
             f.render_widget(text, vertical_layout[2]);
         })?;
 
