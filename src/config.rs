@@ -140,7 +140,7 @@ impl Config {
     /// 核心加载逻辑：Override > System > Default
     pub fn load_from_disk() -> Self {
         // 确保路径已初始化
-        let path = &AtlasPath::get_config_path();
+        let path = &ProjectPath::get_config_path();
 
         // 1. 尝试读取
         if !path.exists() {
@@ -191,7 +191,7 @@ impl Config {
         Ok(())
     }
     pub fn save(&self) -> std::io::Result<()> {
-        let path = AtlasPath::get_config_path();
+        let path = ProjectPath::get_config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }

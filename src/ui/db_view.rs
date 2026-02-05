@@ -1,10 +1,5 @@
 use crate::{
-    config::{Config, SharedConfig}, 
-    message::{DynamicPayload, GlobalEvent}, 
-    prelude::{GlobIO, GlobRecv}, 
-    ui::component::Component,
-    // 假设常量定义在 constants 或 prelude 中，请根据实际位置调整
-    constans::{INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES} 
+    config::{Config, SharedConfig}, constans::{DATABASE_FILE, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES}, prelude::{Component, DynamicPayload, GlobIO, GlobRecv, GlobalEvent, ProjectPath}, 
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
@@ -70,7 +65,7 @@ impl Component for DatabaseComponent {
         .split(area);
 
         // 1. Header
-        let db_path = crate::prelude::AtlasPath::get().proj_dir.join("atlas_prime.db");
+        let db_path = crate::prelude::ProjectPath::get().proj_dir.join(DATABASE_FILE);
         f.render_widget(
             Paragraph::new(format!(" 📂 DB Path: {} ", db_path.display()))
                 .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Blue))),

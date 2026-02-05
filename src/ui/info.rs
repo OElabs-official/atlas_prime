@@ -1,7 +1,7 @@
 use crate::{
     config::{AppColor, Config, SharedConfig}, constans::{
          HISTORY_CAP, INFO_UPDATE_INTERVAL_BASE, INFO_UPDATE_INTERVAL_SLOW_TIMES, INFO_UPDATE_INTERVAL_SLOWEST
-    }, message::{DynamicPayload, GlobalEvent}, prelude::{AtlasPath, GlobIO, GlobRecv, GlobSend}, ui::component::Component
+    }, prelude::*, 
 };
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -454,7 +454,7 @@ impl Component for InfoComponent {
         Self {
             glob_recv: GlobIO::recv(),
             mount_points: Default::default(),
-            dir_list: AtlasPath::collect_dirs(),
+            dir_list: ProjectPath::collect_dirs(),
             ip_list: Default::default(),
             focus_index: Some(0),
             scroll_offsets: [0, 0, 0],

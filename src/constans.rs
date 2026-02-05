@@ -5,11 +5,47 @@ use ratatui::style::Color;
 use ratatui::layout::Constraint;
 
 use crate::config::SharedConfig;
-use crate::ui::component::Component;
+use crate::prelude::Component;
 use crate::ui::db_view::DatabaseComponent;
 use crate::ui::info::InfoComponent;
 use crate::ui::task_control::TaskControlComponent;
 use crate::ui::welcome::WelcomeComponent;
+
+
+// APP GLOBAL
+pub const PROJECT :&[&str] = &["org","oelabs","atlas","0.2.0"];
+pub const APP_TITLE: &str = " ATLAS PRIME ";
+pub const DATABASE_FILE : &str = "atlas_prime.db";
+pub const CFG_PATH : &str = "atlas/atlas_cfg.json";
+pub const CFG_OVERRIDE_PATH :&str = "atlas_cfg_override.json";
+
+
+
+
+//
+pub const SCRIPT_DIR :&str = "script"; // $home/script
+pub const ATLAS_TASK_FILELIST :&str = "atlas_task.json";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 /// 2. 标签页唯一标识
@@ -67,7 +103,7 @@ impl TabId {
 }
 
 // 2. 界面文字内容
-pub const APP_TITLE: &str = " ATLAS PRIME ";
+
 
 pub const WELCOME_MSG: &str = "Next-generation Compute Platform";
 pub const HELP_PROMPT: &str = "Press 'h' to toggle help & controls";
@@ -112,16 +148,9 @@ pub const MAIN_LAYOUT: [Constraint; 3] = [
     Constraint::Length(1), // 状态栏高度
 ];
 
-// pub const DB_DFT_NS:&str = "atlas_core";
-// pub const DB_DFT_DB:&str = "system";
-
-// pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 
-pub const DATABASE_FILE : &str = "atlas_prime.db";
-
-
-pub const TASK_RAW_JSON: &str = r#"[
+pub const TASK_RAW_JSON_SAMPLE: &str = r#"[
     {"id": "deno", "name": "🦕DenoConSole", "command": "deno", "args": [], "autostart": false, "group": "Srv", "log_limit": 4096},    
     {"id": "ps", "name": "ProcessList", "command": "ps", "args": ["aux"], "autostart": false, "group": "Srv", "log_limit": 1024},    
     {"id": "x11", "name": "Start X Server", "command": "startx", "args": [], "autostart": false, "group": "Sys", "log_limit": 100},

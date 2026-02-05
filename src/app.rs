@@ -1,10 +1,8 @@
 use crate::config::{Config, SharedConfig};
 use crate::constans::{APP_TITLE, FOOTER_LAYOUT, TabId};
 // 引入新的 message 定义
-use crate::message::{GlobalEvent, Progress, StatusLevel};
-use crate::prelude::{GlobIO, GlobRecv, GlobSend};
+use crate::prelude::*;
 use crate::ui::app_button::button_components_init;
-use crate::ui::component::Component;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{

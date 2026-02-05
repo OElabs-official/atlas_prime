@@ -5,14 +5,16 @@ use tokio::sync::{RwLock, broadcast};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::{env, fs};
-
+use std::{any::Any, collections::HashMap};
 use crate::config::Config;
-use crate::message::GlobalEvent;
+use crate::constans::{ATLAS_TASK_FILELIST, CFG_OVERRIDE_PATH, CFG_PATH, PROJECT};
 
-pub static ATLAS_PATHS: OnceLock<AtlasPath> = OnceLock::new();
+pub static PROJECT_PATHS: OnceLock<ProjectPath> = OnceLock::new();
+
+
 
 #[derive(Debug)]
-pub struct AtlasPath {
+pub struct ProjectPath {
     // 程序基础路径
     pub exe_dir: PathBuf,
     pub current_dir: PathBuf,
@@ -47,26 +49,24 @@ pub struct AtlasPath {
     // pub db_dir: PathBuf,
 }
 
-impl AtlasPath {
+impl ProjectPath {
     // run at main()
     pub fn init() {
-        ATLAS_PATHS.get_or_init(|| {
+        PROJECT_PATHS.get_or_init(|| {
             let exe_path = env::current_exe().unwrap_or_default();
             let exe_dir = exe_path.parent().unwrap_or(&exe_path).to_path_buf();
             let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-            let proj = ProjectDirs::from("org", "oelabs", "atlas")
+            let proj = ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2])
                 .expect("Failed to get project directories");
             let base = BaseDirs::new().expect("Failed to get base directories");
             let user = UserDirs::new().expect("Failed to get user directories");
 
             // 业务路径：脚本存放在 Home/script，数据库存放在 Data/db
             let script_dir = base.home_dir().join("script");
-            let db_dir = proj.data_dir().join("db");
 
             // 自动创建核心业务目录
             let _ = fs::create_dir_all(&script_dir);
-            let _ = fs::create_dir_all(&db_dir);
             let _ = fs::create_dir_all(proj.config_dir());
 
             Self {
@@ -98,39 +98,34 @@ impl AtlasPath {
         });
     }
 
-    pub fn get() -> &'static AtlasPath {
-        ATLAS_PATHS.get().expect("AtlasPath not initialized! Call init() in main.")
+    pub fn get() -> &'static ProjectPath {
+        PROJECT_PATHS.get().expect("Path not initialized! Call init() in main.")
     }
 
     /// 获取配置数据文件路径 (支持 override 检查)
     pub fn get_config_path() -> PathBuf {
         let p = Self::get();
-        let override_path = p.exe_dir.join("atlas_cfg_override.json");
+        let override_path = p.exe_dir.join(CFG_OVERRIDE_PATH);
         if override_path.exists() {
             override_path
         } else {
             // 注意：这里使用 base_config_dir 可能更符合 ProjectDirs 逻辑
-            let path = p.base_config_dir.join("atlas/atlas_cfg.json");
+            let path = p.base_config_dir.join(CFG_PATH);
             if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
             path
         }
     }
 
     /// 获取脚本存放目录 (关联函数)
-    pub fn get_script_dir() -> PathBuf {
-        let p = Self::get();
-        let path = p.home_dir.join("script");
-        let _ = fs::create_dir_all(&path);
-        path
-    }
+
 
     /// 获取数据库存放目录 (关联函数)
-    pub fn get_db_dir() -> PathBuf {
-        let p = Self::get();
-        let path = p.proj_dir.join("db");
-        let _ = fs::create_dir_all(&path);
-        path
-    }
+    // pub fn get_db_dir() -> PathBuf {
+    //     let p = Self::get();
+    //     let path = p.proj_dir.join("db");
+    //     let _ = fs::create_dir_all(&path);
+    //     path
+    // }
 
     pub fn collect_dirs() -> Vec<String> {
         let p = Self::get();
@@ -163,8 +158,8 @@ impl AtlasPath {
         // 4. 业务逻辑生成的路径 (Dynamic Paths)
         list.push("\n--- [ Resolved Business Paths ] ---".to_string());
         list.push(format!("Config File: {:?}", Self::get_config_path()));
-        list.push(format!("Scripts Dir: {:?}", Self::get_script_dir()));
-        list.push(format!("Database Dir: {:?}", Self::get_db_dir()));
+        // list.push(format!("Scripts Dir: {:?}", Self::get_script_dir()));
+        // list.push(format!("Database Dir: {:?}", Self::get_db_dir()));
 
         // 5. 用户常用目录 (UserDirs - 筛选展示)
         list.push("\n--- [ User Content Dirs ] ---".to_string());
@@ -182,29 +177,6 @@ impl AtlasPath {
     }
 
 
-    pub fn get_task_path() -> PathBuf {
-        let p = Self::get();
-        // 建议存放在 proj_dir (项目数据目录) 下，与 db 目录同级
-        let path = p.home_dir.join("atlas_task.json");
-        
-        // 确保父目录存在
-        // if let Some(parent) = path.parent() {
-        //     let _ = fs::create_dir_all(parent);
-        // }
-        path
-    }
-
-    /// 从磁盘读取任务文件的原始字符串
-    pub fn read_task_json() -> std::io::Result<String> {
-        let path = Self::get_task_path();
-        
-        // 如果文件不存在，返回空字符串或错误，这里采取返回空字符串并创建文件的策略（或根据需求调整）
-        if !path.exists() {
-            return Ok(String::new());
-        }
-        
-        fs::read_to_string(path)
-    }
 
 }
 
@@ -283,8 +255,117 @@ impl Config {
 
 
 
+use ratatui::{Frame, layout::Rect};
+
+pub trait Component: Send + Sync {
+    // 同步函数：由主循环高频调用，内部使用 try_recv 检查异步状态
+    fn update(&mut self) -> bool;
+
+    // 同步渲染：根据当前内存状态绘图
+    fn render(&mut self, f: &mut Frame, area: Rect); //此函数不能异步，因此需要使用同步解锁
+
+    // 事件处理：返回 true 表示消费了事件，阻止冒泡
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool;
+
+    fn init() -> Self
+    where
+        Self: Sized;
+
+}
 
 
 
 
+
+
+
+
+
+
+#[derive(Clone, Debug)]
+pub enum GlobalEvent {
+    /// 数据更新：用于组件内容填充 (Deno -> Component)
+    //Data(String, serde_json::Value),
+    Data {
+        key: &'static str, // 例如 "public_ip"
+        data: DynamicPayload,
+    },
+
+    /// 状态反馈：用于 Footer 渲染 (Async Task -> App Footer)
+    /// 参数：内容, 等级, 可选进度
+    Status(String, StatusLevel, Option<Progress>),
+    // 全局指令：改变应用行为 (Component/Deno -> App) 如果需要，在Data 里
+    // Action(AppAction),
+}
+#[derive(Clone)] // 注意：Arc<dyn Any> 不能直接派生 Debug，需要特殊处理
+pub struct DynamicPayload(pub Arc<dyn Any + Send + Sync>);
+
+impl std::fmt::Debug for DynamicPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DynamicPayload(Arc<dyn Any>)")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatusLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub enum Progress {
+    Percent(u8),
+    TaskCount(u32, u32), // (当前, 总数)
+    Loading,
+}
+
+
+impl GlobIO {
+    /// 模拟 println! -> 发送 Info 级别的通知
+    pub fn info<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Info,
+            None,
+        ));
+    }
+
+    /// 模拟成功提示
+    pub fn success<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Success,
+            None,
+        ));
+    }
+
+    /// 模拟警告提示
+    pub fn warn<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Warning,
+            None,
+        ));
+    }
+
+    /// 模拟 eprintln! -> 发送 Error 级别的通知
+    pub fn error<S: Into<String>>(msg: S) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            StatusLevel::Error,
+            None,
+        ));
+    }
+
+    /// 快捷发送带进度的状态
+    pub fn progress<S: Into<String>>(msg: S, level: StatusLevel, prog: Progress) {
+        let _ = Self::send().send(GlobalEvent::Status(
+            msg.into(),
+            level,
+            Some(prog),
+        ));
+    }
+}
 

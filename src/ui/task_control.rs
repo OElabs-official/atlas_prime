@@ -1,16 +1,16 @@
 use crate::config::Config;
 use crate::prelude::*;
-use crate::constans::{TASK_RAW_JSON};
-use crate::message::{DynamicPayload, GlobalEvent, StatusLevel};
+use crate::constans::{ATLAS_TASK_FILELIST, SCRIPT_DIR, TASK_RAW_JSON_SAMPLE};
 use crate::{
     config::SharedConfig,
-    ui::component::Component,
 };
 use ansi_to_tui::IntoText;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -94,15 +94,54 @@ enum ViewMode {
     Log,  // 全屏日志模式
 }
 
+
+impl ProjectPath
+{
+    pub fn get_script_dir() -> PathBuf {
+        let p = Self::get();
+        let path = p.home_dir.join(SCRIPT_DIR);
+        let _ = fs::create_dir_all(&path);
+        path
+    }
+
+    pub fn get_task_path() -> PathBuf {
+        let p = Self::get();
+        // 建议存放在 proj_dir (项目数据目录) 下，与 db 目录同级
+        let path = p.home_dir.join(ATLAS_TASK_FILELIST);
+        
+        // 确保父目录存在
+        // if let Some(parent) = path.parent() {
+        //     let _ = fs::create_dir_all(parent);
+        // }
+        path
+    }
+
+    /// 从磁盘读取任务文件的原始字符串
+    pub fn read_task_json() -> std::io::Result<String> {
+        let path = Self::get_task_path();
+        
+        // 如果文件不存在，返回空字符串或错误，这里采取返回空字符串并创建文件的策略（或根据需求调整）
+        if !path.exists() {
+            return Ok(String::new());
+        }
+        
+        fs::read_to_string(path)
+    }
+
+}
+
+
 impl Component for TaskControlComponent {
     fn init() -> Self {
         // 模拟从 JSON 加载过程（实际开发中可使用 std::fs::read_to_string）
 
         let mut descs: Vec<TaskDescriptor> =
-            serde_json::from_str(&AtlasPath::read_task_json().unwrap_or_default()).unwrap_or_default();
+            serde_json::from_str(&ProjectPath::read_task_json().unwrap_or_default()).unwrap_or_default();
 
         // --- 新增：扫描 scripts 目录 ---
-        let script_dir = AtlasPath::get_script_dir();
+        let script_dir = ProjectPath::get_script_dir();
+        // let mut script_dir = ProjectPath::get().home_dir.clone(); script_dir.push(SCRIPT_DIR);
+
         if let Ok(entries) = std::fs::read_dir(&script_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

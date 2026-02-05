@@ -2,7 +2,6 @@ mod app;
 mod config;
 mod constans;
 mod db;
-mod message;
 // mod server;
 mod ui;
 // mod utils;
@@ -17,10 +16,10 @@ use std::path::Path;
 use tokio::sync::broadcast;
 
 use crate::config::SharedConfig;
-use crate::message::{GlobalEvent, Progress, StatusLevel};
 
-use crate::prelude::{AtlasPath, GlobIO};
-use crate::{app::App, config::Config, ui::component::Component};
+
+use crate::prelude::*;
+use crate::{app::App, config::Config};
 use backtrace::Backtrace;
 use crossterm::{
     event::{self, Event, EventStream, KeyCode},
@@ -134,7 +133,7 @@ fn setup_panic_hook() {
 
 fn main() {
     setup_panic_hook();    
-    AtlasPath::init(); 
+    ProjectPath::init(); 
     GlobIO::init();
     Config::init();// check
 
@@ -348,7 +347,7 @@ fn show_splash<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Err
 where
     B::Error: 'static,
 {
-    let mut img_path = AtlasPath::get().base_data_dir.clone();
+    let mut img_path = ProjectPath::get().proj_dir.clone();
     img_path.push("welcome.png");
     // let img_path = "welcome.png";
     let dyn_img = image::open(img_path)?;

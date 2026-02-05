@@ -42,3 +42,8 @@ database:
 
 
 Database record failed: Serialization error: invalid type: enum, expected any valid JSON valueuelueeuee
+
+
+
+V0.2 todo ：
+AI MCP Service Control （Deno）

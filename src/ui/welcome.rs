@@ -1,4 +1,4 @@
-use crate::{config::{Config, SharedConfig}, constans::ART_LOGO, ui::component::Component};
+use crate::{config::{Config, SharedConfig}, constans::ART_LOGO, prelude::Component, };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 

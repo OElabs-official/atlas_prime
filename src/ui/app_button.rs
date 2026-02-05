@@ -1,5 +1,5 @@
 use crate::{
-    message::{GlobalEvent, Progress, StatusLevel}, prelude::{GlobIO, GlobRecv}, ui::component::Component
+    prelude::{Component, GlobIO, GlobRecv,GlobalEvent, Progress, StatusLevel}, 
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -17,9 +17,7 @@ pub struct HintComponent;
 // 
 
 impl Component for HintComponent {
-    // fn init(config: SharedConfig, _send: GlobSend, _recv: GlobRecv) -> Self {
-    //     Self { config }
-    // }
+
     fn init() -> Self{Self}
 
     fn update(&mut self) -> bool {
