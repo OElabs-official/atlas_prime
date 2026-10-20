@@ -1,4 +1,6 @@
 /target
-/gemini_diss
-todo
-crash.log
+/_deprecated_src
+/.omo
+*.log
+/idx.bak
+/idx.out
