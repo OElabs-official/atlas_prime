@@ -1,43 +1,37 @@
 [package]
 name = "atlas_prime"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
+# v1 headless（system/task/web/db 四黑箱）最小依赖集；
+# 电池走 termux-api CLI，不再需要 termuxapi crate。
 [dependencies]
-crossterm = {version="0.29.0",features=["event-stream"]}
-ratatui = { version = "0.30.0", features = ["all-widgets"] }
-# rand = "0.9.2"
-sysinfo = "0.38.0"
-local-ip-address = "0.6.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 directories = "6.0.0"
-# core_affinity = "0.8.3"
-#ureq = "3.1.4"
+libc = "0.2"
 tokio = { version = "1.49.0", features = ["full"] }
-backtrace = "0.3.76"
-chrono = "0.4.43"
-futures = "0.3.31"
-notify = "8.2.0"
-smart-default = "0.7.1"
-# regex = "1.12.2"
-ansi-to-tui = "8.0.1"
-ratatui-image = "10.0.4"
-image = "0.25.9"
-
-# ntex = { version = "2.17.0", features = ["tokio"] }
-# reqwest = { version = "0.13.1", features = ["json", "http2","native-tls","webpki-roots"], default-features = false }# for termux build
-#webpki-roots = "1.0.5"
-#surrealdb = { version = "2.4.1", features = ["kv-rocksdb"] } # 如果数据量达到 TB 级别，或者需要多机共享，只需将驱动改为 surrealdb = { version = "*", features = ["protocol-http"] } 即可连接到独立的 SurrealDB 服务器，代码逻辑几乎无需改动。
-# mongodb = { version = "3.5.0", features = ["snappy-compression"] }
-# bson = "3.1.0"
-# sqlx = "0.8.6"
-# sqlx = { version = "0.8.6", features = [ "runtime-tokio", "tls-native-tls","postgres", "sqlite" ] }
 sqlx = { version = "0.8.6", features = [ "runtime-tokio",  "sqlite" ] }
+ntex = "4.3"
+ntex-cors = "4.1"
+local-ip-address = "0.6.9"    # v1/system/ip 的 getifaddrs 封装
 
-
-[target.'cfg(target_os = "android")'.dependencies]
-termuxapi = "0.1.1"
+# —— _deprecated_src/ 遗留依赖，重写涉及对应功能时再按需恢复 ——
+# crossterm = { version = "0.29.0", features = ["event-stream"] }
+# ratatui = { version = "0.30.0", features = ["all-widgets"] }
+# ansi-to-tui = "8.0.1"
+# sysinfo = "0.38.0"            # v1/system 以 /proc + sysfs 替代
+# termuxapi = "0.1.1"           # v1/system/battery 直读 CLI JSON
+# backtrace = "0.3.76"
+# chrono = "0.4.43"
+# futures = "0.3.31"
+# notify = "8.2.0"
+# smart-default = "0.7.1"
+# image = "0.25.9"
+# csv = "1.3.0"
+# reqwest = { version = "0.13.1", features = ["json", "http2","native-tls","webpki-roots"], default-features = false }  # for termux build
+# surrealdb = { version = "2.4.1", features = ["kv-rocksdb"] }
+# mongodb = { version = "3.5.0", features = ["snappy-compression"] }
 
 # system require :
 # pkg i deno pkg-config chafa surreal
@@ -48,4 +42,3 @@ lto = true           # 开启链接时优化 (Link Time Optimization)
 codegen-units = 1    # 减少并行编译单元，增加优化空间
 panic = "abort"      # 移除栈回溯展开代码 (极其显著减小体积)
 strip = true         # 自动从二进制文件中剔除符号信息 (Symbol Table)
-
