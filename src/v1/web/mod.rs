@@ -12,6 +12,12 @@
 //!
 //! # 路由表（与 v1 模块一一对应）
 //! - `GET /system/cpu|thermal|mem|disk|ip` —— 普通采集，令牌桶 **20 req/s**；
+//!   `ip` 路由对应 `system::network`（路径名沿用），payload 除地址三桶外带
+//!   `"speed": {"<组>": {"rx_bps": f64, "tx_bps": f64}}`（**分组级**：`wifi` /
+//!   `cellular` / 有流量的其他网卡名）——读 [`Operator::net_speeds`] 缓存
+//!   （操作器 1Hz 回路喂数据），本路由绝不自读 /proc，首个 emit 前为 `{}`；
+//!   别名 `GET /system/cli/network` 同挂本处理器
+//!   （同一 payload、`speed` 两处同供，共桶共缓存槽，不走 cli 1 req/s 档）；
 //! - `GET /system/cli/battery` —— CLI 源采集（fork termux-api），**1 req/s**；
 //!   超限不报错、不阻塞：**直接回上一次缓存 JSON**（响应头 `X-Cache: HIT` + `X-Cache-At`）；
 //!   缓存语义 = 单槽最新（本服务是实时读数，旧副本只会驻留到下一次放行请求）；
@@ -19,8 +25,11 @@
 //! - `POST /task/run/{id}` `POST /task/stop/{id}` `GET /task/output/{id}`
 //!   `POST /task/input/{id}`（JSON `{"line": "..."}`）；
 //! - `GET /db/history?kind=&key=&limit=` —— sqlite 历史行（`kind` 必填：
-//!   cpu_freq/temp/mem/swap/battery/disk；`key` 省略 = 该 kind 全键；`limit` 默认 300，钳位 1..=5000）。
-//!   响应按时间**升序** `[{t,k,v}]`；DB 读走阻塞池（`Db::history` 内部驱动共享 runtime），不限流；
+//!   cpu_freq/temp/mem/swap/battery/disk/net；`key` 省略 = 该 kind 全键；`limit` 默认 300，钳位 1..=5000）。
+//!   `net` 的 key = `<组>.rx_bps` / `<组>.tx_bps`（组 = wifi/cellular/有流量的
+//!   其他网卡名；bytes/s，1Hz，≈8h 回溯；旧 per-iface 键已退役，随窗口自然出清）。
+//!   响应按时间**升序** `[{t:"YYYY-MM-DDTHH:MM:SSZ",k,v}]`——`t` 为 RFC3339 字符串原文
+//!   （前端 `Date.parse` 直吃）；DB 读走阻塞池（`Db::history` 内部驱动共享 runtime），不限流；
 //! - `GET /` → 302 重定向到 `/index.html`；
 //! - `GET /index.html` → 数据目录（与 v1/db 同源）下的 index.html 静态面板：
 //!   不限流，**每次读盘**（走阻塞池，改动刷新即见），响应带 `cache-control: no-cache`
@@ -50,8 +59,9 @@ use ntex_cors::Cors;
 use serde::Deserialize;
 
 use crate::v1::PROJECT;
-use crate::v1::system::{battery, cpu, disk, ip, mem, thermal};
 use crate::v1::db::Db;
+use crate::v1::operator::Operator;
+use crate::v1::system::{battery, cpu, disk, mem, network, thermal};
 use crate::v1::task::{Task, TaskError};
 
 // ---------------- 公开入口 ----------------
@@ -72,7 +82,8 @@ impl Web {
                     .route("/system/thermal", web::get().to(h_thermal))
                     .route("/system/mem", web::get().to(h_mem))
                     .route("/system/disk", web::get().to(h_disk))
-                    .route("/system/ip", web::get().to(h_ip))
+                    .route("/system/ip", web::get().to(h_network))
+                    .route("/system/cli/network", web::get().to(h_network))
                     .route("/system/cli/battery", web::get().to(h_cli_battery))
                     .route("/task", web::get().to(h_task_list))
                     .route("/task/update", web::post().to(h_task_update))
@@ -127,8 +138,26 @@ async fn h_disk() -> HttpResponse {
     })
     .await
 }
-async fn h_ip() -> HttpResponse {
-    respond("/system/ip", false, || serde_json::to_vec(&ip::Ip::get())).await
+/// `/system/ip`（路由名沿用，模块已迁 network）：地址枚举 + `"speed"` 成员。
+/// speed 取自 [`Operator::net_speeds`] **纯缓存读**（1Hz 回路喂数据，本路由
+/// 绝不自读 /proc）：分组级 `{"<组>": {"rx_bps": f64, "tx_bps": f64}}`
+/// （组 = wifi/cellular/有流量的其他网卡名），首个 emit 前 `{}`。
+/// 注：serde_json 默认按 key 升序出对象（无 preserve_order），payload 键序
+/// 为字母序；[wifi, cellular, …] 的语义序由前端按组名显式排定。
+/// 别名 `/system/cli/network`（CLI 风格命名，数据源现实为直读→adb 桥链）挂
+/// **同一处理器**：payload 逐字节一致、`speed` 成员两处同供；同处理器即
+/// 同缓存槽（key=`/system/ip`）同限流档（normal 桶，不走 cli 1 req/s 档）。
+async fn h_network() -> HttpResponse {
+    respond("/system/ip", false, || {
+        let mut v = serde_json::to_value(network::Ip::get())?;
+        let mut speed = serde_json::Map::new();
+        for (iface, rx, tx) in Operator::net_speeds() {
+            speed.insert(iface, serde_json::json!({ "rx_bps": rx, "tx_bps": tx }));
+        }
+        v["speed"] = serde_json::Value::Object(speed);
+        serde_json::to_vec(&v)
+    })
+    .await
 }
 async fn h_cli_battery() -> HttpResponse {
     respond("/system/cli/battery", true, || {
@@ -215,26 +244,30 @@ struct HistIn {
     limit: Option<u32>,
 }
 
-/// `GET /db/history?kind=&key=&limit=` → 按时间升序 `[{t,k,v}]`。
+/// `GET /db/history?kind=&key=&limit=` → 按时间升序 `[{t:<RFC3339>,k,v}]`（`t` = db TEXT 列原文）。
+/// 内部按 `ts_secs`（unix 秒投影）排序——迁移后全行统一 RFC3339 格式，字典序即时间序，二者等价。
 /// DB 读（内含共享 runtime 的 block_on）上 ntex 阻塞池；limit 钳位 1..=5000 防爆量。
 async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
     let kind = q.kind.clone();
     let key = q.key.clone();
     let limit = q.limit.unwrap_or(300).clamp(1, 5000);
-    match web::block(move || Ok::<_, std::io::Error>(Db::history(&kind, key.as_deref(), limit))).await {
+    match web::block(move || Ok::<_, std::io::Error>(Db::history(&kind, key.as_deref(), limit)))
+        .await
+    {
         Ok(mut rows) => {
             rows.sort_by_key(|r| r.ts_secs); // 黑箱回新→旧，面板按旧→新吃
             let body: Vec<_> = rows
                 .iter()
-                .map(|r| serde_json::json!({ "t": r.ts_secs, "k": r.key, "v": r.value }))
+                .map(|r| serde_json::json!({ "t": r.ts, "k": r.key, "v": r.value }))
                 .collect();
             HttpResponse::Ok()
                 .content_type("application/json; charset=utf-8")
                 .header("cache-control", "no-store")
                 .json(&body)
         }
-        Err(BlockingError::Error(e)) => HttpResponse::InternalServerError()
-            .json(&serde_json::json!({ "error": e.to_string() })),
+        Err(BlockingError::Error(e)) => {
+            HttpResponse::InternalServerError().json(&serde_json::json!({ "error": e.to_string() }))
+        }
         Err(BlockingError::Canceled) => HttpResponse::InternalServerError()
             .json(&serde_json::json!({ "error": "blocking pool closed" })),
     }
@@ -268,10 +301,10 @@ async fn h_index() -> HttpResponse {
     };
     // block 把闭包内的 io::Error 平并进 BlockingError::Error → 读盘失败（缺失/不可读）一律 404
     match web::block(move || std::fs::read(&path)).await {
-            Ok(body) => HttpResponse::Ok()
-                .content_type("text/html; charset=utf-8")
-                .header("cache-control", "no-cache")
-                .body(body),
+        Ok(body) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(body),
         Err(BlockingError::Error(e)) => HttpResponse::NotFound()
             .json(&serde_json::json!({ "error": format!("index.html: {e}") })),
         Err(BlockingError::Canceled) => HttpResponse::InternalServerError()
@@ -476,7 +509,8 @@ mod tests {
         }
     }
 
-    /// 真机冒烟：起服务 → 裸 HTTP GET 两条路由 → 关停。
+    /// 真机冒烟：起服务 → 裸 HTTP GET 各路由 → 操作器 1Hz 速度回路两拍 →
+    /// speed 成员 + kind=net 历史 → 关停。
     /// `cargo test v1::web -- --ignored --test-threads=1`
     #[test]
     #[ignore]
@@ -498,18 +532,109 @@ mod tests {
         );
         let tasks = get("/task");
         assert!(tasks.contains("200 OK"), "{tasks}");
+        // 先落一轮，保证 /db/history 必有行可验
+        let _ = crate::v1::operator::Operator::sample_now();
         let hist = get("/db/history?kind=mem&key=used&limit=5");
         assert!(
             hist.contains("200 OK") && hist.contains("application/json"),
             "{hist}"
         );
+        // 契约：t = RFC3339 字符串，按时间升序（以解析后 unix 秒验证序）
+        let body = hist.split_once("\r\n\r\n").map_or("", |p| p.1);
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(body).expect("/db/history 应回 JSON 数组");
+        assert!(!rows.is_empty(), "/db/history 应非空：{body}");
+        let mut stamps = Vec::new();
+        for r in &rows {
+            let t = r
+                .get("t")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("t 必须是字符串：{r}"));
+            stamps.push(
+                chrono::DateTime::parse_from_rfc3339(t)
+                    .unwrap_or_else(|e| panic!("t 必须可析为 RFC3339，实为 {t}：{e}"))
+                    .timestamp(),
+            );
+        }
+        assert!(
+            stamps.windows(2).all(|w| w[0] <= w[1]),
+            "/db/history 必须升序：{stamps:?}"
+        );
+        // 网卡速度契约（域感知）：当前 SELinux 域存在可读数据源时，1Hz 回路
+        // 两拍（基线 + 2 次 emit）后必须喂缓存并落 kind=net 且升序；sealed 域
+        // （Termux untrusted_app 三级源全拒读，见 network::netlink 头）下
+        // speed={} 与无 net 行同为正确行为。speed 对象本身无条件必须在。
+        let seeded = !network::speed::snapshot().is_empty();
+        Operator::start().expect("速度回路 start 应成功");
+        std::thread::sleep(Duration::from_millis(2300));
+        let ip = get("/system/ip");
+        assert!(ip.contains("200 OK") && ip.contains("public_v4"), "{ip}");
+        let net: serde_json::Value =
+            serde_json::from_str(ip.split_once("\r\n\r\n").map_or("", |p| p.1))
+                .expect("/system/ip 应回 JSON");
+        let speed = net
+            .get("speed")
+            .and_then(|v| v.as_object())
+            .expect("/system/ip payload 必须含 speed 对象");
+        if seeded {
+            assert!(!speed.is_empty(), "数据源可用时 2s+ 后 speed 必须已喂数: {net}");
+            // 分组契约：speed 键 ⊆ {wifi, cellular} ∪ 非零其他（排除类名字
+            // 任何情况下不得出现；其他键 = 见过流量的数据面网卡自组）
+            for k in speed.keys() {
+                let excluded = k == "lo"
+                    || k == "br0"
+                    || k.starts_with("dummy")
+                    || k.starts_with("ifb")
+                    || k.starts_with("tun")
+                    || k.starts_with("rmnet");
+                assert!(
+                    k == "wifi" || k == "cellular" || !excluded,
+                    "speed 键 ⊆ {{wifi, cellular}} ∪ 非零其他，实为 {k}: {net}"
+                );
+            }
+            let hist_net = get("/db/history?kind=net&limit=1000");
+            assert!(hist_net.contains("200 OK"), "{hist_net}");
+            let net_rows: Vec<serde_json::Value> = serde_json::from_str(
+                hist_net.split_once("\r\n\r\n").map_or("", |p| p.1),
+            )
+            .expect("kind=net 历史应回 JSON 数组");
+            assert!(
+                net_rows.len() >= 4,
+                "两拍 × (rx+tx) 应 ≥4 行，实际 {}",
+                net_rows.len()
+            );
+            assert!(
+                net_rows.iter().any(|r| {
+                    r.get("k")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|k| k.ends_with(".rx_bps") || k.ends_with(".tx_bps"))
+                }),
+                "key 应为 <组>.rx_bps/.tx_bps 形制: {net_rows:?}"
+            );
+            let mut stamps_net = Vec::new();
+            for r in &net_rows {
+                stamps_net.push(
+                    chrono::DateTime::parse_from_rfc3339(
+                        r["t"].as_str().expect("t 必须字符串"),
+                    )
+                    .expect("t 必须 RFC3339")
+                    .timestamp(),
+                );
+            }
+            assert!(
+                stamps_net.windows(2).all(|w| w[0] <= w[1]),
+                "kind=net 必须按时间升序: {stamps_net:?}"
+            );
+        } else {
+            println!("sealed 域：speed 计量无数据源 → speed={speed:?}、无 kind=net 行为正确");
+        }
+        Operator::stop();
         let nf = get("/nope");
         assert!(nf.contains("404"), "{nf}");
         // 静态面板：/ 必 302 → /index.html（头名大小写不敏感）
         let root = get("/");
         assert!(
-            root.contains("302")
-                && root.to_lowercase().contains("location: /index.html"),
+            root.contains("302") && root.to_lowercase().contains("location: /index.html"),
             "{root}"
         );
         // /index.html：数据目录文件存在 → 200 text/html；缺失 → 404 JSON。两者皆可。

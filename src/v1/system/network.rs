@@ -1,12 +1,22 @@
-//! v1/ip — 本机网卡地址枚举，按 回环 / 局域网 / 公网 三档分类。
+//! v1/network — 网络域：地址枚举 + 网卡速度计量。
+//!
+//! 本域三块能力：
+//! - **地址枚举**（本文件 [`Ip`]）：本机网卡地址按 回环 / 局域网 / 公网 三档分类；
+//! - **速度计量**（子模块 [`speed`]）：数据面网卡累计收发字节快照 + **分组差分**
+//!   （wlan* → `wifi`、rmnet 数据面 → `cellular`、有流量的其他网卡自组；组内
+//!   先求和再差分，[`speed::Grouper`]）；计量节拍由
+//!   [`crate::v1::operator`] 的 1Hz 回路驱动（本模块不自发采样，只提供读数原语）；
+//! - **正文源链**（[`read_dev_snapshot`]，实现在 speed/devsrc）：`/proc/net/dev`
+//!   全文读数 = 直读 → adb 桥（端口取自数据目录 `adb_port`，「无线配对」任务/人工维护）；
+//!   整链失败按 [`NetError`] 四分成因上报。
 //!
 //! # 公开接口用法
 //!
-//! 对外只有一个结构体 [`Ip`]（唯一公开关联函数 [`Ip::get`]，一次采集）：
+//! 地址枚举对外只有一个结构体 [`Ip`]（唯一公开关联函数 [`Ip::get`]，一次采集）：
 //!
 //! ```ignore
-//! // crate 内调用路径：crate::v1::system::ip
-//! let net = crate::v1::system::ip::Ip::get();
+//! // crate 内调用路径：crate::v1::system::network
+//! let net = crate::v1::system::network::Ip::get();
 //!
 //! net.loopback;   // Vec<(网卡名, 地址)>  回环：127.x / ::1（通常只有 lo）
 //! net.lan;        // Vec<(网卡名, 地址)>  局域网：RFC1918、链路本地、ULA（v4/v6 混装）
@@ -37,6 +47,15 @@
 //!   双重检查——首个调用必回真实答案，并发首探只出网一次；
 //! - `public_v6` = 本机枚举出的非 ULA/链路本地 v6（隐私扩展临时地址同样
 //!   公网可达，一并列入）；纯 v4 NAT 环境下为空。
+
+pub mod speed;
+
+/// 正文源链上浮：域级路径 `crate::v1::system::network::{read_dev_snapshot, NetError}` 直达
+#[expect(unused_imports, reason = "域级 API 面上浮（模块文档即以该路径示人），bin 内暂无消费方属预期")]
+pub use speed::{NetError, read_dev_snapshot};
+
+/// speed 的第四数据源（netlink route socket），仅 speed 可见
+mod netlink;
 
 use serde::Serialize;
 use std::net::{IpAddr, TcpStream, ToSocketAddrs, UdpSocket};

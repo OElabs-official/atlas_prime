@@ -23,6 +23,11 @@
                                  avail_mb,used_mb}], dirs:[str]}
     GET  /system/ip             {lan:[[nic,addr]],public_v4:str|null,
                                  public_v6:[str]}（回环地址本面板不显示）
+    GET  /system/cli/network    /system/ip 形状 + speed:{[组]:{rx_bps:f64,
+                                 tx_bps:f64}}（字节/秒瞬时速率，分组级：
+                                 wifi/cellular/有流量的其他网卡名）；speed 可为
+                                 {}（操作符刚启动）或整键缺失（旧版二进制）——
+                                 表盘行按缺席容忍，不弹告警
     GET  /system/cli/battery    {present,technology,health,plugged,status,
                                  percentage,voltage(毫伏),current(微安,负=放电),
                                  current_average;其余键本面板忽略}
@@ -33,7 +38,8 @@
     GET  /task/output/{id}      [{at:{secs,nanos},stream,text}]
     POST /task/input/{id}       {"line":"..."}
     GET  /db/history?kind=[&key=][&limit=]  sqlite 历史行，按时间升序
-                                 [{t:unix 秒,k:键,v:数值}]；kind=battery|mem|
+                                 [{t:RFC3339 字符串,k:键,v:数值}]（t=Date.parse
+                                 直吃）；kind=battery|mem|
                                  swap|cpu_freq|temp，limit 1..5000
   打开即回填 sqlite 历史（/db/history），随后实时续采：种子点一律早于实时
   样本（服务端 120s 轮次落库），先播种后续采 = 时间序天然不破；回填失败仅
@@ -44,7 +50,9 @@
     BATTERY：默认 5s 节奏，双击在 5s⇄1s 间切换并提示（服务器有 1/s CLI 桶 +
     缓存 HIT 兜底，1s 安全）。折线窗默认 24h，图上水平滑动切 72h（按时间修剪
     + 总量封顶抽稀）。
-    慢速卡 STORAGE / NETWORK / TASKS：固定 60s 轮询，双击 = 一次手动立即刷新。
+    慢速卡 STORAGE / TASKS：固定 60s 轮询，双击 = 一次手动立即刷新。
+    NETWORK：5s 节奏拉 /system/cli/network（环+列表同源）；双击 = 一次立即抓取
+    （重排下一轮 5s）。IP 地址双击复制不上抛为整卡刷新。
     任务控制台输出固定 2s 自动刷新（可暂停），不参与双击语义。
     页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
   失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
@@ -89,6 +97,7 @@
   --md-sys-motion-easing-emphasized-decelerate:cubic-bezier(0.05,0.7,0.1,1);
   --md-sys-motion-easing-linear:cubic-bezier(0,0,1,1);
   --d4-sweep:30s;
+  --d4-gauge:180px;   /* 表盘统一盘径：MEM/BATT 表盘与 NET 双环共用同一画布盒（≤760px 降 130px） */
 
   --md-sys-typescale-display-small-size:38px;  --md-sys-typescale-display-small-line-height:46px;
   --md-sys-typescale-headline-medium-size:30px;--md-sys-typescale-headline-medium-line-height:38px;
@@ -417,12 +426,29 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .trow{position:relative;display:grid;align-items:center;gap:var(--md-sys-space100);
   padding:var(--md-sys-space100) var(--md-sys-space75);border-bottom:1px solid var(--md-sys-color-outline-variant)}
 .trow.th2{grid-template-columns:2fr 3fr}
-#netList{max-height:min(192px,24vh)}
+#netList{max-height:min(288px,36vh)}
 #netList .trow{padding:7px var(--md-sys-space75);line-height:1.3}
 #netList .trow .nm{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px);display:flex;align-items:baseline;gap:6px;min-width:0}
 #netList .trow .nm b{flex:0 0 auto}
 #netList .trow .nm small{font-size:calc(var(--md-sys-typescale-label-small-size) + 2px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #netList .trow .tval{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px)}
+/* NETWORK 分组双环行（与 MEM/BATT 表盘同盘径兄弟（--d4-gauge 统一 180/130px）：
+   内=下载 外=上传 对数弧；space-evenly 左右均分 = 两组时对称落在 1/4、3/4 处，
+   >2 组（USB 网卡等自组）flex-wrap 换行、每行仍均分；盘体定尺寸，本行无滚动
+   （列表 #netList 的 .scroll 不受影响）；上传色 --a-sto，选型理由见 JS 侧注释） */
+#netRings{margin-top:var(--md-sys-space150)}
+.netrings{display:flex;justify-content:space-evenly;align-items:flex-start;
+  flex-wrap:wrap;gap:var(--md-sys-space150)}
+.netring{flex:none;display:flex;flex-direction:column;align-items:center;gap:var(--md-sys-space25)}
+.netring .dg{position:relative;width:var(--d4-gauge);height:var(--d4-gauge)}
+.netring .dg canvas{width:100%;height:100%;display:block}
+/* 盘心两行（与 MEM 双行盘心同尺寸同族：mono 等宽数字，↓=内环下载 ↑=外环上传；
+   12px = 130px 最小盘径下与 .gc2/.gn 读数层级相称的一档） */
+.nr-c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  font-family:var(--d4-mono);font-variant-numeric:tabular-nums;font-size:12px;line-height:13px;font-weight:500}
+.nr-c .dn{color:var(--a-net)} .nr-c .up{color:var(--a-sto)}
+.netring .lab{font-family:var(--d4-mono);font-size:10px;line-height:1.1;letter-spacing:.2px;
+  color:var(--md-sys-color-on-surface-variant);white-space:nowrap}
 .trow::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:0;
   background:color-mix(in srgb,var(--md-sys-color-on-surface) var(--md-sys-state-hover-opacity),transparent);
   transition:opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
@@ -453,7 +479,7 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 
 /* 电池表盘 */
 .gwrap{display:flex;align-items:center;gap:var(--md-sys-space200)}
-.gauge{position:relative;flex:none;width:180px;height:180px}
+.gauge{position:relative;flex:none;width:var(--d4-gauge);height:var(--d4-gauge)}
 .gauge canvas{width:100%;height:100%;display:block}
 .gc{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
 .gn{font-family:var(--d4-mono);font-variant-numeric:tabular-nums;font-weight:500;font-size:32px;line-height:1}
@@ -563,7 +589,7 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
   .phead>*:nth-child(2),.phead>*:nth-child(4),.phead>*:nth-child(5),.phead>*:nth-child(6),.phead>*:nth-child(7),
   .prow>*:nth-child(2),.prow>*:nth-child(4),.prow>*:nth-child(5),.prow>*:nth-child(6),.prow>*:nth-child(7){display:none}
   .gwrap{gap:var(--md-sys-space100)}
-  .gauge{width:130px;height:130px}
+  :root{--d4-gauge:130px}
   .gc .gn{font-size:24px}
   .gc .gn s{font-size:11px}
 }
@@ -636,9 +662,18 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
       </div>
     </section>
 
-    <!-- ====== NETWORK：本机地址分桶 LAN/公网v4/公网v6（60s · 双击=刷新） ====== -->
+    <!-- ====== NETWORK：分组双环速率表盘（wifi/cellular/有流量其他网卡；内=下载
+           外=上传，对数 Mb/s；标签 WIFI/MOBILE/原样）+ 地址分桶列表
+           LAN/公网v4/公网v6（5s · 双击=刷新；speed 缺席 = 环行整体隐藏） ====== -->
     <section class="card acc-net" id="card-net">
       <header class="ch"><h2>NETWORK</h2></header>
+      <div id="netRings" style="display:none">
+        <div class="netrings" id="netRingsRow"></div>
+        <div class="legend">
+          <div><em style="background:var(--a-net)"></em>内环=下载</div>
+          <div><em style="background:var(--a-sto)"></em>外环=上传 · 对数 Mb/s</div>
+        </div>
+      </div>
       <div class="tlist scroll" id="netList"></div>
     </section>
 
@@ -683,7 +718,7 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
   </div>
 
   <footer>
-    <!-- rev 2026-10-20.25 -->
+    <!-- rev 2026-10-20.31 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -728,6 +763,12 @@ function cacheColors() {
   C.grid = v("--d4-pgrid"); C.label = v("--d4-plabel");
   C.cpu = v("--a-cpu"); C.therm = v("--a-therm"); C.mem = v("--a-mem");
   C.pow = v("--a-pow"); C.net = v("--a-net"); C.sto = v("--a-sto");
+  /* 网卡外环（上传）色 = --a-sto：已定义强调色中唯一同时满足
+      ① 与天蓝 C.net 在色环上互补远距（130px 最小盘径下同心相邻仍可辨）；
+     ② 非 error/tertiary 告警语义（--a-therm 亮色下与 error 同值，排除）；
+     ③ 未被任何表盘占用（--a-mem=MEM 盘、--a-pow=BATT 盘；--a-gpu 与天蓝过近）。
+     STORAGE 语义活在行表面而非表盘，跨卡借用不混淆——BATTERY 外环借 C.net 同例。 */
+  C.netUp = C.sto;
   C.task = v("--a-proc"); C.err = v("--md-sys-color-error");
   C.trk = v("--md-sys-color-surface-container-highest");
   C.onsv = v("--md-sys-color-on-surface-variant");
@@ -1278,8 +1319,88 @@ async function tickBatt() {
   bcv.addEventListener("pointercancel", () => { swX = null; });
 }
 
-/* ---------- NETWORK（回环不显示；label 列 72px 定宽，地址列 = 剩余主导份额） ---------- */
+/* ---------- NETWORK（回环不显示；label 列 72px 定宽，地址列 = 剩余主导份额） ----------
+   分组双环（wifi/cellular/有流量其他网卡）= MEM/BATT 表盘同盘径（--d4-gauge）同比例兄弟：
+   内环=下载（C.net）、外环=上传（C.netUp），
+   对数刻度 Mbps：log2(0.03125)..log2(1000) 映射整圈 360°（≈15 bit）；内环下载顺时针、外环上传逆时针（均自 12 点起）；
+   低于地板不画弧（盘心显「·」）；1/10/100/1000 Mb/s 淡刻度线 = 电池环同 idiom
+   （hexa(C.onsv,.5) · 1px · 跨外轨径向）。轨道 = C.trk。环为瞬时表，不入历史窗。 */
+const N_LOG0 = 0.03125, N_LOGMAX = 1000, N_LOGSPAN = Math.log2(N_LOGMAX / N_LOG0); // = 15 bit
+const N_BPS_PER_MBPS = 125000;                    // 字节/秒 ×8/1e6
+function netFrac(mbps) { return Math.min(1, Math.max(0, Math.log2(Math.min(Math.max(mbps, N_LOG0), N_LOGMAX) / N_LOG0) / N_LOGSPAN)); }
+function drawNetRing(cv, dl, ul) {
+  if (!cv || !cv.isConnected) return;
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2, k = R / 60;
+  const rOut = R - 5.5 * k, rIn = R - 17 * k;     // 与 MEM/BATT 盘同几何比例
+  ctx.lineCap = "round";
+  // 外环轨道
+  ctx.lineWidth = 5 * k; ctx.strokeStyle = C.trk;
+  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();
+  // 淡对数刻度：1 / 10 / 100 / 1000 Mb/s（自顶部顺时针量角，跨外轨）
+  ctx.strokeStyle = hexa(C.onsv, 0.5); ctx.lineWidth = 1; ctx.lineCap = "butt";
+  for (const tp of [1, 10, 100, 1000]) {
+    const a = -Math.PI / 2 - netFrac(tp) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (rOut - 4 * k), cy + Math.sin(a) * (rOut - 4 * k));
+    ctx.lineTo(cx + Math.cos(a) * (rOut + 4 * k), cy + Math.sin(a) * (rOut + 4 * k));
+    ctx.stroke();
+  }
+  // 外环上传弧（低于地板不画）
+  if (ul >= N_LOG0) {
+    ctx.lineWidth = 5 * k; ctx.lineCap = "round"; ctx.strokeStyle = C.netUp;
+    ctx.beginPath(); ctx.arc(cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 - netFrac(ul) * Math.PI * 2, true); ctx.stroke(); // 上传逆时针（MEM 外环同语言）
+  }
+  // 内环轨道 + 下载弧
+  ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();
+  if (dl >= N_LOG0) {
+    ctx.strokeStyle = C.net;
+    ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + netFrac(dl) * Math.PI * 2); ctx.stroke();
+  }
+}
+/* iface 短名（动态组兜底）：剥 rmnet_/sipa_/ipa_/ipacm_ 运营商前缀；超长取尾 9 字符 */
+function shortNic(n) {
+  const s = String(n).toLowerCase().replace(/^(rmnet|sipa|ipacm|ipa)[_-]/, "");
+  return (s.length > 9 ? s.slice(-9) : s) || String(n);
+}
+/* 组名 → 表盘标签：wifi→WIFI、cellular→MOBILE、其余（USB 网卡等自组）原样短名 */
+function netLabel(k) {
+  if (k === "wifi") return "WIFI";
+  if (k === "cellular") return "MOBILE";
+  return shortNic(k);
+}
+/* 环格序 = wifi → cellular → 其余按 payload 序（sort 稳定 = 其余保序，
+   payload 键为字母序）；整键缺失（旧版二进制）或 {}（操作符刚启动）→
+   整行隐藏，无空壳、零告警 */
+function renderNetRings(d) {
+  const wrap = $("#netRings");
+  const sp = d && d.speed;
+  const keys = (sp && typeof sp === "object") ? Object.keys(sp).filter(k => sp[k] && typeof sp[k] === "object") : [];
+  const rank = k => k === "wifi" ? 0 : k === "cellular" ? 1 : 2;
+  keys.sort((a, b) => rank(a) - rank(b));
+  if (!keys.length) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  const box = $("#netRingsRow");
+  box.textContent = "";
+  const mbpsTxt = v => !(v >= N_LOG0) ? "·" : v >= 100 ? String(Math.round(v)) : f1(v);
+  for (const k of keys) {
+    const e = sp[k];
+    const dl = Number(e.rx_bps) / N_BPS_PER_MBPS, ul = Number(e.tx_bps) / N_BPS_PER_MBPS;
+    const cell = el("div", "netring");
+    const dg = el("div", "dg");
+    const cv = document.createElement("canvas");
+    const gc = el("div", "nr-c");
+    gc.append(el("div", "dn", "↓" + mbpsTxt(dl)), el("div", "up", "↑" + mbpsTxt(ul)));
+    dg.append(cv, gc);
+    cell.append(dg, el("div", "lab", netLabel(k)));
+    box.appendChild(cell);
+    drawNetRing(cv, dl, ul);
+  }
+}
 function renderNet(d) {
+  renderNetRings(d);
   const list = $("#netList");
   list.textContent = "";
   const row = (tag, sub, val, cls) => {
@@ -1322,12 +1443,13 @@ $("#netList").addEventListener("dblclick", ev => {
   copyText(ip).then(() => toast("已复制 " + ip)).catch(() => toast("复制失败（非安全上下文）", "err"));
 });
 async function tickNet() {
-  try {
-    const d = await getJSON("/system/ip");
-    lastData.net = d;
-    renderNet(d);
-    okPanel("net");
-  } catch { failPanel("net"); }
+  // 5s 单源驱动环+列表；旧版无 cli/network 端点时回落 /system/ip（列表照旧、环缺席）
+  let d = null;
+  try { d = await getJSON("/system/cli/network"); }
+  catch { try { d = await getJSON("/system/ip"); } catch { failPanel("net"); return; } }
+  lastData.net = d;
+  renderNet(d);
+  okPanel("net");
 }
 
 /* ---------- STORAGE（大字占用率居左） ---------- */
@@ -1538,7 +1660,7 @@ $("#stdinForm").addEventListener("submit", async ev => {
   } catch (e) { toast("stdin 失败：" + e.message, "err"); }
 });
 
-/* ---------- 调度（每卡独立定时器；快速卡 1⇄5fps；BATTERY 5s⇄1s；慢速卡 60s + 双击补拍） ---------- */
+/* ---------- 调度（每卡独立定时器；快速卡 1⇄5fps；BATTERY 5s⇄1s；NETWORK 5s；慢速卡 60s + 双击补拍） ---------- */
 const timers = {};
 function arm(key, fn, ms, delay) {
   const t = timers[key];
@@ -1546,7 +1668,8 @@ function arm(key, fn, ms, delay) {
   timers[key] = { t0: setTimeout(() => { fn(); timers[key].iv = setInterval(() => { if (active()) fn(); }, ms); }, Math.max(0, delay | 0)) };
 }
 const FAST = { cpu: 1, therm: 1, mem: 1 };           // fps 现值
-const SLOW_MS = 60000;                                // 慢速三卡统一 60s
+const SLOW_MS = 60000;                                // 慢速双卡（STORAGE / TASKS）统一 60s
+const NET_MS = 5000;                                  // NETWORK 毕业为 5s：speed 环驱动，环+列表同源
 function fastMs(key) { return FAST[key] === 5 ? 200 : 1000; }
 function toggleFast(key, fn) {
   FAST[key] = FAST[key] === 1 ? 5 : 1;
@@ -1560,9 +1683,9 @@ function toggleBattCadence() {
   arm("batt", tickBatt, battMs(), 0);
   toast("BATTERY 采样 → " + (battHi ? "1s" : "5s"));
 }
-function manualRefresh(key, fn) {
+function manualRefresh(key, fn, ms) {
   fn();                                               // 一次立即刷新
-  arm(key, fn, SLOW_MS, 0);                           // 重排下一轮 60s
+  arm(key, fn, ms || SLOW_MS, 0);                     // 重排下一轮（缺省 60s，NETWORK 传 5s）
 }
 const INTERACTIVE = "button,input,a,form,textarea";
 function wireDbl(sel, handler) {
@@ -1587,13 +1710,14 @@ const mqLight = window.matchMedia("(prefers-color-scheme: light)");
 mqLight.addEventListener("change", () => { cacheColors(); redrawAll(); });
 
 /* ---------- 历史回填（/db/history：打开即播种，随后实时续采） ----------
-   行契约 = [{t:unix 秒,k:键,v:数值}]，服务端已按 t 升序；limit 服务端钳 1..5000。
-   端点数据必早于任何实时样本 → 先播种后 live 即天然时间序；比
+   行契约 = [{t:RFC3339 字符串,k:键,v:数值}]，服务端已按 t 升序；limit 服务端钳 1..5000。
+   t 经 Date.parse 解析为毫秒时刻，NaN（畸形串）→ 整行跳过。
+   端点数据必早于任何实时样本 → 先播种后 live 即天然时间序；解析毫秒比
    Date.now()-5000 更新的行丢弃（避免与即将到来的首个 live 样本重复边缘）。
    5min 窗卡（freq/hot/mem）经 winHist 修剪只剩末端 2-3 个种子点 = 预期行为；
    电池 HB 自持 72h 修剪，种子旧点仅在 72h 视图可见 = 正确行为。 */
 async function seedHistory() {
-  const cut = Date.now() - 5000;                       // 去重护栏：t*1000 > cut 的种子行跳过
+  const cut = Date.now() - 5000;                       // 去重护栏：解析毫秒 > cut 的种子行跳过
   const [battRows, memRows, swapRows, freqRows, tempRows] = await Promise.all([
     getJSON("/db/history?kind=battery&limit=4500"),    // 7 键/轮 → ~640 轮 ≈ 21h
     getJSON("/db/history?kind=mem&limit=200"),         // total/used/avail（MB）
@@ -1602,37 +1726,37 @@ async function seedHistory() {
     getJSON("/db/history?kind=temp&limit=2000")        // {cpu_core|gpu|camera|pmic|battery}.{i}（°C）
   ]);
   const arr = d => Array.isArray(d) ? d : [];
-  const row = r => r && typeof r.t === "number" && Number.isFinite(r.t) &&
-    typeof r.v === "number" && Number.isFinite(r.v) && r.t * 1000 <= cut;
+  // 行合法性 = t 为 RFC3339 串（Date.parse 可析）且 v 有限数值；返回解析毫秒（坏行 → NaN）
+  const msOf = r => (r && typeof r.t === "string" && typeof r.v === "number" && Number.isFinite(r.v)) ? Date.parse(r.t) : NaN;
   const asc = m => Array.from(m.keys()).sort((a, b) => a - b);
 
   // ① BATTERY：按 t 分组取 pct + (volt_mv,current_ma)；current_ma 键名误导 = 实际微安
   //   （负=放电），pow(W) = (volt_mv/1000) × (current/1e6)；缺 pct 的轮次跳过
   const bg = new Map();
   for (const r of arr(battRows)) {
-    if (!row(r)) continue;
-    let g = bg.get(r.t); if (!g) bg.set(r.t, g = {});
+    const ms = msOf(r); if (!(ms <= cut)) continue;    // NaN（畸形 t）或过新 → 跳行
+    let g = bg.get(ms); if (!g) bg.set(ms, g = {});
     if (r.k === "pct") g.pct = r.v;
     else if (r.k === "volt_mv") g.vm = r.v;
     else if (r.k === "current_ma") g.ua = r.v;
   }
-  for (const t of asc(bg)) {
+  for (const t of asc(bg)) {                           // t 此处已是毫秒时刻
     const g = bg.get(t);
     if (typeof g.pct !== "number") continue;
     const pow = (typeof g.vm === "number" && typeof g.ua === "number") ? (g.vm / 1000) * (g.ua / 1e6) : 0;
-    HB.push({ t: t * 1000, v: { pct: Math.min(100, Math.max(0, g.pct)), pow } });
+    HB.push({ t, v: { pct: Math.min(100, Math.max(0, g.pct)), pow } });
   }
 
   // ② MEMORY + SWAP：同一 t 合成 {m,s}（SWAP 缺 → s=0）
   const mg = new Map(), sg = new Map();
   for (const r of arr(memRows)) {
-    if (!row(r)) continue;
-    let g = mg.get(r.t); if (!g) mg.set(r.t, g = {});
+    const ms = msOf(r); if (!(ms <= cut)) continue;
+    let g = mg.get(ms); if (!g) mg.set(ms, g = {});
     if (r.k === "total") g.tot = r.v; else if (r.k === "used") g.used = r.v;
   }
   for (const r of arr(swapRows)) {
-    if (!row(r)) continue;
-    let g = sg.get(r.t); if (!g) sg.set(r.t, g = {});
+    const ms = msOf(r); if (!(ms <= cut)) continue;
+    let g = sg.get(ms); if (!g) sg.set(ms, g = {});
     if (r.k === "total") g.tot = r.v; else if (r.k === "used") g.used = r.v;
   }
   for (const t of asc(mg)) {
@@ -1640,16 +1764,16 @@ async function seedHistory() {
     if (!(g.tot > 0) || typeof g.used !== "number") continue;
     const sw = sg.get(t);
     const s = (sw && sw.tot > 0 && typeof sw.used === "number") ? (sw.used / sw.tot) * 100 : 0;
-    H.mem.push({ m: (g.used / g.tot) * 100, s }, t * 1000);
+    H.mem.push({ m: (g.used / g.tot) * 100, s }, t);
   }
 
   // ③ CPU_FREQ：按数值后缀归位（稀疏安全：长度 = 最大下标+1，缺核 → 上一轮同位值，再缺 → 0）
   const fg = new Map();
   for (const r of arr(freqRows)) {
-    if (!row(r)) continue;
+    const ms = msOf(r); if (!(ms <= cut)) continue;
     const m = /^cpu(\d+)$/.exec(String(r.k));
     if (!m) continue;
-    let g = fg.get(r.t); if (!g) fg.set(r.t, g = []);
+    let g = fg.get(ms); if (!g) fg.set(ms, g = []);
     g[Number(m[1])] = r.v;                             // 稀疏赋值 → length 即最大下标+1
   }
   let prevGhz = null;
@@ -1664,17 +1788,17 @@ async function seedHistory() {
     prevGhz = ghz;
     let peak = 0, core = 0;
     for (let i = 0; i < n; i++) if (ghz[i] > peak) { peak = ghz[i]; core = i; }
-    H.freq.push({ peak, core, ghz }, t * 1000);
+    H.freq.push({ peak, core, ghz }, t);
   }
 
   // ④ THERM 热度线：每个 t 取全域 max
   const tg = new Map();
   for (const r of arr(tempRows)) {
-    if (!row(r)) continue;
-    const cur = tg.get(r.t);
-    if (cur === undefined || r.v > cur) tg.set(r.t, r.v);
+    const ms = msOf(r); if (!(ms <= cut)) continue;
+    const cur = tg.get(ms);
+    if (cur === undefined || r.v > cur) tg.set(ms, r.v);
   }
-  for (const t of asc(tg)) H.hot.push(tg.get(t), t * 1000);
+  for (const t of asc(tg)) H.hot.push(tg.get(t), t);
 }
 /* 播种后四图各重绘一次（纯读历史缓冲，与 render* 内同一套轴/刻度定义；
    live tick 到达后各自整体重渲染，此处只保证回填立即可见） */
@@ -1709,14 +1833,14 @@ arm("therm", tickTherm, fastMs("therm"), 700);     // 快速 · 错峰
 arm("mem", tickMem, fastMs("mem"), 1200);          // 快速 · 错峰
 arm("batt", tickBatt, battMs(), 300);              // 5s 默认节奏 · 双击切 1s
 arm("sto", tickSto, SLOW_MS, 1800);                // 慢速 · 磁盘静态
-arm("net", tickNet, SLOW_MS, 2400);                // 慢速 · 地址低频
+arm("net", tickNet, NET_MS, 2400);                   // 5s · speed 双环 + 地址列表同源
 arm("task", tickTasks, SLOW_MS, 400);              // 慢速 · task 路由不限流
 wireDbl("#card-cpu", () => toggleFast("cpu", tickCpu));
 wireDbl("#card-thermal", () => toggleFast("therm", tickTherm));
 wireDbl("#card-mem", () => toggleFast("mem", tickMem));
 wireDbl("#card-batt", toggleBattCadence);
 wireDbl("#card-sto", () => manualRefresh("sto", tickSto));
-wireDbl("#card-net", () => manualRefresh("net", tickNet));
+wireDbl("#card-net", () => manualRefresh("net", tickNet, NET_MS));
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
 wireDbl("#card-cons", () => { if (selId) tickOut(); });
 function tickAll() {

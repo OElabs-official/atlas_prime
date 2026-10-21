@@ -1,6 +1,6 @@
 [package]
 name = "atlas_prime"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 
 # v1 headless（system/task/web/db 四黑箱）最小依赖集；
@@ -14,7 +14,8 @@ tokio = { version = "1.49.0", features = ["full"] }
 sqlx = { version = "0.8.6", features = [ "runtime-tokio",  "sqlite" ] }
 ntex = "4.3"
 ntex-cors = "4.1"
-local-ip-address = "0.6.9"    # v1/system/ip 的 getifaddrs 封装
+local-ip-address = "0.6.9"    # v1/system/network 的 getifaddrs 封装
+chrono = "0.4"                # v1/operator 采集时刻 RFC3339 时间戳（秒精度 UTC）
 
 # —— _deprecated_src/ 遗留依赖，重写涉及对应功能时再按需恢复 ——
 # crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -23,7 +24,6 @@ local-ip-address = "0.6.9"    # v1/system/ip 的 getifaddrs 封装
 # sysinfo = "0.38.0"            # v1/system 以 /proc + sysfs 替代
 # termuxapi = "0.1.1"           # v1/system/battery 直读 CLI JSON
 # backtrace = "0.3.76"
-# chrono = "0.4.43"
 # futures = "0.3.31"
 # notify = "8.2.0"
 # smart-default = "0.7.1"

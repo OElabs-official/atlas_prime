@@ -1,8 +1,9 @@
 //! atlas_prime v1 —— headless 编排入口（TUI 已随 _deprecated_src/ 退役）。
 //!
 //! 启动顺序：0 单例锁（flock 数据目录 atlas_prime.lock，进程退出——含崩溃/kill——自动释放；
-//! 二启检测到锁被占用直接退出 1）→ 任务规格装载（autostart 项即拉）→ sqlite 采样线程 → ntex API。
-//! Ctrl+C 优雅收尾：停采样、停全部受管任务。
+//! 二启检测到锁被占用直接退出 1）→ 任务规格装载（autostart 项即拉）→ 操作器（唯一自主
+//! 驱动数据的模块，周期采样入 sqlite）→ ntex API。
+//! Ctrl+C 优雅收尾：停操作器、停全部受管任务。
 
 mod v1;
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
-use v1::db::Db;
+use v1::operator::Operator;
 use v1::task::{Phase, Task};
 use v1::web::Web;
 
@@ -72,9 +73,9 @@ fn main() {
         eprintln!("[atlas]   · {:<20} [{}] {:?}", s.name, s.group, s.phase);
     }
 
-    // 2. 历史采样：2 分钟一轮，滚动 20000 轮
-    if let Err(e) = Db::start() {
-        eprintln!("[atlas] sampler start failed: {e}");
+    // 2. 操作器：程序内唯一自主驱动数据的模块，2 分钟一轮采样，滚动 20000 轮
+    if let Err(e) = Operator::start() {
+        eprintln!("[atlas] operator start failed: {e}");
     }
 
     // 3. Web API：后台线程内建 ntex System（句柄保活至进程结束）
@@ -92,8 +93,8 @@ fn main() {
     });
     eprintln!("[atlas] shutting down");
 
-    // 5. 收尾：停采样线程，向全部在跑任务发停止意图
-    Db::stop();
+    // 5. 收尾：停操作器采样线程，向全部在跑任务发停止意图
+    Operator::stop();
     for s in Task::status() {
         if matches!(s.phase, Phase::Starting | Phase::Running | Phase::Stopping) {
             let _ = Task::stop(&s.id);
