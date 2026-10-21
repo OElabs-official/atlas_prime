@@ -7,15 +7,20 @@
 //!   Android 会限制进程亲和性导致 nproc < 实际核数）；
 //! - 热传感器按 type 前缀分类，不写死 zone 号，跨机型更稳；
 //! - 全部数据源无子进程 `mount`/`free`/`ip`：挂载走 /proc + statvfs，
-//!   内存走 /proc/meminfo，IP 走 getifaddrs，仅电池必须经 termux-api CLI。
+//!   内存走 /proc/meminfo，地址枚举走 getifaddrs，网卡速度正文直读
+//!   /proc/net/dev（本域被拒时经 adb 桥取文，再 sysfs/netlink 兜底，见
+//!   [`network::read_dev_snapshot`]；adb 是唯一子进程例外，1.5s 超时钳），
+//!   仅电池必须经 termux-api CLI。
 //!
-//! 对外接口刻意收窄为七个公开面（调用路径 `crate::v1::system::*`）：
+//! 对外接口刻意收窄为八个公开面（调用路径 `crate::v1::system::*`）：
 //! - [`cpu::freq_ghz`]：各核当前频率（GHz）；
 //! - [`thermal::Temp`]：温度结构体，`Temp::get()` 采集，`温度.类别[索引].0/.1` 取摄氏度/type名；
 //! - [`battery::Battery`]：电池状态结构体，`Battery::get()` 采集（直读 CLI JSON，不依赖 api crate）；
 //! - [`disk::Disk`]：挂载点容量结构体，`Disk::get()` 全量返回（按容量降序）；
 //! - [`disk::dirs`]：进程标准路径表，`OnceLock` 缓存，返回 `&'static [String]`；
-//! - [`ip::Ip`]：本机地址结构体，`Ip::get()` 按 回环/局域网/公网v4(HTTP回显+DNS TXT)/公网v6 分桶；
+//! - [`network::Ip`]：本机地址结构体，`Ip::get()` 按 回环/局域网/公网v4(HTTP回显+DNS TXT)/公网v6 分桶；
+//! - [`network::speed`]：网卡速度计量原语（数据面快照 [`network::speed::snapshot`] +
+//!   分组差分 [`network::speed::Grouper`]；1Hz 节拍归操作器，本模块不自发采样）；
 //! - [`mem::Mem`]：RAM/Swap 用量结构体，`Mem::get()` 采集（单次读 /proc/meminfo）。
 
 #[allow(dead_code)]
@@ -25,9 +30,9 @@ pub mod cpu;
 #[allow(dead_code)]
 pub mod disk;
 #[allow(dead_code)]
-pub mod ip;
-#[allow(dead_code)]
 pub mod mem;
+#[allow(dead_code)]
+pub mod network;
 #[allow(dead_code)]
 pub mod thermal;
 
@@ -75,7 +80,7 @@ mod tests {
             super::disk::dirs().len(),
             super::disk::dirs().as_ptr()
         );
-        let net = super::ip::Ip::get();
+        let net = super::network::Ip::get();
         println!(
             "ip: loopback={:?} lan={}条 public_v4={:?} public_v6={:?}",
             net.loopback,
