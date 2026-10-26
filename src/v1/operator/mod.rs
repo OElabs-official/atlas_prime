@@ -21,8 +21,9 @@
 //! - [`Operator::start`]：拉起采样线程。等待阶段 = sleep 与停止唤醒（`Notify`）的
 //!   select 竞争；[`Operator::stop`] 置标志并 `notify_waiters`，采样线程微秒级退出，
 //!   在途轮次完整落库后收尾；
-//! - [`collect`]：全域快照——system 各黑箱（cpu/thermal/mem/swap/battery/disk）展开
+//! - [`collect`]：全域快照——system 各黑箱（cpu/thermal/gpu/mem/swap/battery/disk）展开
 //!   为存储行；**采集时刻即打戳**：`ts` = RFC3339（秒精度、UTC），同一轮全部行同一时刻；
+//!   全域轮覆盖 GPU 频率/使用率（kind=`gpu`，sysfs 直读→su 桥），无 root 静默缺席不告警；
 //! - 落库经 [`crate::v1::db`]（被动存储）：本模块决定何时采，db 决定怎么存/修剪；
 //! - 每轮落库后跑内存告警政策：[`memwatch::policy`] 滞回边沿求值（**政策在操作器内**），
 //!   事件经 [`crate::v1::notify`] 出站（被动管道，固定 id = 替换不堆叠）；
@@ -39,7 +40,7 @@
 //!   [`Operator::net_speeds`] 缓存（web 只读缓存，绝不自读 /proc），(b) 落库
 //!   kind=`net`、key=`<组名>.rx_bps`/`<组名>.tx_bps`（如 `wifi.rx_bps`、
 //!   `cellular.tx_bps`；打戳机制与全域轮相同；db 侧按 kind 分档修剪，net ≈8h）。
-//!   源链（直读→adb 桥→sysfs→netlink）
+//!   源链（直读→su 桥→sysfs→netlink）
 //!   整拍全灭时**缓存冻结**（stale 照旧暴露、基线保留），连败计满
 //!   [`NET_FAIL_STREAK`] 拍单行 stderr 示警一次（整串静默，一拍成功即重置）。
 //!
@@ -54,7 +55,7 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::v1::db::{self, Db, DbError, Record};
 use crate::v1::notify;
-use crate::v1::system::{battery, cpu, disk, mem, network, thermal};
+use crate::v1::system::{battery, cpu, disk, gpu, mem, network, thermal};
 
 mod batterywatch;
 mod memwatch;
@@ -65,7 +66,7 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(120);
 /// 网卡速度回路采样周期（1Hz；db 侧 net 按 28800 轮 ≈ 8h 修剪）
 pub const NET_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// 测速源链（直读→adb 桥→sysfs→netlink）连续整链失败多少拍后 stderr 示警
+/// 测速源链（直读→su 桥→sysfs→netlink）连续整链失败多少拍后 stderr 示警
 /// 一次（每条失败连串至多一条；成功一拍即清零）。缓存自失败首拍起就冻结，
 /// 阈值只管声张、不管数据面。
 const NET_FAIL_STREAK: u32 = 5;
@@ -279,6 +280,8 @@ async fn sample_round() -> Result<usize, OperatorError> {
 
 /// 一轮全量采集：system 各黑箱 → 窄长存储行。
 /// 采集时刻单点打戳：全行共享同一 RFC3339 `ts`（秒精度、UTC）与同源 `ts_secs`。
+/// gpu 行（load_pct/freq_mhz）仅源链可用时写入、每个 Some 值一行（freq_mhz 是锚，
+/// gpubusy 差分首拍 load_pct 缺席）；无 root 设备整域静默缺席，不计失败不告警。
 fn collect() -> Vec<Record> {
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -309,6 +312,18 @@ fn collect() -> Vec<Record> {
         ] {
             for (i, (v, _name)) in group.iter().enumerate() {
                 push("temp", format!("{cat}.{i}"), *v as f64);
+            }
+        }
+
+        // GPU 频率/使用率（kind=gpu）：源链可用才写行、每个 Some 一行
+        // （gpubusy 差分首拍 load_pct 可为 None，freq_mhz 是锚）；无 root 静默缺席不告警
+        let g = gpu::Gpu::get();
+        if g.available {
+            if let Some(p) = g.load_pct {
+                push("gpu", "load_pct".into(), p);
+            }
+            if let Some(f) = g.freq_mhz {
+                push("gpu", "freq_mhz".into(), f);
             }
         }
 

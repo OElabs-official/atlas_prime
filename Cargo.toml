@@ -1,6 +1,6 @@
 [package]
 name = "atlas_prime"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 
 # v1 headless（system/task/web/db 四黑箱）最小依赖集；

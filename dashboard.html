@@ -17,9 +17,13 @@
     GET  /system/cpu            {"freq_ghz":[f32..]}
     GET  /system/thermal        {cpu_core:[[°C,type],..],cpu_cluster,gpu,dsp,
                                  modem,camera,aoss,ddr,pmic,battery,radio,other}
-    GET  /system/mem            {total_mem_mb,used_mem_mb,avail_mem_mb,
-                                 total_swap_mb,used_swap_mb}
-    GET  /system/disk           {disks:[{device,fs,mount_point,total_mb,
+     GET  /system/mem            {total_mem_mb,used_mem_mb,avail_mem_mb,
+                                  total_swap_mb,used_swap_mb}
+     GET  /system/gpu            {available:bool,load_pct:num|null,freq_mhz:num
+                                  |null,max_mhz:num|null,source:str|null,
+                                  reason:str|null}（available!=true 或端点缺席
+                                  → GPU 卡整卡隐藏、零告警）
+     GET  /system/disk           {disks:[{device,fs,mount_point,total_mb,
                                  avail_mb,used_mb}], dirs:[str]}
     GET  /system/ip             {lan:[[nic,addr]],public_v4:str|null,
                                  public_v6:[str]}（回环地址本面板不显示）
@@ -38,15 +42,16 @@
     GET  /task/output/{id}      [{at:{secs,nanos},stream,text}]
     POST /task/input/{id}       {"line":"..."}
     GET  /db/history?kind=[&key=][&limit=]  sqlite 历史行，按时间升序
-                                 [{t:RFC3339 字符串,k:键,v:数值}]（t=Date.parse
-                                 直吃）；kind=battery|mem|
-                                 swap|cpu_freq|temp，limit 1..5000
+                                  [{t:RFC3339 字符串,k:键,v:数值}]（t=Date.parse
+                                  直吃）；kind=battery|mem|
+                                  swap|cpu_freq|gpu|temp，limit 1..5000
   打开即回填 sqlite 历史（/db/history），随后实时续采：种子点一律早于实时
   样本（服务端 120s 轮次落库），先播种后续采 = 时间序天然不破；回填失败仅
-  一条 snackbar，图表从实时开始。
+  一条 snackbar，图表从实时开始。GPU 的 kind=gpu 种子延迟到 /system/gpu 首次
+  可用才拉（不可用机器 = 零请求、零历史成本）。
   采样契约：
-    快速卡 THERMALS / CPU / MEM：默认 1 fps，双击在 1⇄5 fps 间切换（定时器重建
-    + 立即补拍；快速三连 5fps 合计 15 req/s < 共享 20/s 桶）。折线历史窗固定 5min。
+    快速卡 THERMALS / CPU / MEM / GPU：默认 1 fps，双击在 1⇄5 fps 间切换（定时器重建
+    + 立即补拍；快速四连 5fps 合计 20 req/s ≤ 共享 20/s 桶）。折线历史窗固定 5min。
     BATTERY：默认 5s 节奏，双击在 5s⇄1s 间切换并提示（服务器有 1/s CLI 桶 +
     缓存 HIT 兜底，1s 安全）。折线窗默认 24h，图上水平滑动切 72h（按时间修剪
     + 总量封顶抽稀）。
@@ -97,7 +102,7 @@
   --md-sys-motion-easing-emphasized-decelerate:cubic-bezier(0.05,0.7,0.1,1);
   --md-sys-motion-easing-linear:cubic-bezier(0,0,1,1);
   --d4-sweep:30s;
-  --d4-gauge:180px;   /* 表盘统一盘径：MEM/BATT 表盘与 NET 双环共用同一画布盒（≤760px 降 130px） */
+  --d4-gauge:180px;   /* 表盘统一盘径：MEM/BATT 表盘与 NET/GPU 双环共用同一画布盒（≤760px 降 130px） */
 
   --md-sys-typescale-display-small-size:38px;  --md-sys-typescale-display-small-line-height:46px;
   --md-sys-typescale-headline-medium-size:30px;--md-sys-typescale-headline-medium-line-height:38px;
@@ -336,6 +341,7 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 @keyframes d4-spin{to{--d4-ga:360deg}}
 @keyframes d4-drift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
 .acc-cpu{--ca:var(--a-cpu);--cc:var(--ac-cpu);--acc:var(--a-cpu);--ac:var(--ac-cpu);--ao:var(--aoc-cpu)}
+.acc-gpu{--ca:var(--a-gpu);--cc:var(--ac-gpu);--acc:var(--a-gpu);--ac:var(--ac-gpu);--ao:var(--aoc-gpu)}
 .acc-therm{--ca:var(--a-therm);--cc:var(--ac-therm);--acc:var(--a-therm);--ac:var(--ac-therm);--ao:var(--aoc-therm)}
 .acc-mem{--ca:var(--a-mem);--cc:var(--ac-mem);--acc:var(--a-mem);--ac:var(--ac-mem);--ao:var(--aoc-mem)}
 .acc-pow{--ca:var(--a-pow);--cc:var(--ac-pow);--acc:var(--a-pow);--ac:var(--ac-pow);--ao:var(--aoc-pow)}
@@ -435,7 +441,8 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 /* NETWORK 分组双环行（与 MEM/BATT 表盘同盘径兄弟（--d4-gauge 统一 180/130px）：
    内=下载 外=上传 对数弧；space-evenly 左右均分 = 两组时对称落在 1/4、3/4 处，
    >2 组（USB 网卡等自组）flex-wrap 换行、每行仍均分；盘体定尺寸，本行无滚动
-   （列表 #netList 的 .scroll 不受影响）；上传色 --a-sto，选型理由见 JS 侧注释） */
+   （列表 #netList 的 .scroll 不受影响）；上传色 --a-sto，选型理由见 JS 侧注释；
+   GPU 卡双环盘格复用本类族（.netring/.dg/.lab，见 #card-gpu） */
 #netRings{margin-top:var(--md-sys-space150)}
 .netrings{display:flex;justify-content:space-evenly;align-items:flex-start;
   flex-wrap:wrap;gap:var(--md-sys-space150)}
@@ -619,6 +626,33 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
       <div class="cores" id="cores"></div>
     </section>
 
+    <!-- ====== GPU：双环表盘（内=使用率顺时针、外=频率逆时针，线性 0–1500MHz 满刻度；
+           netRings 同机件同盘径）+ 使用率/频率读数格 + 使用率面积图（memChart 同族）
+           + 频率自缩放细线（读数与环同源）
+           （1|5fps · 双击切档；/system/gpu 缺席或 available!=true → 整卡隐藏、零告警） ====== -->
+    <section class="card acc-gpu" id="card-gpu" style="display:none">
+      <header class="ch"><h2>GPU</h2></header>
+      <div class="gwrap">
+        <div class="netring">
+          <div class="dg"><canvas id="gpuRing"></canvas>
+            <div class="gc"><div class="gn num">GPU</div></div>
+          </div>
+          <div class="lab">GPU</div>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="reads">
+            <div class="read"><div class="k">GPU 负载</div><div class="v num sm" id="gpuLoadRv">使用率 —</div></div>
+            <div class="read"><div class="k">GPU 时钟</div><div class="v num sm" id="gpuFreqRv">频率 —</div></div>
+          </div>
+          <div class="chartbox h84"><canvas id="gpuChart"></canvas></div>
+          <div class="legend">
+            <div><em style="background:var(--a-gpu)"></em>GPU 使用率 %</div>
+            <div><em style="background:var(--a-cpu)"></em>GPU 频率 · 按峰值自缩放</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
         <!-- ====== MEMORY：MEM/SWAP 双横轨 + 80% 越界警示 + 双曲线（1|5fps） ====== -->
     <section class="card acc-mem" id="card-mem">
       <header class="ch"><h2>MEMORY</h2></header>
@@ -718,7 +752,7 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
   </div>
 
   <footer>
-    <!-- rev 2026-10-20.31 -->
+    <!-- rev 2026-10-26.33 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -762,6 +796,7 @@ function cacheColors() {
   const v = n => cs.getPropertyValue(n).trim();
   C.grid = v("--d4-pgrid"); C.label = v("--d4-plabel");
   C.cpu = v("--a-cpu"); C.therm = v("--a-therm"); C.mem = v("--a-mem");
+  C.gpu = v("--a-gpu");
   C.pow = v("--a-pow"); C.net = v("--a-net"); C.sto = v("--a-sto");
   /* 网卡外环（上传）色 = --a-sto：已定义强调色中唯一同时满足
       ① 与天蓝 C.net 在色环上互补远距（130px 最小盘径下同心相邻仍可辨）；
@@ -808,7 +843,7 @@ function setupCanvas(cv) {
   return { ctx, w, h };
 }
 
-/* ---------- 折线原语（唯一图表绘制器：多系列 / 逐段归因着色 / 每系列可选 tf 归一化 /
+/* ---------- 折线原语（唯一图表绘制器：多系列 / 逐段归因着色 / 每系列可选 tf 归一化 + 线宽 s.w /
                固定轴 + 网格标签 + 右缘独立刻度 rlab[{p:0..1,t}]） ---------- */
 function drawLines(cv, series, opts) {
   if (!cv || !cv.isConnected) return;
@@ -846,7 +881,7 @@ function drawLines(cv, series, opts) {
       gr.addColorStop(0, hexa(solid, 0.26)); gr.addColorStop(1, hexa(solid, 0.02));
       ctx.fillStyle = gr; ctx.fill();
     }
-    ctx.lineWidth = 1.6; ctx.lineJoin = "round";
+    ctx.lineWidth = s.w || 1.6; ctx.lineJoin = "round";
     if (Array.isArray(s.c)) {
       for (let i = 0; i < cnt - 1; i++) {
         ctx.strokeStyle = s.c[i] || C.cpu;
@@ -933,7 +968,8 @@ function winHist(winMs, maxN) {
 const H = {
   freq: winHist(300000, 1510),
   hot:  winHist(300000, 1510),
-  mem:  winHist(300000, 1510)
+  mem:  winHist(300000, 1510),
+  gpu:  winHist(300000, 1510)
 };
 
 /* ---------- 电池历史（5s⇄1s 双节奏）：按时间修剪至 72h，总量封顶 6000 点
@@ -972,6 +1008,7 @@ const cardMeta = {
   cpu:   { sel: "#card-cpu",     label: "CPU" },
   therm: { sel: "#card-thermal", label: "THERMALS" },
   mem:   { sel: "#card-mem",     label: "MEMORY" },
+  gpu:   { sel: "#card-gpu",     label: "GPU" },
   batt:  { sel: "#card-batt",    label: "BATTERY" },
   net:   { sel: "#card-net",     label: "NETWORK" },
   sto:   { sel: "#card-sto",     label: "STORAGE" },
@@ -1241,6 +1278,122 @@ async function tickMem() {
     renderMem(d);
     okPanel("mem");
   } catch { failPanel("mem"); }
+}
+
+/* ---------- GPU（双环表盘 = netRings 机件复用，见下方 drawGpuRing；面积图 = memChart 同族；
+    频率细线 = tf 自缩放叠加，battChart 功率线同法）
+   端点契约 {available,load_pct,freq_mhz,max_mhz,source,reason}：拉取失败或 available!=true
+   → 整卡 display:none（网格自然回流）、零告警零历史请求；恢复可用即复现续采。
+   历史种子（kind=gpu：k=load_pct|freq_mhz）延迟到首次可用才拉——缺席机零成本。
+   峰频标尺 gpuMax：live max_mhz 优先，缺席退化为序列最大值。空值点顺推上一已知值。 */
+let gpuSeeded = false, gpuMax = 0;
+let gpuFill = { l: 0, f: 0 };
+/* 双环表盘（netRings 机件复用、零新抽象）：同盘径（--d4-gauge）同几何比例（k=R/60）兄弟。
+   内=使用率 0..100% 线性顺时针（C.gpu，与面积图同色）；外=频率 LINEAR 0..1500MHz 满刻度
+   逆时针（C.cpu，与频率细线同色；>1500 钳顶），均自 12 点起。500/1000/1500MHz 淡刻度跨外轨
+   径向 = NET 环十年刻度 idiom（1500=满圈回起点，与电池环 128W 刻度同位）；小字标注压在内轨
+   中线、绘于双弧之后保证彩弧上可读。环每 tick 读 live payload 原值（与 chips 同源、与
+   gpuFill 顺推解耦）：load=null → 内轨仅轨道，freq=null → 外轨仅轨道+刻度。 */
+const GPU_FMAX = 1500;
+function drawGpuRing(cv, load, mhz) {
+  if (!cv || !cv.isConnected) return;
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2, k = R / 60;
+  const rOut = R - 5.5 * k, rIn = R - 17 * k;     // 与 NET/MEM/BATT 盘同几何比例
+  ctx.lineCap = "round";
+  // 外环轨道（频带）
+  ctx.lineWidth = 5 * k; ctx.strokeStyle = C.trk;
+  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();
+  // 线性刻度：500 / 1000 / 1500 MHz（自顶部逆时针量角，跨外轨径向）
+  ctx.strokeStyle = hexa(C.onsv, 0.5); ctx.lineWidth = 1; ctx.lineCap = "butt";
+  for (const tp of [500, 1000, 1500]) {
+    const a = -Math.PI / 2 - (tp / GPU_FMAX) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (rOut - 4 * k), cy + Math.sin(a) * (rOut - 4 * k));
+    ctx.lineTo(cx + Math.cos(a) * (rOut + 4 * k), cy + Math.sin(a) * (rOut + 4 * k));
+    ctx.stroke();
+  }
+  // 外环频率弧：0..1500 线性（钳顶），逆时针（MEM swap / NET 上传同语言）；null → 仅轨道+刻度
+  if (mhz !== null) {
+    const af = Math.min(1, Math.max(0, mhz / GPU_FMAX)) * Math.PI * 2;
+    if (af > 0) {
+      ctx.lineWidth = 5 * k; ctx.lineCap = "round"; ctx.strokeStyle = C.cpu;
+      ctx.beginPath(); ctx.arc(cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 - af, true); ctx.stroke();
+    }
+  }
+  // 内环轨道 + 使用率弧：0..100% 线性顺时针；null → 仅轨道
+  ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();
+  if (load !== null) {
+    const al = Math.min(100, Math.max(0, load)) / 100 * Math.PI * 2;
+    if (al > 0) {
+      ctx.strokeStyle = C.gpu;
+      ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + al); ctx.stroke();
+    }
+  }
+  // 小字标注（绘于双弧后）：压内轨中线，9px mono = 环带刻度同级小字
+  ctx.font = '9px "Maple Mono","Roboto Mono",monospace';
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = C.label;
+  for (const tp of [500, 1000, 1500]) {
+    const a = -Math.PI / 2 - (tp / GPU_FMAX) * Math.PI * 2, rl = rIn + 0.5 * k;
+    ctx.fillText(String(tp), cx + Math.cos(a) * rl, cy + Math.sin(a) * rl);
+  }
+}
+function drawGpuChart() {
+  const rows = H.gpu.rows;
+  let smax = gpuMax;
+  for (const r of rows) if (r.v.f > smax) smax = r.v.f;
+  const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
+  drawLines($("#gpuChart"), [
+    { v: rows.map(r => r.v.l), c: C.gpu },
+    { v: rows.map(r => r.v.f), c: C.cpu, w: 1.1, tf: v => v / (smax || 1) }
+  ], { min: 0, max: 100, gridLines: gl, axis: true });
+}
+function renderGpu(d, o) {
+  const opts = o || {};
+  const nn = x => (typeof x === "number" && Number.isFinite(x)) ? x : null;
+  const load = nn(d.load_pct), freq = nn(d.freq_mhz), mx = nn(d.max_mhz);
+  if (mx !== null && mx > 0) gpuMax = mx;
+  if (load !== null) gpuFill.l = Math.min(100, Math.max(0, load));
+  if (freq !== null && freq > 0) gpuFill.f = freq;
+  if (!opts.noHist) H.gpu.push({ l: gpuFill.l, f: gpuFill.f });
+  $("#gpuLoadRv").textContent = load === null ? "使用率 —" : "使用率 " + Math.round(load) + "%";
+  $("#gpuFreqRv").textContent = freq === null ? "频率 —"
+    : "频率 " + Math.round(freq) + " MHz" + ((mx !== null && mx > 0) ? " / " + Math.round(mx) + " MHz" : "");
+  drawGpuRing($("#gpuRing"), load, freq);   // 环与 chips 同源同 tick；null → 该环仅轨道
+  drawGpuChart();
+}
+async function seedGpu() {
+  try {
+    const rows = await getJSON("/db/history?kind=gpu&limit=200");   // {load_pct,freq_mhz}，t 升序
+    if (!Array.isArray(rows)) return;
+    const cut = Date.now() - 5000;                                  // 去重护栏：过新种子行跳过
+    const g = new Map();
+    for (const r of rows) {
+      const ms = (r && typeof r.t === "string" && typeof r.v === "number" && Number.isFinite(r.v)) ? Date.parse(r.t) : NaN;
+      if (!(ms <= cut)) continue;                                   // NaN（畸形 t）或过新 → 跳行
+      let e = g.get(ms); if (!e) g.set(ms, e = {});
+      if (r.k === "load_pct") e.l = r.v; else if (r.k === "freq_mhz") e.f = r.v;
+    }
+    let prevF = null;
+    for (const t of Array.from(g.keys()).sort((a, b) => a - b)) {   // t 此处已是毫秒时刻
+      const e = g.get(t);
+      if (typeof e.l !== "number") continue;                        // 使用率为主线：缺载轮次跳过
+      if (typeof e.f === "number") prevF = e.f;                     // 缺频正向填充（CPU 稀疏归位同法）
+      H.gpu.push({ l: Math.min(100, Math.max(0, e.l)), f: prevF || 0 }, t);
+    }
+  } catch { /* 回填失败容忍：图从实时开始 */ }
+}
+async function tickGpu() {
+  let d = null;
+  try { d = await getJSON("/system/gpu"); } catch { d = null; }
+  if (!d || d.available !== true) { cardMeta.gpu.elm.style.display = "none"; return; }
+  cardMeta.gpu.elm.style.display = "";
+  if (!gpuSeeded) { gpuSeeded = true; await seedGpu(); }            // 种子必早于 live 点 → 时序不破
+  lastData.gpu = d;
+  renderGpu(d);
+  okPanel("gpu");
 }
 
 /* ---------- BATTERY（默认 5s · 双击切 1s；服务器有 1/s CLI 桶 + 缓存 HIT 兜底） ---------- */
@@ -1667,7 +1820,7 @@ function arm(key, fn, ms, delay) {
   if (t) { clearTimeout(t.t0); clearInterval(t.iv); }
   timers[key] = { t0: setTimeout(() => { fn(); timers[key].iv = setInterval(() => { if (active()) fn(); }, ms); }, Math.max(0, delay | 0)) };
 }
-const FAST = { cpu: 1, therm: 1, mem: 1 };           // fps 现值
+const FAST = { cpu: 1, therm: 1, mem: 1, gpu: 1 }; // fps 现值
 const SLOW_MS = 60000;                                // 慢速双卡（STORAGE / TASKS）统一 60s
 const NET_MS = 5000;                                  // NETWORK 毕业为 5s：speed 环驱动，环+列表同源
 function fastMs(key) { return FAST[key] === 5 ? 200 : 1000; }
@@ -1702,6 +1855,7 @@ function redrawAll() {
   try { if (lastData.cpu) { coreColors = spreadCoreColors(C.cpu, lastData.cpu.length); renderCpu(lastData.cpu, { noHist: true }); } } catch { /* 快照过期容忍 */ }
   try { if (lastData.thermal) renderTherm(lastData.thermal, { noHist: true }); } catch { /* 同上 */ }
   try { if (lastData.mem) renderMem(lastData.mem, { noHist: true }); } catch { /* 同上 */ }
+  try { if (lastData.gpu) renderGpu(lastData.gpu, { noHist: true }); } catch { /* 同上 */ }
   try { if (lastData.batt) renderBatt(lastData.batt, { noHist: true }); } catch { /* 同上 */ }
   try { if (lastData.net) renderNet(lastData.net); } catch { /* 同上 */ }
   try { if (lastData.sto) renderSto(lastData.sto); } catch { /* 同上 */ }
@@ -1822,6 +1976,7 @@ function redrawHistCharts() {
       { v: H.mem.rows.map(r => r.v.s), c: C.task }
     ], { min: 0, max: 100, gridLines: glM, axis: true });
   } catch { /* 同上 */ }
+  try { drawGpuChart(); } catch { /* 同上 */ }
   try { drawBattChart(); } catch { /* 同上 */ }
 }
 
@@ -1831,6 +1986,7 @@ seedHistory().then(redrawHistCharts).catch(() => toast("历史数据不可用，
 arm("cpu", tickCpu, fastMs("cpu"), 200);           // 快速 · 错峰
 arm("therm", tickTherm, fastMs("therm"), 700);     // 快速 · 错峰
 arm("mem", tickMem, fastMs("mem"), 1200);          // 快速 · 错峰
+arm("gpu", tickGpu, fastMs("gpu"), 1600);          // 快速 · 错峰（available=false 时静默自隐）
 arm("batt", tickBatt, battMs(), 300);              // 5s 默认节奏 · 双击切 1s
 arm("sto", tickSto, SLOW_MS, 1800);                // 慢速 · 磁盘静态
 arm("net", tickNet, NET_MS, 2400);                   // 5s · speed 双环 + 地址列表同源
@@ -1838,13 +1994,14 @@ arm("task", tickTasks, SLOW_MS, 400);              // 慢速 · task 路由不�
 wireDbl("#card-cpu", () => toggleFast("cpu", tickCpu));
 wireDbl("#card-thermal", () => toggleFast("therm", tickTherm));
 wireDbl("#card-mem", () => toggleFast("mem", tickMem));
+wireDbl("#card-gpu", () => toggleFast("gpu", tickGpu));
 wireDbl("#card-batt", toggleBattCadence);
 wireDbl("#card-sto", () => manualRefresh("sto", tickSto));
 wireDbl("#card-net", () => manualRefresh("net", tickNet, NET_MS));
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
 wireDbl("#card-cons", () => { if (selId) tickOut(); });
 function tickAll() {
-  tickCpu(); tickTherm(); tickMem(); tickBatt(); tickNet(); tickSto(); tickTasks();
+  tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickTasks();
   if (selId) tickOut();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) tickAll(); });

@@ -8,13 +8,16 @@
 //! - 热传感器按 type 前缀分类，不写死 zone 号，跨机型更稳；
 //! - 全部数据源无子进程 `mount`/`free`/`ip`：挂载走 /proc + statvfs，
 //!   内存走 /proc/meminfo，地址枚举走 getifaddrs，网卡速度正文直读
-//!   /proc/net/dev（本域被拒时经 adb 桥取文，再 sysfs/netlink 兜底，见
-//!   [`network::read_dev_snapshot`]；adb 是唯一子进程例外，1.5s 超时钳），
+//!   /proc/net/dev（本域被拒时经 su 桥（root 模式）取文，再 sysfs/netlink 兜底，见
+//!   [`network::read_dev_snapshot`]）；GPU 采集同款链（[`gpu::Gpu`]，无兜底腿，
+//!   无 root 静默缺席）；su 是唯一子进程例外（1.5s 超时钳），
 //!   仅电池必须经 termux-api CLI。
 //!
-//! 对外接口刻意收窄为八个公开面（调用路径 `crate::v1::system::*`）：
+//! 对外接口刻意收窄为九个公开面（调用路径 `crate::v1::system::*`）：
 //! - [`cpu::freq_ghz`]：各核当前频率（GHz）；
 //! - [`thermal::Temp`]：温度结构体，`Temp::get()` 采集，`温度.类别[索引].0/.1` 取摄氏度/type名；
+//! - [`gpu::Gpu`]：GPU 频率/使用率结构体，`Gpu::get()` 采集（sysfs 直读 → su 桥；
+//!   与 thermal 的 temp.gpu 温度区分——温度≠频率/使用率；无 root 静默缺席）；
 //! - [`battery::Battery`]：电池状态结构体，`Battery::get()` 采集（直读 CLI JSON，不依赖 api crate）；
 //! - [`disk::Disk`]：挂载点容量结构体，`Disk::get()` 全量返回（按容量降序）；
 //! - [`disk::dirs`]：进程标准路径表，`OnceLock` 缓存，返回 `&'static [String]`；
@@ -29,6 +32,7 @@ pub mod battery;
 pub mod cpu;
 #[allow(dead_code)]
 pub mod disk;
+pub mod gpu;
 #[allow(dead_code)]
 pub mod mem;
 #[allow(dead_code)]
