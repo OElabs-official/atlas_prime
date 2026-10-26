@@ -1,10 +1,10 @@
 //! network/speed — 网卡速度计量原语：数据面分组 + 组和差分 + 固定序输出。
 //!
 //! 数据源四级（真机 Android Termux 实测前三级在 SELinux untrusted_app 域全被
-//! 拒读，adb 桥是唯一活路；在放行域下直读依旧最优）：
+//! 拒读，su root 桥是唯一活路；在放行域下直读依旧最优）：
 //! 1. `/proc/net/dev` 直读（一次读取拿全部网卡的累计 rx/tx 字节）；
-//! 2. **adb 桥**：`adb -s localhost:<port> shell cat /proc/net/dev`（端口取自
-//!    数据目录 `adb_port` 文件，「无线配对」任务/人工维护、看门狗探活；链路与超时纪律见 [`devsrc`]，
+//! 2. **su root 桥**：`su -c "cat /proc/net/dev"`（root 模式，su 经 PATH 解析、
+//!    无端口文件、无人值守；链路与超时纪律见 [`devsrc`]，
 //!    正文与真文件同构、解析器不感知源）；
 //! 3. `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` 逐网卡读取；
 //! 4. netlink RTM_GETLINK dump 的 IFLA_STATS（见 [`super::netlink`]）。
@@ -102,7 +102,7 @@ pub fn snapshot() -> Counters {
     snapshot_result().unwrap_or_default()
 }
 
-/// 数据面网卡累计计数器快照（带因版）：直读 → adb 桥（[`devsrc`]）→
+/// 数据面网卡累计计数器快照（带因版）：直读 → su 桥（[`devsrc`]）→
 /// sysfs statistics → netlink IFLA_STATS 四级顺试，命中即按 [`group_key`]
 /// 可入组过滤（分组聚合与恒零淘汰在 [`Grouper`]，不在快照层）。
 /// 四级全灭回 [`NetError`]（最后一级正文链的成因），供调用侧做降级/声张。
@@ -430,15 +430,16 @@ rmnet_data3:55555555 55555 0 0 0 0 0 0 66666666 66666 0 0 0 0 0 0
         assert!(out3.is_empty(), "快照清空则组全体消失");
     }
 
-    /// 真机读数冒烟，默认跳过：三级数据源受 SELinux 域约束——sealed 域（Termux
-    /// untrusted_app 实测三级全拒）空快照即正确；放行域（root/shell 等）必须
-    /// 出数且分组成立（细域诊断见 [`super::netlink::live_nlaccess_probe`] 同款路径）。
+    /// 真机读数冒烟，默认跳过：三级数据源受 SELinux 域约束——sealed 域且 su
+    /// 不可用（未 root）时空快照即正确；sealed 域但 su 可用（Magisk 已授权）
+    /// 时 su 桥必须出非空快照；放行域直读即可出数且分组成立
+    /// （细域诊断见 [`super::netlink::live_nlaccess_probe`] 同款路径）。
     #[test]
     #[ignore]
     fn live_snapshot_reads_counters() {
         let s = super::snapshot();
         if s.is_empty() {
-            println!("sealed 域：/proc/net/dev、sysfs、netlink 全拒读 → 空快照为正确行为");
+            println!("sealed 域且 su 不可用：/proc/net/dev、su 桥、sysfs、netlink 全灭 → 空快照为正确行为");
             return;
         }
         println!("dataplane snapshot: {s:?}");

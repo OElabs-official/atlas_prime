@@ -5,7 +5,7 @@
 //! 但显式 bind 与 RTM_GETLINK sendto 均被内核 nlaccess 拒（EPERM，nlaccess 按
 //! 消息类型过滤——type 0 能过、GETLINK 不能），SO_PEEK_OFF 亦不受支持（ENOTSUP）；
 //! SOCK_DIAG/GENERIC 连创建都不行。即本域内三级数据源全部封死，快照为空是
-//! **正确行为**。root / adb shell / 自定制 ROM 等放行域下，本路径即出数。
+//! **正确行为**。root（su / Magisk）/ 自定制 ROM 等放行域下，本路径即出数。
 //!
 //! IFLA_STATS 载荷为内核序列化的 legacy `rtnl_link_stats`（arm64 内核字长 8B：
 //! `rx_bytes@0`、`tx_bytes@80`；32 位内核的载荷仅 72B，被长度闸挡下 = 不出数

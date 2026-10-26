@@ -7,7 +7,7 @@
 //!   先求和再差分，[`speed::Grouper`]）；计量节拍由
 //!   [`crate::v1::operator`] 的 1Hz 回路驱动（本模块不自发采样，只提供读数原语）；
 //! - **正文源链**（[`read_dev_snapshot`]，实现在 speed/devsrc）：`/proc/net/dev`
-//!   全文读数 = 直读 → adb 桥（端口取自数据目录 `adb_port`，「无线配对」任务/人工维护）；
+//!   全文读数 = 直读 → su 桥（root 模式，`su -c "cat /proc/net/dev"`）；
 //!   整链失败按 [`NetError`] 四分成因上报。
 //!
 //! # 公开接口用法

@@ -18,6 +18,9 @@
 //!   （操作器 1Hz 回路喂数据），本路由绝不自读 /proc，首个 emit 前为 `{}`；
 //!   别名 `GET /system/cli/network` 同挂本处理器
 //!   （同一 payload、`speed` 两处同供，共桶共缓存槽，不走 cli 1 req/s 档）；
+//! - `GET /system/gpu` —— GPU 频率/使用率（[`gpu::Gpu`] 原样序列化，kgsl 直读→su 桥）；
+//!   与 cli/battery 同类也 fork 子进程，但坐**普通桶**：su spawn 毫秒级、且 respond 缓存兜底；
+//!   永不再 404——不可用亦 200（`available:false`+`reason`，卡片隐藏系前端契约）；
 //! - `GET /system/cli/battery` —— CLI 源采集（fork termux-api），**1 req/s**；
 //!   超限不报错、不阻塞：**直接回上一次缓存 JSON**（响应头 `X-Cache: HIT` + `X-Cache-At`）；
 //!   缓存语义 = 单槽最新（本服务是实时读数，旧副本只会驻留到下一次放行请求）；
@@ -30,10 +33,11 @@
 //!   其他网卡名；bytes/s，1Hz，≈8h 回溯；旧 per-iface 键已退役，随窗口自然出清）。
 //!   响应按时间**升序** `[{t:"YYYY-MM-DDTHH:MM:SSZ",k,v}]`——`t` 为 RFC3339 字符串原文
 //!   （前端 `Date.parse` 直吃）；DB 读走阻塞池（`Db::history` 内部驱动共享 runtime），不限流；
-//! - `GET /` → 302 重定向到 `/index.html`；
-//! - `GET /index.html` → 数据目录（与 v1/db 同源）下的 index.html 静态面板：
-//!   不限流，**每次读盘**（走阻塞池，改动刷新即见），响应带 `cache-control: no-cache`
-//!   杜绝浏览器启发式缓存；缺失/不可读 → 404 JSON；
+//! - `GET /` → 302 重定向到 `/dashboard.html`；
+//! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改根目录 dashboard.html 重编）：
+//!   数据目录（与 v1/db 同源）存在 dashboard.html → **存在即覆盖**，每次读盘（走阻塞池，
+//!   改动刷新即见，开发热替换；删文件回落内嵌）；否则直接回内嵌字节，**永不 404**。
+//!   不限流，响应带 `cache-control: no-cache` 杜绝浏览器启发式缓存；
 //! - CORS 全放开（本地工具 API）；task / 静态路由不设限（写操作语义，重复提交自有幂等错误）。
 //!
 //! # 限流设计
@@ -61,7 +65,7 @@ use serde::Deserialize;
 use crate::v1::PROJECT;
 use crate::v1::db::Db;
 use crate::v1::operator::Operator;
-use crate::v1::system::{battery, cpu, disk, mem, network, thermal};
+use crate::v1::system::{battery, cpu, disk, gpu, mem, network, thermal};
 use crate::v1::task::{Task, TaskError};
 
 // ---------------- 公开入口 ----------------
@@ -79,7 +83,8 @@ impl Web {
                 App::new()
                     .middleware(Cors::new().max_age(600).build())
                     .route("/system/cpu", web::get().to(h_cpu))
-                    .route("/system/thermal", web::get().to(h_thermal))
+                     .route("/system/thermal", web::get().to(h_thermal))
+                     .route("/system/gpu", web::get().to(h_gpu))
                     .route("/system/mem", web::get().to(h_mem))
                     .route("/system/disk", web::get().to(h_disk))
                     .route("/system/ip", web::get().to(h_network))
@@ -93,7 +98,7 @@ impl Web {
                     .route("/task/input/{id}", web::post().to(h_task_input))
                     .route("/db/history", web::get().to(h_db_history))
                     .route("/", web::get().to(h_root))
-                    .route("/index.html", web::get().to(h_index))
+                    .route("/dashboard.html", web::get().to(h_dashboard))
             });
             let mut srv = Some(srv);
             for a in addrs {
@@ -124,6 +129,12 @@ async fn h_thermal() -> HttpResponse {
     })
     .await
 }
+/// `GET /system/gpu`：[`gpu::Gpu`] 原样序列化（频率/使用率，kgsl 直读→su 桥）。
+/// 与 cli/battery 同类皆 fork，但留普通桶：su spawn 毫秒级、respond 缓存兜底；
+/// 永不再 404——不可用亦 200 带 `available:false`（前端契约：卡片隐藏）。
+async fn h_gpu() -> HttpResponse {
+    respond("/system/gpu", false, || serde_json::to_vec(&gpu::Gpu::get())).await
+}
 async fn h_mem() -> HttpResponse {
     respond(
         "/system/mem",
@@ -144,7 +155,7 @@ async fn h_disk() -> HttpResponse {
 /// （组 = wifi/cellular/有流量的其他网卡名），首个 emit 前 `{}`。
 /// 注：serde_json 默认按 key 升序出对象（无 preserve_order），payload 键序
 /// 为字母序；[wifi, cellular, …] 的语义序由前端按组名显式排定。
-/// 别名 `/system/cli/network`（CLI 风格命名，数据源现实为直读→adb 桥链）挂
+/// 别名 `/system/cli/network`（CLI 风格命名，数据源现实为直读→su 桥链）挂
 /// **同一处理器**：payload 逐字节一致、`speed` 成员两处同供；同处理器即
 /// 同缓存槽（key=`/system/ip`）同限流档（normal 桶，不走 cli 1 req/s 档）。
 async fn h_network() -> HttpResponse {
@@ -275,39 +286,64 @@ async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
 
 // ---------------- 静态路由（面板，不过 Gate、不缓存） ----------------
 
-/// 数据目录下的 index.html（解析与 v1/db 的 db_path 同源：directories + PROJECT 常量）
-fn index_path() -> Option<PathBuf> {
+/// 面板前端内嵌于二进制随发布（UI 随二进制发布；改版 = 改根目录 dashboard.html 重编）。
+pub const DASHBOARD_HTML: &str = include_str!("../../../dashboard.html");
+
+/// 数据目录下的 dashboard.html（开发热替换覆盖文件；解析与 v1/db 的 db_path 同源：directories + PROJECT 常量）
+fn dashboard_path() -> Option<PathBuf> {
     static P: OnceLock<Option<PathBuf>> = OnceLock::new();
     P.get_or_init(|| {
         ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2])
-            .map(|p| p.data_dir().join("index.html"))
+            .map(|p| p.data_dir().join("dashboard.html"))
     })
     .clone()
+}
+
+/// 本次要服务的字节来源（判定见 [`pick_serve`]）。
+enum Page {
+    /// 覆盖文件的新鲜字节
+    Fresh(Vec<u8>),
+    /// 内嵌字节（默认答案）
+    Embedded,
+    /// 阻塞池关停（本路由唯一非 200 路径）
+    PoolClosed,
+}
+
+/// 覆盖优先级（纯判定）：覆盖文件读成功 → 该文件优先；读失败（含缺失/不可读）→
+/// 内嵌回落，本路由永不 404；仅阻塞池关停另走 500。
+fn pick_serve(read: Result<Vec<u8>, BlockingError<std::io::Error>>) -> Page {
+    match read {
+        Ok(bytes) => Page::Fresh(bytes),
+        Err(BlockingError::Error(_)) => Page::Embedded,
+        Err(BlockingError::Canceled) => Page::PoolClosed,
+    }
 }
 
 /// `GET /` → 302 指向静态面板
 async fn h_root() -> HttpResponse {
     HttpResponse::Found()
-        .header("location", "/index.html")
+        .header("location", "/dashboard.html")
         .body(&b""[..])
 }
 
-/// `GET /index.html` → 数据目录 index.html。每次读盘（不缓存，改动刷新即见）；
-/// 文件 IO 上 ntex 阻塞池，worker 不阻塞；缺失/不可读一律 404 JSON。
-async fn h_index() -> HttpResponse {
-    let Some(path) = index_path() else {
-        return HttpResponse::NotFound()
-            .json(&serde_json::json!({ "error": "no project data dir" }));
+/// `GET /dashboard.html` → 面板。数据目录 dashboard.html 存在即覆盖（每次读盘，开发
+/// 热替换；删文件回落内嵌）；否则直接回内嵌 [`DASHBOARD_HTML`]。文件 IO 上 ntex 阻塞池，
+/// worker 不阻塞；内嵌恒有答案，本路由不再有 404。
+async fn h_dashboard() -> HttpResponse {
+    let page = match dashboard_path() {
+        Some(path) => pick_serve(web::block(move || std::fs::read(&path)).await),
+        None => Page::Embedded,
     };
-    // block 把闭包内的 io::Error 平并进 BlockingError::Error → 读盘失败（缺失/不可读）一律 404
-    match web::block(move || std::fs::read(&path)).await {
-        Ok(body) => HttpResponse::Ok()
+    match page {
+        Page::Fresh(bytes) => HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
             .header("cache-control", "no-cache")
-            .body(body),
-        Err(BlockingError::Error(e)) => HttpResponse::NotFound()
-            .json(&serde_json::json!({ "error": format!("index.html: {e}") })),
-        Err(BlockingError::Canceled) => HttpResponse::InternalServerError()
+            .body(bytes),
+        Page::Embedded => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .header("cache-control", "no-cache")
+            .body(DASHBOARD_HTML),
+        Page::PoolClosed => HttpResponse::InternalServerError()
             .json(&serde_json::json!({ "error": "blocking pool closed" })),
     }
 }
@@ -509,6 +545,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dashboard_override_wins_embedded_fallback() {
+        // 覆盖文件读到字节 → 该文件优先（存在即覆盖）
+        assert!(matches!(
+            pick_serve(Ok(b"<html>override".to_vec())),
+            Page::Fresh(_)
+        ));
+        // 读失败（缺失/不可读）→ 内嵌回落，本路由永不 404
+        assert!(matches!(
+            pick_serve(Err(BlockingError::Error(std::io::Error::from(
+                std::io::ErrorKind::NotFound
+            )))),
+            Page::Embedded
+        ));
+        // 阻塞池关停 → 500 语义，不冒充内嵌面板
+        assert!(matches!(
+            pick_serve(Err(BlockingError::Canceled)),
+            Page::PoolClosed
+        ));
+        // 内嵌字节必须指向真文件（根目录 dashboard.html 的 rev 标记随编译进二进制）
+        assert!(DASHBOARD_HTML.contains("<!-- rev "));
+    }
+
     /// 真机冒烟：起服务 → 裸 HTTP GET 各路由 → 操作器 1Hz 速度回路两拍 →
     /// speed 成员 + kind=net 历史 → 关停。
     /// `cargo test v1::web -- --ignored --test-threads=1`
@@ -631,19 +690,20 @@ mod tests {
         Operator::stop();
         let nf = get("/nope");
         assert!(nf.contains("404"), "{nf}");
-        // 静态面板：/ 必 302 → /index.html（头名大小写不敏感）
+        // 静态面板：/ 必 302 → /dashboard.html（头名大小写不敏感）
         let root = get("/");
         assert!(
-            root.contains("302") && root.to_lowercase().contains("location: /index.html"),
+            root.contains("302") && root.to_lowercase().contains("location: /dashboard.html"),
             "{root}"
         );
-        // /index.html：数据目录文件存在 → 200 text/html；缺失 → 404 JSON。两者皆可。
-        let idx = get("/index.html");
-        let idx_l = idx.to_lowercase();
+        // /dashboard.html：内嵌恒答（覆盖文件存在与否皆 200）→ 200 text/html + rev 标记
+        let dash = get("/dashboard.html");
+        let dash_l = dash.to_lowercase();
         assert!(
-            (idx.contains("200") && idx_l.contains("text/html"))
-                || (idx.contains("404") && idx_l.contains("application/json")),
-            "{idx}"
+            dash.contains("200")
+                && dash_l.contains("text/html")
+                && dash.contains("<!-- rev "),
+            "{dash}"
         );
         let _ = h;
     }
