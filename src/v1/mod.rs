@@ -5,9 +5,10 @@
 //! [`notify`] 被动出站（termux-notification 薄桥，零状态零策略）。
 //! 除标准路径三元组外六域零共享。
 
-/// 标准路径三元组（organization, vendor/application, application version），
-/// directories/sqlite/任务配置共用（原 constans::PROJECT，随 v1 自包含化迁入）。
-pub const PROJECT: &[&str] = &["org", "oelabs", "atlas_prime", "0.2.0"];
+/// 标准路径三元组（organization, vendor/application）+ 版本槽（随 Cargo.toml
+/// 走，`env!` 编译期注入，永不手改）；directories/sqlite/任务配置共用
+/// （原 constans::PROJECT，随 v1 自包含化迁入；消费侧只取 [0..3]，版本槽留审计）。
+pub const PROJECT: &[&str] = &["org", "oelabs", "atlas_prime", env!("CARGO_PKG_VERSION")];
 
 #[allow(dead_code)]
 pub mod system;
