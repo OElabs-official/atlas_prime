@@ -21,6 +21,11 @@
 //! - `GET /system/gpu` —— GPU 频率/使用率（[`gpu::Gpu`] 原样序列化，kgsl 直读→su 桥）；
 //!   与 cli/battery 同类也 fork 子进程，但坐**普通桶**：su spawn 毫秒级、且 respond 缓存兜底；
 //!   永不再 404——不可用亦 200（`available:false`+`reason`，卡片隐藏系前端契约）；
+//! - `GET /system/proc` —— 进程快照（[`proc::Snapshot`] 原样序列化）：**纯缓存读**
+//!   （操作器 5s 回路 `proc::update` 喂数据，本路由绝不自扫 /proc），亦走普通桶，
+//!   永 200；首轮前为 warming 形（`procs:[]`、`count:0`、`total_rss_kb:0`、
+//!   `scanned_at` 为 null、`reason:"warming"`）；`procs` 按 `rss_kb`
+//!   降序，成员 `pid/comm/cmd/rss_kb/cpu_pct/state`；
 //! - `GET /system/cli/battery` —— CLI 源采集（fork termux-api），**1 req/s**；
 //!   超限不报错、不阻塞：**直接回上一次缓存 JSON**（响应头 `X-Cache: HIT` + `X-Cache-At`）；
 //!   缓存语义 = 单槽最新（本服务是实时读数，旧副本只会驻留到下一次放行请求）；
@@ -65,7 +70,7 @@ use serde::Deserialize;
 use crate::v1::PROJECT;
 use crate::v1::db::Db;
 use crate::v1::operator::Operator;
-use crate::v1::system::{battery, cpu, disk, gpu, mem, network, thermal};
+use crate::v1::system::{battery, cpu, disk, gpu, mem, network, proc, thermal};
 use crate::v1::task::{Task, TaskError};
 
 // ---------------- 公开入口 ----------------
@@ -85,6 +90,7 @@ impl Web {
                     .route("/system/cpu", web::get().to(h_cpu))
                      .route("/system/thermal", web::get().to(h_thermal))
                      .route("/system/gpu", web::get().to(h_gpu))
+                     .route("/system/proc", web::get().to(h_proc))
                     .route("/system/mem", web::get().to(h_mem))
                     .route("/system/disk", web::get().to(h_disk))
                     .route("/system/ip", web::get().to(h_network))
@@ -134,6 +140,12 @@ async fn h_thermal() -> HttpResponse {
 /// 永不再 404——不可用亦 200 带 `available:false`（前端契约：卡片隐藏）。
 async fn h_gpu() -> HttpResponse {
     respond("/system/gpu", false, || serde_json::to_vec(&gpu::Gpu::get())).await
+}
+/// `GET /system/proc`：[`proc::current`] **纯缓存读**（操作器 5s 回路喂数据，
+/// 本路由绝不自扫 /proc；produce 上阻塞池，锁读即刻）。永 200；首轮前
+/// warming 形（契约冻结：procs 空数组 + reason="warming"）。
+async fn h_proc() -> HttpResponse {
+    respond("/system/proc", false, || serde_json::to_vec(&proc::current())).await
 }
 async fn h_mem() -> HttpResponse {
     respond(

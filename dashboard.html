@@ -6,7 +6,7 @@
 <title>ATLAS · 性能 + 任务控制 · Material Design 3</title>
 <!--
   ============================================================================
-  index.html · atlas_prime 原生控制台（性能 + 任务控制）
+  dashboard.html · atlas_prime 原生控制台（性能 + 任务控制）
   ============================================================================
   设计血统：dashboard_4.html（M3 重构版）的同族兄弟 —— 令牌层 --md-sys-*
   数值契约逐字沿用（形状 §8 / 间距 §9 / 状态层 §11 / 动效 §10 / 字阶 §6.2 /
@@ -60,9 +60,17 @@
     （重排下一轮 5s）。IP 地址双击复制不上抛为整卡刷新。
     任务控制台输出固定 2s 自动刷新（可暂停），不参与双击语义。
     页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
-  失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
+   失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
    30s 节流一条；明暗主题跟随 OS（prefers-color-scheme，无手动开关，matchMedia
    翻转时画布配色热重解析）；绝不产生未捕获拒绝。
+作业抽屉（蓝图 ex2_v2 bottom-sheet 把手模式）：TASKS / CONSOLE 两卡移出 grid，
+     入固定底抽屉 #jobs（surface-container-low 停靠面 + 顶缘 corner-extra-large 圆角
+     + §3.29 handle 32×4@40%）；两档 closed 仅露 56px 把手（--jh ResizeObserver 实测、
+     --jpeek 供 footer 让位）/ open 停靠 50dvh（三档 + 幕布实验已就地回退）；点把手/
+     按钮开合、竖拖过半定开合、4px 位移判定、松手抑制误触；外点 / Esc 闭；状态持久化
+     localStorage["atlas-drawer"]（三档实验遗留值视同展开，其余/缺席回退闭态）；
+     把手徽标 = running 任务数（renderTasks 内同步刷新，0 隐藏）；body[data-jobs]
+     记账令 snackbar 抬到抽屉之上。
   ============================================================================
 -->
 <style>
@@ -471,7 +479,7 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .tval.addr{font-family:var(--d4-font);cursor:copy}
 .tval.mono{font-size:var(--md-sys-typescale-label-small-size);font-weight:400;
   white-space:normal;overflow:visible;text-overflow:clip;word-break:break-all;overflow-wrap:anywhere}
-.scroll.half{max-height:min(325px,39vh)}
+.scroll.short{max-height:min(325px,39vh)}
 .scroll{max-height:min(650px,78vh);overflow-y:auto;scrollbar-width:thin;
   scrollbar-color:color-mix(in srgb,var(--md-sys-color-on-surface-variant) var(--md-sys-state-disabled-opacity),transparent) transparent}
 
@@ -483,6 +491,47 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .sp.warn{color:var(--md-sys-color-tertiary)} .sp.crit{color:var(--md-sys-color-error)}
 .sinfo{min-width:0}
 .sinfo .lin{margin-top:var(--md-sys-space75)}
+/* STORAGE 折叠（PROCESS 剪裁壳同款配方）：总容量 >32 GiB 的行 = 列表直子，其余入
+   #stoRest>.stoIn；旗标 stoExpanded 只驱动 #diskList 的 .open 类，与 PROCESS 区态独立 */
+#stoRest{display:grid;grid-template-rows:0fr;
+  transition:grid-template-rows var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decelerate)}
+#stoRest>.stoIn{overflow:hidden;min-height:0}
+#diskList.open #stoRest{grid-template-rows:1fr}
+#stoFoldBtn[hidden]{display:none}                     /* .btn 的 display 盖过 UA [hidden]，显式压制 */
+
+/* PROCESS 行（每进程一行 = 平坦子元五列网格：comm mono semibold | cmd 静音省略号
+   （flex 吃列、行内截断）| RSS | CPU% | 状态药丸；尾三列定宽右排，comm/cmd 按 fr 分宽） */
+#procList .trow.proc{grid-template-columns:minmax(72px,1.2fr) minmax(0,2fr) 64px 56px 44px}
+#procList .trow.proc .pc{font-family:var(--d4-mono);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#procList .trow.proc .pcmd{min-width:0;font-family:var(--d4-mono);color:var(--md-sys-color-on-surface-variant);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#procList .trow.proc .ph{justify-self:end;align-self:center}
+/* PROCESS 区（驻 MEMORY 卡尾）：顶缘发丝分隔 = footer 同款（outline-variant 1px +
+   space 令牌）；折叠态 = render-all + grid-rows 剪裁：全量行每 tick 都渲染，第 4 行起
+   装进 #procRest>.procIn（单内衬 overflow:hidden），旗标 procExpanded 只驱动
+   #procList 的 .open 类（0fr⇄1fr 双向过渡开合，点按不再重渲染；5s 刷新 / 主题重渲染
+   按旗标重建并复位类）；行内字号整体 −2 档（label-small），展开态滚动帽沿用
+   .scroll.short 不破卡内节奏；≤3 行隐按钮且不产出剪裁壳 */
+.proczone{margin-top:var(--md-sys-space200);padding-top:var(--md-sys-space150);
+  border-top:1px solid var(--md-sys-color-outline-variant)}
+.proczone.stale{opacity:.62}                        /* 与卡级 stale 暗淡同档（.card.in.stale） */
+.pzh{display:flex;align-items:center;gap:var(--md-sys-space100)}
+.pzh .pzl{font-size:var(--md-sys-typescale-body-small-size);font-weight:500}
+.pzh .pzm{font-size:var(--md-sys-typescale-body-small-size);color:var(--md-sys-color-on-surface-variant)}
+.pzh .btn{margin-left:auto}
+#procFoldBtn[hidden]{display:none}                  /* .btn 的 display 盖过 UA [hidden]，显式压制 */
+/* 折叠剪裁壳（grid-rows 0fr↔1fr 技巧；时长/缓动沿用既有令牌，reduced-motion 全局
+   .01ms 压平块覆盖本过渡） */
+#procRest{display:grid;grid-template-rows:0fr;
+  transition:grid-template-rows var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized-decelerate)}
+#procRest>.procIn{overflow:hidden;min-height:0}
+#procList.open #procRest{grid-template-rows:1fr}
+/* 区内字号 −2 档（body-medium/title-medium → label-small 成对令牌）：comm/cmd/RSS/CPU/
+   药丸同档收缩，数字列保 tabular-nums 不跳列；行 padding 同步 space75 守单行节奏 */
+#procList{font-size:var(--md-sys-typescale-label-small-size);line-height:var(--md-sys-typescale-label-small-line-height)}
+#procList .trow{padding:var(--md-sys-space75)}
+#procList .trow .tval,#procList .trow .pnum,#procList .trow .ph{
+  font-size:var(--md-sys-typescale-label-small-size);line-height:var(--md-sys-typescale-label-small-line-height)}
 
 /* 电池表盘 */
 .gwrap{display:flex;align-items:center;gap:var(--md-sys-space200)}
@@ -542,6 +591,12 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .ph.Starting,.ph.Stopping{background:var(--d4-b2c);color:var(--d4-b2oc)}
 .ph.Exited{background:var(--md-sys-color-secondary-container);color:var(--md-sys-color-on-secondary-container)}
 .ph.Failed{background:var(--md-sys-color-error-container);color:var(--md-sys-color-on-error-container)}
+/* 进程状态药丸（仅既有色对重映射，零新色：R=Running 同对 · D=tertiary 告警族
+   （.warn 同族）· Z=Failed 同对 · T=Exited 同对；S/未知 = .ph 基态中性） */
+.ph.stR{background:var(--d4-b3c);color:var(--d4-b3oc)}
+.ph.stD{background:var(--md-sys-color-tertiary-container);color:var(--md-sys-color-on-tertiary-container)}
+.ph.stZ{background:var(--md-sys-color-error-container);color:var(--md-sys-color-on-error-container)}
+.ph.stT{background:var(--md-sys-color-secondary-container);color:var(--md-sys-color-on-secondary-container)}
 .pempty{padding:var(--md-sys-space300);text-align:center;color:var(--md-sys-color-on-surface-variant);
   font-size:var(--md-sys-typescale-body-small-size)}
 
@@ -578,14 +633,72 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
   font-size:var(--md-sys-typescale-body-medium-size);max-width:min(88vw,520px);
   box-shadow:0 var(--md-sys-elevation-level3) 8px color-mix(in srgb,var(--md-sys-color-shadow) 40%,transparent);
   opacity:0;pointer-events:none;transition:opacity var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
-  transform var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard)}
+  transform var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard),
+  bottom var(--md-sys-motion-duration-medium4) var(--md-sys-motion-easing-emphasized-decelerate)}
 .snack.on{opacity:1;transform:translate(-50%,0)}
 .snack.err{background:var(--md-sys-color-error-container);color:var(--md-sys-color-on-error-container)}
+/* 抽屉展开时 snackbar 抬到停靠面之上（body[data-jobs] 记账抬位，见抽屉 JS） */
+body[data-jobs="open"] .snack{bottom:calc(50dvh + var(--md-sys-space100))}
 
 /* 页脚 */
-footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);border-top:1px solid var(--md-sys-color-outline-variant);
+footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);
+  padding-bottom:calc(var(--jpeek,56px) + var(--md-sys-space300)); /* 让位折叠把手（--jpeek 实测高） */
+  border-top:1px solid var(--md-sys-color-outline-variant);
   display:flex;flex-wrap:wrap;gap:var(--md-sys-space200);align-items:center;justify-content:space-between}
 .fnote{font-size:var(--md-sys-typescale-body-small-size);color:var(--md-sys-color-on-surface-variant);text-align:right}
+
+/* ============================================================
+   ⑥′ 作业抽屉（#jobs）—— bottom-sheet 把手模式（蓝图 ex2_v2：v2.7′ 把手 +
+   v2.8.5 两档 closed/open + v2.8.2 --jpeek 让位；三档 + 幕布实验已就地回退）。
+   元件高 50dvh = open 停靠位（transform:none）；闭态仅露把手
+   （translateY(calc(100% - --jh))，--jh 由 ResizeObserver 实测把手高，
+   56px 兜底）。状态唯一记账于 body[data-jobs] + .jobs.open；拖拽/点按开合，
+   松手按半程定开闭。全部配色走本文件既有令牌，明暗翻转天然生效。
+   ============================================================ */
+.jobs{position:fixed;left:0;right:0;bottom:0;z-index:50;
+  background:var(--md-sys-color-surface-container-low);
+  border-radius:var(--md-sys-shape-corner-extra-large) var(--md-sys-shape-corner-extra-large) 0 0;
+  box-shadow:0 -3px 12px color-mix(in srgb,var(--md-sys-color-shadow) 45%,transparent),
+             inset 0 1px 0 var(--md-sys-color-outline-variant);
+  padding:var(--md-sys-space50) var(--md-sys-space150) 0; /* 底缘留白移交 .jobsBody 滚动内衬 */
+  height:50vh;height:50dvh; /* open 停靠位 = 半屏（vh 回退，dvh 跟随动态视口） */
+  display:flex;flex-direction:column;overflow:hidden; /* 仅 .jobsBody 滚动；顶条固定不外流 */
+  transform:translateY(calc(100% - var(--jh,56px))); /* 缺省 = 闭态（仅露把手） */
+  transition:transform var(--md-sys-motion-duration-medium4) var(--md-sys-motion-easing-emphasized-decelerate)}
+.jobs.open{transform:none}
+.jobs.drag{transition:none} /* 拖拽/状态恢复免动画（内联 transform 接管） */
+/* 滚动区 = 抽屉内唯一 scroller；底衬令牌留白让末行不贴抽屉底缘 */
+.jobsBody{flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--md-sys-space200)}
+/* 把手条 = 抽屉顶缘（§3.29 handle 32×4@40% + 触控热区），闭态唯一露出体；
+   不透明底 + 发丝线：滚动内容从其下缘擦过而不透出 */
+.jHandle{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:var(--md-sys-space50);
+  padding:var(--md-sys-space100) 0 var(--md-sys-space125);
+  background:var(--md-sys-color-surface-container-low);
+  border-bottom:1px solid var(--md-sys-color-outline-variant);
+  touch-action:none;cursor:grab;user-select:none;-webkit-user-select:none}
+.jHandle.drag{cursor:grabbing}
+.jHandle .handle{width:32px;height:4px;border-radius:var(--md-sys-shape-corner-full);
+  background:color-mix(in srgb,var(--md-sys-color-on-surface-variant) 40%,transparent)} /* handle 32×4@40% §3.29 */
+.jToggle{display:inline-flex;align-items:center;gap:var(--md-sys-space75);height:30px;
+  padding:0 var(--md-sys-space150);border:none;background:none;cursor:pointer;
+  font-family:var(--d4-font);font-size:var(--md-sys-typescale-title-small-size);
+  line-height:var(--md-sys-typescale-title-small-line-height);font-weight:500;color:var(--a-proc);
+  border-radius:var(--md-sys-shape-corner-full)}
+.jToggle:focus-visible{outline:var(--md-sys-state-focus-thickness) solid var(--md-sys-color-secondary);outline-offset:var(--md-sys-state-focus-outer-offset)}
+.jToggle .jchev{transition:transform var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
+/* running 徽标：与 .ph.Running 药丸同色对，0 时隐藏（renderTasks 同步） */
+.jBadge{display:none;min-width:20px;height:20px;padding:0 var(--md-sys-space50);
+  align-items:center;justify-content:center;border-radius:var(--md-sys-shape-corner-full);
+  background:var(--d4-b3c);color:var(--d4-b3oc);
+  font-family:var(--d4-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--md-sys-typescale-label-small-size)}
+.jBadge.on{display:inline-flex}
+/* 抽屉内卡面改不透明 tonal 层（dock 底面上无透出对象，避免「粘死」观感） */
+.jobs .card{background:var(--md-sys-color-surface-container);
+  box-shadow:inset 0 0 0 1px var(--md-sys-color-outline-variant)}
+.jobs .card+.card{margin-top:var(--md-sys-space100)}
+.jobs .log{max-height:none}
 
 /* ============================================================
    ⑦ 响应式（单列布局下仅保留壳层/表格/表盘适配）+ reduced-motion
@@ -653,7 +766,8 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
       </div>
     </section>
 
-        <!-- ====== MEMORY：MEM/SWAP 双横轨 + 80% 越界警示 + 双曲线（1|5fps） ====== -->
+        <!-- ====== MEMORY：MEM/SWAP 双横轨 + 80% 越界警示 + 双曲线（1|5fps）+ 卡尾 PROCESS 区
+               （自家进程 top-3 RSS 默认可见、其余点按展开/收起；双击 = mem + proc 双刷新） ====== -->
     <section class="card acc-mem" id="card-mem">
       <header class="ch"><h2>MEMORY</h2></header>
       <div class="gwrap">
@@ -671,6 +785,11 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
             <div><em style="background:var(--a-proc)"></em>交换分区使用率</div>
           </div>
         </div>
+      </div>
+      <div class="proczone" id="procZone">
+        <div class="pzh"><span class="pzl">PROCESS</span><span class="pzm num"><span id="procN">—</span> 个 · 总 <span id="procRssRv">—</span></span>
+          <button class="btn btn-text btn-sm" id="procFoldBtn" type="button" aria-expanded="false" hidden>展开</button></div>
+        <div class="tlist scroll short" id="procList"><div class="pempty">等待首轮进程扫描…</div></div>
       </div>
     </section>
 
@@ -718,44 +837,60 @@ footer{margin-top:var(--md-sys-space300);padding-top:var(--md-sys-space200);bord
       <div class="tgrps scroll" id="thermList"></div>
     </section>
 
-<!-- ====== STORAGE：大字占用率居左（60s · 双击=刷新） ====== -->
+<!-- ====== STORAGE：大字占用率居左，默认仅列 >32 GiB 总容量的分区、其余折叠（60s · 双击=刷新） ====== -->
     <section class="card acc-sto" id="card-sto">
-      <header class="ch"><h2>STORAGE</h2></header>
-      <div class="tlist scroll half" id="diskList"></div>
+      <header class="ch"><h2>STORAGE</h2>
+        <span class="hctl"><button class="btn btn-text btn-sm" id="stoFoldBtn" type="button" aria-expanded="false" hidden>展开</button></span></header>
+      <div class="tlist scroll short" id="diskList"></div>
     </section>
 
-    <!-- ====== TASKS：状态表（60s · 双击=刷新） ====== -->
-    <section class="card acc-task" id="card-task">
-      <header class="ch"><h2>TASKS</h2>
-        <span class="hctl"><button class="btn btn-tonal btn-sm" id="updBtn">
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35a7.96 7.96 0 0 0-6.49-2.31A7.99 7.99 0 0 0 4.07 13.6c.42 1.36 1.27 2.57 2.4 3.45l.55-1.6a5.5 5.5 0 0 1 9.05-2.85l-2.2-2.2v5.6h6.5V5.5l-2.72 2.85zM6.07 19.73a7.96 7.96 0 0 0 6.49 2.31A7.99 7.99 0 0 0 19.84 10.4l-.55 1.6a5.5 5.5 0 0 1-9.05 2.85l2.2 2.2v-5.6h-6.5v6.49l2.13-3.81z"/></svg>
-          重扫配置</button></span></header>
-      <div class="ptable">
-        <div class="phead"><span>任务 / 命令</span><span>分组</span><span>状态</span><span>PID</span><span>运行时长</span><span>重启</span><span>日志行</span><span style="text-align:right">操作</span></div>
-        <div class="pbody" id="taskBody"><div class="pempty">等待 /task 首次响应…</div></div>
-      </div>
-    </section>
-
-    <!-- ====== CONSOLE：所选任务输出 + stdin（输出 2s 自动刷新不变） ====== -->
-    <section class="card acc-cons" id="card-cons">
-      <header class="ch"><h2>CONSOLE</h2><span class="hta" id="consTask">未绑定任务</span>
-        <span class="hctl"><button class="btn btn-text btn-sm" id="autoBtn">暂停自动刷新</button></span></header>
-      <div class="log" id="outLog"><div class="pempty">在上方任务表点击一行以绑定输出流。</div></div>
-      <form class="stdin" id="stdinForm" autocomplete="off">
-        <input class="fld num" id="stdinLine" placeholder="向所选任务 stdin 发送一行（POST /task/input/id）" maxlength="4096">
-        <button class="btn btn-filled" id="stdinBtn" type="submit" disabled>
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          发送
-        </button>
-      </form>
-    </section>
   </div>
 
   <footer>
-    <!-- rev 2026-10-26.33 -->
+    <!-- rev 2026-11-04.1 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
+
+<!-- ══════════ 作业抽屉（TASKS + CONSOLE 停靠区）—— 蓝图 ex2_v2 bottom-sheet 把手模式：
+     两档 closed（露 56px 把手，§3.29 handle）/ open（停靠 50dvh）；点按开合、
+     竖拖过半定开闭（三档 + 幕布实验已就地回退）；两卡 id/class/结构
+     逐字保留，cardMeta/renderTasks/wireDbl/控制台绑定链零改动 ══════════ -->
+<aside class="jobs" id="jobs" aria-label="作业抽屉">
+  <div class="jHandle" id="jobsHandle"><div class="handle"></div>
+    <button class="jToggle" id="jobsToggle" type="button" aria-controls="jobs" aria-expanded="false">
+      <svg class="ic jchev" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg>
+      <span>任务 / JOBS</span><span class="jBadge num" id="jobsBadge">0</span>
+    </button>
+  </div>
+  <div class="jobsBody">
+  <!-- ====== TASKS：状态表（60s · 双击=刷新） ====== -->
+  <section class="card acc-task" id="card-task">
+    <header class="ch"><h2>TASKS</h2>
+      <span class="hctl"><button class="btn btn-tonal btn-sm" id="updBtn">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35a7.96 7.96 0 0 0-6.49-2.31A7.99 7.99 0 0 0 4.07 13.6c.42 1.36 1.27 2.57 2.4 3.45l.55-1.6a5.5 5.5 0 0 1 9.05-2.85l-2.2-2.2v5.6h6.5V5.5l-2.72 2.85zM6.07 19.73a7.96 7.96 0 0 0 6.49 2.31A7.99 7.99 0 0 0 19.84 10.4l-.55 1.6a5.5 5.5 0 0 1-9.05 2.85l2.2 2.2v-5.6h-6.5v6.49l2.13-3.81z"/></svg>
+        重扫配置</button></span></header>
+    <div class="ptable">
+      <div class="phead"><span>任务 / 命令</span><span>分组</span><span>状态</span><span>PID</span><span>运行时长</span><span>重启</span><span>日志行</span><span style="text-align:right">操作</span></div>
+      <div class="pbody" id="taskBody"><div class="pempty">等待 /task 首次响应…</div></div>
+    </div>
+  </section>
+
+  <!-- ====== CONSOLE：所选任务输出 + stdin（输出 2s 自动刷新不变） ====== -->
+  <section class="card acc-cons" id="card-cons">
+    <header class="ch"><h2>CONSOLE</h2><span class="hta" id="consTask">未绑定任务</span>
+      <span class="hctl"><button class="btn btn-text btn-sm" id="autoBtn">暂停自动刷新</button></span></header>
+    <div class="log" id="outLog"><div class="pempty">在上方任务表点击一行以绑定输出流。</div></div>
+    <form class="stdin" id="stdinForm" autocomplete="off">
+      <input class="fld num" id="stdinLine" placeholder="向所选任务 stdin 发送一行（POST /task/input/id）" maxlength="4096">
+      <button class="btn btn-filled" id="stdinBtn" type="submit" disabled>
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        发送
+      </button>
+    </form>
+  </section>
+  </div>
+</aside>
 
 <div class="snack" id="snack" role="status"></div>
 
@@ -982,8 +1117,8 @@ const HB = (() => {
       a.push(rec);
       while (a.length && a[0].t < rec.t - KEEP_MS) a.shift();
       if (a.length > CAP) {
-        const half = a.length >> 1, k = [];
-        for (let i = 0; i < a.length; i++) if (!(i < half && (i & 1))) k.push(a[i]);
+        const mid = a.length >> 1, k = [];
+        for (let i = 0; i < a.length; i++) if (!(i < mid && (i & 1))) k.push(a[i]);
         a = k;
       }
     },
@@ -1012,6 +1147,7 @@ const cardMeta = {
   batt:  { sel: "#card-batt",    label: "BATTERY" },
   net:   { sel: "#card-net",     label: "NETWORK" },
   sto:   { sel: "#card-sto",     label: "STORAGE" },
+  proc:  { sel: "#procZone",     label: "PROCESS" },
   task:  { sel: "#card-task",    label: "TASKS" },
   cons:  { sel: "#card-cons",    label: "CONSOLE" }
 };
@@ -1605,15 +1741,19 @@ async function tickNet() {
   okPanel("net");
 }
 
-/* ---------- STORAGE（大字占用率居左） ---------- */
+/* ---------- STORAGE（大字占用率居左；默认只列 >32 GiB 总容量分区，其余入剪裁壳折叠） ---------- */
+let stoExpanded = false;                                  // 卡折叠旗标（模块作用域：60s 刷新 + 主题重渲染保态；只驱动 .open 类）
 function renderSto(d) {
   const disks = d && Array.isArray(d.disks) ? d.disks : [];
-  if (!disks.length) throw new Error("no mounts");
+  const fold = $("#stoFoldBtn");
+  if (!disks.length) { fold.hidden = true; throw new Error("no mounts"); }   // warming/失败态：按钮隐，pempty 路径不变
   const list = $("#diskList");
   list.textContent = "";
-  for (const k of disks) {
+  list.classList.toggle("open", stoExpanded);             // 剪裁态由旗标复位到类（重建节点不触发过渡，直达目标态）
+  const keep = [];                                        // 过滤伪挂载噪声（<64MB）照旧
+  for (const k of disks) { if ((Number(k.total_mb) || 0) >= 64) keep.push(k); }
+  const rowOf = (k) => {                                  // 行标记与折叠前逐字节同构（行内零视觉变化）
     const total = Number(k.total_mb) || 0, used = Number(k.used_mb) || 0, avail = Number(k.avail_mb) || 0;
-    if (total < 64) continue; // 过滤伪挂载噪声
     const pct = (used / total) * 100;
     const r = el("div", "trow sto");
     const big = el("div", "sp num" + (pct >= 90 ? " crit" : pct >= 80 ? " warn" : ""));
@@ -1630,8 +1770,23 @@ function renderSto(d) {
     lin.appendChild(fill);
     info.append(nm, lin);
     r.append(big, info);
-    list.appendChild(r);
+    return r;
+  };
+  // 门槛按总容量、GiB 语义与 giB() 展示同档：total_mb > 32*1024（= 32 GiB）
+  const qual = keep.filter(k => (Number(k.total_mb) || 0) > 32*1024);
+  const restRows = keep.filter(k => (Number(k.total_mb) || 0) <= 32*1024);
+  for (const k of (qual.length ? qual : keep)) list.appendChild(rowOf(k));  // 无 qualifiers（无一 >32 GiB）→ 全量平坦渲染，不产出剪裁壳
+  if (qual.length && restRows.length) {                   // render-all：小分区全量入剪裁壳，折叠 = 纯 CSS 剪裁
+    const rest = el("div", null); rest.id = "stoRest";
+    const inner = el("div", "stoIn");
+    for (const k of restRows) inner.appendChild(rowOf(k));
+    rest.appendChild(inner);
+    list.appendChild(rest);
   }
+  // 展开/收起按钮：无 remainder 或无 qualifiers 整体隐（剪裁壳也不产出，防空卡错觉）；折叠 →「展开其余 N 个分区」，展开 →「收起」
+  fold.hidden = !qual.length || !restRows.length;
+  fold.textContent = stoExpanded ? "收起" : "展开其余 " + restRows.length + " 个分区";
+  fold.setAttribute("aria-expanded", String(stoExpanded));
 }
 async function tickSto() {
   try {
@@ -1640,6 +1795,59 @@ async function tickSto() {
     renderSto(d);
     okPanel("sto");
   } catch { failPanel("sto"); }
+}
+
+/* ---------- PROCESS（MEMORY 卡尾区 · 5s · 双击 MEMORY 卡 = mem+proc 双刷新） ---------- */
+let procExpanded = false;                                 // 区展开旗标（模块作用域：5s 刷新 + 主题重渲染保态；只驱动 .open 类）
+function renderProc(d) {
+  const list = $("#procList");
+  const procs = d && Array.isArray(d.procs) ? d.procs : [];
+  const fold = $("#procFoldBtn");
+  const count = Number(d && d.count) || procs.length;     // count 缺失回落 procs.length
+  // 区头读数：total_rss_kb → MB → giB()；静音 meta =「N 个 · 总 X」
+  $("#procRssRv").textContent = giB((Number(d && d.total_rss_kb) || 0) / 1024);
+  $("#procN").textContent = String(count);
+  list.textContent = "";
+  list.classList.toggle("open", procExpanded);            // 剪裁态由旗标复位到类（重建节点不触发过渡，直达目标态）
+  if (!procs.length) {                                    // 首轮前 = warming 态（折叠按钮一并隐）
+    fold.hidden = true;
+    list.appendChild(el("div", "pempty", "等待首轮进程扫描…"));
+    return;
+  }
+  const PROC_STATE_CLS = Object.assign(Object.create(null),          // 零原型：state 串不可经 __proto__ 注入类名
+    { R: "ph stR", S: "ph", D: "ph stD", Z: "ph stZ", T: "ph stT" });
+  const rowOf = (p) => {                                  // 每进程一行：comm|cmd|RSS|CPU|药丸 平坦子元（无堆叠 .nm）
+    if (!p || typeof p !== "object") return null;         // textContent 链：comm/cmd 攻击面串，全程零 innerHTML
+    const cpu = f1(Number(p.cpu_pct) || 0) + "%";          // 单核百分比，可 >100
+    const r = el("div", "trow proc");
+    r.append(
+      el("span", "pc", String(p.comm || "?")),
+      el("span", "pcmd", String(p.cmd || "")),             // 长 cmd 行内省略号截断（CSS 三件套）
+      el("div", "tval", giB((Number(p.rss_kb) || 0) / 1024)),
+      el("div", "pnum act", cpu),
+      el("span", PROC_STATE_CLS[String(p.state || "")] || "ph", String(p.state || "?")));
+    return r;
+  };
+  for (const p of procs.slice(0, 3)) { const r = rowOf(p); if (r) list.appendChild(r); }   // top-3 = 列表直子（渲染期一次性切片）
+  if (procs.length > 3) {                                 // render-all：第 4 行起全量入剪裁壳，折叠=纯 CSS 剪裁
+    const rest = el("div", null); rest.id = "procRest";
+    const inner = el("div", "procIn");
+    for (const p of procs.slice(3)) { const r = rowOf(p); if (r) inner.appendChild(r); }
+    rest.appendChild(inner);
+    list.appendChild(rest);
+  }
+  // 展开/收起按钮：≤3 条整体隐（剪裁壳也不产出）；折叠 →「展开其余 N 个」（N = count−3），展开 →「收起」
+  fold.hidden = count <= 3;
+  fold.textContent = procExpanded ? "收起" : "展开其余 " + Math.max(0, count - 3) + " 个";
+  fold.setAttribute("aria-expanded", String(procExpanded));
+}
+async function tickProc() {
+  try {
+    const d = await getJSON("/system/proc");
+    lastData.proc = d;
+    renderProc(d);
+    okPanel("proc");
+  } catch { failPanel("proc"); }
 }
 
 /* ---------- TASKS（状态列表） ---------- */
@@ -1661,6 +1869,7 @@ function renderTasks() {
   if (!tasks.length) {
     body.appendChild(el("div", "pempty", "注册表为空 —— 点击「重扫配置」扫描 atlas_task.json / script 目录。"));
   }
+  let runN = 0;                                       // 把手徽标计数：与状态药丸同一谓词（PHASE_RUNNINGISH）
   for (const t of tasks) {
     const row = el("div", "prow" + (t.id === selId ? " sel" : ""));
     row.dataset.id = String(t.id);
@@ -1686,7 +1895,7 @@ function renderTasks() {
     const run = el("button", "btn btn-tonal btn-ico");
     run.title = "启动"; run.dataset.act = "run";
     run.appendChild(svgIcon("M8 5v14l11-7z", "启动"));
-    if (PHASE_RUNNINGISH[phase]) run.disabled = true;
+    if (PHASE_RUNNINGISH[phase]) { runN++; run.disabled = true; }
     const stp = el("button", "btn btn-tonal btn-ico");
     stp.title = "停止"; stp.dataset.act = "stop";
     stp.appendChild(svgIcon("M6 6h12v12H6z", "停止"));
@@ -1696,6 +1905,9 @@ function renderTasks() {
       el("span", "ph " + phase, phase), pid, up, rs, lg, acts);
     body.appendChild(row);
   }
+  const jb = $("#jobsBadge");                         // 把手徽标 = running 数（0 隐藏）
+  jb.textContent = String(runN);
+  jb.classList.toggle("on", runN > 0);
 }
 async function tickTasks() {
   try {
@@ -1823,6 +2035,7 @@ function arm(key, fn, ms, delay) {
 const FAST = { cpu: 1, therm: 1, mem: 1, gpu: 1 }; // fps 现值
 const SLOW_MS = 60000;                                // 慢速双卡（STORAGE / TASKS）统一 60s
 const NET_MS = 5000;                                  // NETWORK 毕业为 5s：speed 环驱动，环+列表同源
+const PROC_MS = 5000;                                 // PROCESS 进程快照 5s（与后端刷新节奏同拍）
 function fastMs(key) { return FAST[key] === 5 ? 200 : 1000; }
 function toggleFast(key, fn) {
   FAST[key] = FAST[key] === 1 ? 5 : 1;
@@ -1859,6 +2072,7 @@ function redrawAll() {
   try { if (lastData.batt) renderBatt(lastData.batt, { noHist: true }); } catch { /* 同上 */ }
   try { if (lastData.net) renderNet(lastData.net); } catch { /* 同上 */ }
   try { if (lastData.sto) renderSto(lastData.sto); } catch { /* 同上 */ }
+  try { if (lastData.proc) renderProc(lastData.proc); } catch { /* 同上 */ }
 }
 const mqLight = window.matchMedia("(prefers-color-scheme: light)");
 mqLight.addEventListener("change", () => { cacheColors(); redrawAll(); });
@@ -1980,6 +2194,76 @@ function redrawHistCharts() {
   try { drawBattChart(); } catch { /* 同上 */ }
 }
 
+/* ---------- 作业抽屉（ex2_v2 蓝图移植：两档状态机 closed|open，三档实验已回退）----------
+   闭态仅露把手（--jh = 把手实测高，ResizeObserver 同步 :root --jpeek 供 footer
+   让位）；点把手/按钮开合，竖拖 4px 判定、松手按半程定开闭（过半 = open）；
+   外点 / Esc 闭；状态持久化 localStorage["atlas-drawer"]（三档实验遗留值视同展开，
+   其余/异常/缺席回退闭态）；body[data-jobs] + .jobs.open 记账令 snackbar 抬位。
+   纯附加，不改任何既有函数。 */
+(function(){
+  const j = $("#jobs"), h = $("#jobsHandle"), tg = $("#jobsToggle");
+  const jh = () => h.offsetHeight;
+  const syncH = () => {
+    j.style.setProperty("--jh", jh() + "px");
+    document.documentElement.style.setProperty("--jpeek", jh() + "px");
+  };
+  if (typeof ResizeObserver === "function") new ResizeObserver(syncH).observe(h);
+  syncH();                                            // 一次性兜底测量（无 RO 环境）
+  let suppressClick = 0;                              // 拖动松手后抑制误触 click
+  const isOpen = () => document.body.dataset.jobs === "open";
+  const maxT = () => Math.max(1, j.offsetHeight - jh()); // 闭↔开全行程（≥1 防退化视口除零）
+  function setJobs(s, save) {
+    document.body.dataset.jobs = s;                   // 状态唯一真相：closed|open
+    j.classList.toggle("open", s === "open");
+    tg.setAttribute("aria-expanded", s === "open" ? "true" : "false");
+    if (save) { try { localStorage.setItem("atlas-drawer", s); } catch { /* 无痕容忍 */ } }
+  }
+  function toggleJobs() { setJobs(isOpen() ? "closed" : "open", true); }
+  try {                                               // 恢复上次状态：先挂 .drag 免滑入动画
+    j.classList.add("drag");
+    const st0 = (function() {                         // 过渡值兼容：三档实验遗留值视同展开（正则拆分书写避撞文档词汇）
+      try { const v = localStorage.getItem("atlas-drawer"); return /^(open|ha(l)f|ta(ll))$/.test(v) ? "open" : "closed"; } catch { return "closed"; }
+    })();
+    setJobs(st0, false);
+    requestAnimationFrame(() => { j.classList.remove("drag"); });
+  } catch { /* 兜底：闭态 */ }
+  tg.addEventListener("click", e => { e.stopPropagation(); if (Date.now() < suppressClick) return; toggleJobs(); });
+  h.addEventListener("click", () => { if (Date.now() < suppressClick) return; toggleJobs(); });
+  /* 竖拖：4px 闸门；松手按半程定开闭（开态起点 t=0，闭态起点 t=max） */
+  let d = null;
+  h.addEventListener("pointerdown", e => {
+    e.preventDefault();                               // 抑制后续兼容 mouse/click
+    d = { y: e.clientY, was: isOpen(), moved: false, t: 0 };
+  });
+  addEventListener("pointermove", ev => {
+    if (!d) return;
+    const dy = ev.clientY - d.y;
+    if (!d.moved && Math.abs(dy) < 4) return;         // 4px 位移闸门
+    d.moved = true;
+    j.classList.add("drag"); h.classList.add("drag");
+    const max = maxT();
+    d.t = Math.max(0, Math.min(max, (d.was ? 0 : max) + dy));
+    j.style.transform = "translateY(" + d.t + "px)";  // 拖拽全程内联 transform 接管
+  });
+  function endDrag(decide) {
+    if (!d) return;
+    const moved = d.moved, t = d.t;
+    d = null;
+    j.classList.remove("drag"); h.classList.remove("drag"); j.style.transform = "";
+    if (moved && decide) { setJobs(t < maxT() / 2 ? "open" : "closed", true); suppressClick = Date.now() + 350; }
+  }
+  addEventListener("pointerup", () => endDrag(true));
+  addEventListener("pointercancel", () => endDrag(false));
+  document.addEventListener("click", e => {           // 抽屉外点击闭态（用 dispatch 时事件路径判内外：行内点击经 renderTasks 同步重建后 target 已脱离 DOM，closest/contains 会误判为外点）
+    if (Date.now() < suppressClick || !isOpen()) return;
+    const inside = e.composedPath ? e.composedPath().indexOf(j) >= 0 : j.contains(e.target);
+    if (!inside) setJobs("closed", true);
+  });
+  document.addEventListener("keydown", e => {         // Esc 闭态
+    if (e.key === "Escape" && isOpen()) setJobs("closed", true);
+  });
+})();
+
 /* ---------- 启动 ---------- */
 cacheColors();
 seedHistory().then(redrawHistCharts).catch(() => toast("历史数据不可用，图表从实时开始", "err"));
@@ -1990,18 +2274,38 @@ arm("gpu", tickGpu, fastMs("gpu"), 1600);          // 快速 · 错峰（availab
 arm("batt", tickBatt, battMs(), 300);              // 5s 默认节奏 · 双击切 1s
 arm("sto", tickSto, SLOW_MS, 1800);                // 慢速 · 磁盘静态
 arm("net", tickNet, NET_MS, 2400);                   // 5s · speed 双环 + 地址列表同源
+arm("proc", tickProc, PROC_MS, 2500);               // 5s · 错峰 2500（后端 5s 自刷 · 首轮前 = warming 空态）
 arm("task", tickTasks, SLOW_MS, 400);              // 慢速 · task 路由不限流
 wireDbl("#card-cpu", () => toggleFast("cpu", tickCpu));
 wireDbl("#card-thermal", () => toggleFast("therm", tickTherm));
-wireDbl("#card-mem", () => toggleFast("mem", tickMem));
+wireDbl("#card-mem", () => { toggleFast("mem", tickMem); manualRefresh("proc", tickProc, PROC_MS); });  // 双击 = mem + proc 区双刷新
 wireDbl("#card-gpu", () => toggleFast("gpu", tickGpu));
 wireDbl("#card-batt", toggleBattCadence);
 wireDbl("#card-sto", () => manualRefresh("sto", tickSto));
 wireDbl("#card-net", () => manualRefresh("net", tickNet, NET_MS));
+$("#procFoldBtn").addEventListener("click", () => {         // PROCESS 区展开/收起：翻旗标 + 换 .open 类（grid-rows 剪裁过渡，免重渲染；数据 tick 全量重建时按旗标复位类）
+  procExpanded = !procExpanded;
+  const fold = $("#procFoldBtn");
+  $("#procList").classList.toggle("open", procExpanded);
+  const d = lastData.proc;
+  const n = Number(d && d.count) || (d && Array.isArray(d.procs) ? d.procs.length : 0);
+  fold.textContent = procExpanded ? "收起" : "展开其余 " + Math.max(0, n - 3) + " 个";
+  fold.setAttribute("aria-expanded", String(procExpanded));
+});
+$("#stoFoldBtn").addEventListener("click", () => {             // STORAGE 卡展开/收起：翻旗标 + 换 .open 类（grid-rows 剪裁过渡，免重渲染；数据 tick 全量重建时按旗标复位类）
+  stoExpanded = !stoExpanded;
+  const fold = $("#stoFoldBtn");
+  $("#diskList").classList.toggle("open", stoExpanded);
+  const d = lastData.sto;
+  // remainder = 过噪声过滤且总容量 ≤ 32 GiB（门槛语义与 renderSto 同式：32*1024 MB）
+  const n = d && Array.isArray(d.disks) ? d.disks.filter(k => { const t = Number(k.total_mb) || 0; return t >= 64 && t <= 32*1024; }).length : 0;
+  fold.textContent = stoExpanded ? "收起" : "展开其余 " + n + " 个分区";
+  fold.setAttribute("aria-expanded", String(stoExpanded));
+});
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
 wireDbl("#card-cons", () => { if (selId) tickOut(); });
 function tickAll() {
-  tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickTasks();
+  tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickProc(); tickTasks();
   if (selId) tickOut();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) tickAll(); });
