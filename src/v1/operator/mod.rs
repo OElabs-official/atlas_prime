@@ -9,12 +9,13 @@
 //! ```ignore
 //! use crate::v1::operator::Operator;
 //!
-//! Operator::start().ok();              // 双回路线程：全域采样（首轮立即，2 分钟/轮）
-//!                                      // + 网卡速度（1Hz）（幂等，二次调用 Err）
+//! Operator::start().ok();              // 三回路线程：全域采样（首轮立即，2 分钟/轮）
+//!                                      // + 网卡速度（1Hz）+ 进程快照（5s）
+//!                                      // （幂等，二次调用 Err）
 //! let n = Operator::sample_now().ok(); // 手动补一轮全域采样（返回写入行数）
 //! let v = Operator::net_speeds();      // 网速缓存读（分组）(组名, rx_bps, tx_bps)，
 //!                                      // 序 [wifi, cellular, 其余升序]，不碰 /proc
-//! Operator::stop();                    // 置标志 + Notify 即时唤醒，两条回路当前轮收尾即停
+//! Operator::stop();                    // 置标志 + Notify 即时唤醒，三条回路当前轮收尾即停
 //! ```
 //!
 //! # 职责
@@ -42,7 +43,12 @@
 //!   `cellular.tx_bps`；打戳机制与全域轮相同；db 侧按 kind 分档修剪，net ≈8h）。
 //!   源链（直读→su 桥→sysfs→netlink）
 //!   整拍全灭时**缓存冻结**（stale 照旧暴露、基线保留），连败计满
-//!   [`NET_FAIL_STREAK`] 拍单行 stderr 示警一次（整串静默，一拍成功即重置）。
+//!   [`NET_FAIL_STREAK`] 拍单行 stderr 示警一次（整串静默，一拍成功即重置）；
+//! - [`run_proc_meter`]：**独立的 5s 进程快照回路**（第三条回路，同一停止唤醒、
+//!   同一共享 runtime）：每轮把 [`proc::scan`] 送上 spawn_blocking（/proc 批量
+//!   小文件读），产物整体刷新 [`proc`] 缓存（web `/system/proc` 纯缓存读），
+//!   成功轮日志静默。**不落库**（本域只观测不存储），亦不牵动
+//!   1Hz/120s 两回路；扫描任务失败 = 缓存冻结（warming 或旧拍照旧暴露）。
 //!
 //! 共享 runtime、连接与 WAL 并发模型见 [`crate::v1::db`] 模块文档；采样线程即跑在其上。
 
@@ -55,7 +61,7 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::v1::db::{self, Db, DbError, Record};
 use crate::v1::notify;
-use crate::v1::system::{battery, cpu, disk, gpu, mem, network, thermal};
+use crate::v1::system::{battery, cpu, disk, gpu, mem, network, proc, thermal};
 
 mod batterywatch;
 mod memwatch;
@@ -65,6 +71,9 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(120);
 
 /// 网卡速度回路采样周期（1Hz；db 侧 net 按 28800 轮 ≈ 8h 修剪）
 pub const NET_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 进程快照回路采样周期（5s；纯缓存喂 web，不落库）
+pub const PROC_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 测速源链（直读→su 桥→sysfs→netlink）连续整链失败多少拍后 stderr 示警
 /// 一次（每条失败连串至多一条；成功一拍即清零）。缓存自失败首拍起就冻结，
@@ -101,7 +110,8 @@ pub struct Operator;
 
 impl Operator {
     /// 启动采样线程：全域回路（首轮立即，其后每 [`SAMPLE_INTERVAL`]）+
-    /// 网卡速度回路（每 [`NET_SAMPLE_INTERVAL`]）并行跑在同一共享 runtime 上。
+    /// 网卡速度回路（每 [`NET_SAMPLE_INTERVAL`]）+ 进程快照回路（每
+    /// [`PROC_SAMPLE_INTERVAL`]）并行跑在同一共享 runtime 上。
     /// 幂等：重复调用返回 [`OperatorError::Started`]。
     pub fn start() -> Result<(), OperatorError> {
         static HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
@@ -110,7 +120,9 @@ impl Operator {
         }
         stop_flag().store(false, Ordering::SeqCst);
         let h = std::thread::spawn(|| {
-            let _ = db::rt().block_on(async { tokio::join!(run_sampler(), run_net_meter()) });
+            let _ = db::rt().block_on(async {
+                tokio::join!(run_sampler(), run_net_meter(), run_proc_meter())
+            });
         });
         HANDLE
             .get_or_init(|| Mutex::new(None))
@@ -232,6 +244,32 @@ async fn run_net_meter() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// 5s 进程快照回路主体（第三条回路，同一 runtime、同一停止唤醒）：每轮
+/// [`proc::scan`] 上 [`tokio::task::spawn_blocking`]（/proc 批量小文件读），
+/// 产物整体刷新 [`proc`] 缓存（5s 节奏，成功轮日志静默）。
+/// **绝不碰 sqlite**（本域只观测不存储）；扫描任务失败（panic/cancel）
+/// 缓存冻结——warming 或旧拍照旧暴露，下拍照常再试。等待阶段同为 sleep
+/// 与停止 Notify 的 select 竞争（首拍 interval 即刻触发，预热窗 = 启动即扫）。
+async fn run_proc_meter() {
+    let mut tick = tokio::time::interval(PROC_SAMPLE_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let mut notified = std::pin::pin!(stop_notify().notified());
+        let _ = notified.as_mut().enable();
+        tokio::select! {
+            _ = notified.as_mut() => { if stop_flag().load(Ordering::SeqCst) { break; } }
+            _ = tick.tick() => {}
+        }
+        if stop_flag().load(Ordering::SeqCst) {
+            break;
+        }
+        match tokio::task::spawn_blocking(proc::scan).await {
+            Ok(snap) => proc::update(snap),
+            Err(e) => eprintln!("atlas: proc 扫描任务失败，缓存冻结: {e}"),
         }
     }
 }

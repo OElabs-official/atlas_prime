@@ -13,7 +13,7 @@
 //!   无 root 静默缺席）；su 是唯一子进程例外（1.5s 超时钳），
 //!   仅电池必须经 termux-api CLI。
 //!
-//! 对外接口刻意收窄为九个公开面（调用路径 `crate::v1::system::*`）：
+//! 对外接口刻意收窄为十个公开面（调用路径 `crate::v1::system::*`）：
 //! - [`cpu::freq_ghz`]：各核当前频率（GHz）；
 //! - [`thermal::Temp`]：温度结构体，`Temp::get()` 采集，`温度.类别[索引].0/.1` 取摄氏度/type名；
 //! - [`gpu::Gpu`]：GPU 频率/使用率结构体，`Gpu::get()` 采集（sysfs 直读 → su 桥；
@@ -24,7 +24,9 @@
 //! - [`network::Ip`]：本机地址结构体，`Ip::get()` 按 回环/局域网/公网v4(HTTP回显+DNS TXT)/公网v6 分桶；
 //! - [`network::speed`]：网卡速度计量原语（数据面快照 [`network::speed::snapshot`] +
 //!   分组差分 [`network::speed::Grouper`]；1Hz 节拍归操作器，本模块不自发采样）；
-//! - [`mem::Mem`]：RAM/Swap 用量结构体，`Mem::get()` 采集（单次读 /proc/meminfo）。
+//! - [`mem::Mem`]：RAM/Swap 用量结构体，`Mem::get()` 采集（单次读 /proc/meminfo）；
+//! - [`proc`]：进程快照（`scan()` 现扫 + [`proc::update`]/[`proc::current`] 缓存对；
+//!   5s 节拍归操作器，web 纯缓存读，本域不落库）。
 
 #[allow(dead_code)]
 pub mod battery;
@@ -37,6 +39,7 @@ pub mod gpu;
 pub mod mem;
 #[allow(dead_code)]
 pub mod network;
+pub mod proc;
 #[allow(dead_code)]
 pub mod thermal;
 

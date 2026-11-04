@@ -78,3 +78,12 @@ GPU 域与测速 ② 级同走 su 桥（`su -c` 单条 for 循环整抓、`@@@�
 - 频率是锚：两源频率俱缺 → `available:false`。**无 root 卡片自动隐藏（前端契约）**，静默缺席不告警；
 - 出口：web `GET /system/gpu`（普通桶，不可用亦 200）；落库 kind=`gpu`（`load_pct`/`freq_mhz`，仅 Some 值写行，2min/轮）；
 - 与 thermal 的 `temp.gpu.N` 区分：那是 gpuss-* 温度（℃），本域是频率（MHz）/使用率（%）——温度≠频率/使用率。
+
+## 6. 进程观测（GET /system/proc）
+
+无 root 下 /proc 按 uid 遮蔽：目录枚举只列本 uid（Termux 自家）进程，本域只呈这一视野——非缺漏，域规则，无 su 桥腿。
+CPU 账走 `/proc/<pid>/stat` 的 utime+stime（comm 可含空格括号，按最后一个 `)` 切野），内核用户时钟 **USER_HZ=100**
+（ticks÷100=CPU 秒），跨拍差分 `Δticks÷USER_HZ÷Δ墙钟秒×100`（首见/pid 复用=0.0，基线每拍整表重建）。
+节拍：操作器第三条回路 **5s 一轮**，`spawn_blocking` 现扫（/proc 批量小文件读），产物整拍换入缓存——
+**不落库**（只观测不存储，与 1Hz/120s 两回路互不掺和）。出口：web `GET /system/proc` 纯缓存读、永 200、`procs` 按 rss 降序；
+首轮前 `reason:"warming"`。实现见 `system/proc.rs`。
