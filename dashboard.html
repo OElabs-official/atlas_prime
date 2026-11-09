@@ -38,9 +38,34 @@
     GET  /task                  [{id,name,group,command,phase,pid,started_at,
                                  uptime_ms,restarts,last_exit,log_lines,
                                  log_dropped}]
-    POST /task/update · POST /task/run/{id} · POST /task/stop/{id}
+     POST /task/update · POST /task/run/{id} · POST /task/stop/{id}（run/stop 保留端点、
+                                    本盘不再行内暴露：监督手动启停仅 CLI/autostart）
     GET  /task/output/{id}      [{at:{secs,nanos},stream,text}]
-    POST /task/input/{id}       {"line":"..."}
+     POST /task/input/{id}       {"line":"..."}
+      POST /tui/session           body {"id":"<任务id>"} → 200 {"token":"<32hex>",
+                                   "mode":"spawn"|"attach"}（令牌绑定该任务、一次性，每次
+                                   接入/启动重新领取；该 id 已有活会话 → attach，不查容量
+                                   不 spawn）；
+                                   400 {"error":"bad_request"} = 缺 id ｜
+                                   404 {"error":"unknown_task"} = 任务不存在（attach 撞上会话刚被回收亦 404）｜
+                                    503 {"error":"busy"} = 会话已满（busy 只可能出现在 spawn 意图）
+      WS   /tui/ws?token=&cols=&rows=  CONSOLE 终端通道：二进制帧 = PTY 字节双向；
+                                   文本 JSON 控制帧——发 {"type":"resize",...}/{"type":"ping"}，
+                                   收 {"type":"pong"}/{"type":"exit","code":N|null}；attach
+                                   连接服务端先回放环形缓冲（裸二进制帧、与实时流同一渲染
+                                   路径，前端零特判）；多窗口 = 镜像共享（同看同输入）
+    POST /tui/kill               body {"id":"<任务id>"} → 200 {"killed":bool}（幂等；服务端
+                                   向全部镜像窗口广播 exit 帧再 Close）
+    GET  /tui/sessions           → {"sessions":[{"id":"<任务id>","attached":N}]}（仅活会话；
+                                   tickTasks 并采 → tuiIds，驱动药丸叠加 + 按钮矩阵 + 停止键）
+     GET  /vendor/*              同源静态资源：xterm.css / xterm.js /
+                                  addon-unicode-graphemes.js / addon-fit.js /
+                                    addon-webgl.js（UMD 全局；CONSOLE 卡 = xterm.js
+                                     交互式 PTY 终端，会话持久化：进程生命周期 = 服务端会话、
+                                     与页面无关——点 TASKS 行 = 切视图且服务端有会话且本 tab
+                                     未接入即自动接入（回放直连）；无会话才按「启动进程」；
+                                     「停止」= POST /tui/kill 进程级击杀（绑定保留）；
+                                     按任务多会话，不再轮询 /task/output）
     GET  /db/history?kind=[&key=][&limit=]  sqlite 历史行，按时间升序
                                   [{t:RFC3339 字符串,k:键,v:数值}]（t=Date.parse
                                   直吃）；kind=battery|mem|
@@ -58,7 +83,7 @@
     慢速卡 STORAGE / TASKS：固定 60s 轮询，双击 = 一次手动立即刷新。
     NETWORK：5s 节奏拉 /system/cli/network（环+列表同源）；双击 = 一次立即抓取
     （重排下一轮 5s）。IP 地址双击复制不上抛为整卡刷新。
-    任务控制台输出固定 2s 自动刷新（可暂停），不参与双击语义。
+     CONSOLE = 交互式 PTY 终端（绑定 TASKS 任务、单活会话），不参与轮询；双击 = 一次重新 fit。
     页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
    失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
    30s 节流一条；明暗主题跟随 OS（prefers-color-scheme，无手动开关，matchMedia
@@ -557,12 +582,12 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
    ⑤ 任务表（行 = 自绘表面 hover 8%；选中 = 色调 wash + 勾选，无 accent 描边）
    ============================================================ */
 .ptable{margin-top:var(--md-sys-space75)}
-.phead{display:grid;grid-template-columns:1.7fr .8fr 88px 60px 88px 56px 72px 132px;gap:var(--md-sys-space100);
+.phead{display:grid;grid-template-columns:1.7fr .8fr 88px 60px 88px 56px 72px;gap:var(--md-sys-space100);
   align-items:center;padding:0 var(--md-sys-space75) var(--md-sys-space50);
   border-bottom:1px solid var(--md-sys-color-outline-variant);
   font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant)}
 .pbody{position:relative}
-.prow{position:relative;display:grid;grid-template-columns:1.7fr .8fr 88px 60px 88px 56px 72px 132px;gap:var(--md-sys-space100);
+.prow{position:relative;display:grid;grid-template-columns:1.7fr .8fr 88px 60px 88px 56px 72px;gap:var(--md-sys-space100);
   align-items:center;padding:var(--md-sys-space75);border-bottom:1px solid var(--md-sys-color-outline-variant);cursor:pointer;
   border-radius:var(--md-sys-shape-corner-small)}
 .prow::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:0;border-radius:inherit;
@@ -583,7 +608,6 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .pnum{font-family:var(--d4-mono);font-size:var(--md-sys-typescale-body-small-size);text-align:right;font-variant-numeric:tabular-nums;
   color:var(--md-sys-color-on-surface-variant)}
 .pnum.act{color:var(--md-sys-color-on-surface)}
-.pacts{display:flex;gap:var(--md-sys-space50);justify-content:flex-end}
 .ph{display:inline-block;font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-small-size);font-weight:500;
   text-align:center;padding:2px var(--md-sys-space50);border-radius:var(--md-sys-shape-corner-extra-small);white-space:nowrap;
   background:var(--md-sys-color-surface-container-highest);color:var(--md-sys-color-on-surface-variant)}
@@ -601,30 +625,40 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
   font-size:var(--md-sys-typescale-body-small-size)}
 
 /* ============================================================
-   ⑥ 输出控制台（.log/.ev 家族；日志区保持可选中）
+   ⑥ CONSOLE 终端（xterm.js 宿主 + 移动按键条 + 全屏 + 触摸滑动滚轮；终端区保持可选中）
    ============================================================ */
-.log{max-height:400px;min-height:180px;overflow-y:auto;display:flex;flex-direction:column;user-select:text;-webkit-user-select:text;
-  scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--md-sys-color-on-surface-variant) var(--md-sys-state-disabled-opacity),transparent) transparent}
-.ev{position:relative;display:grid;grid-template-columns:74px 52px 1fr;gap:var(--md-sys-space100);align-items:baseline;
-  padding:var(--md-sys-space100) var(--md-sys-space75);border-bottom:1px solid var(--md-sys-color-outline-variant)}
-.ev::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:0;
-  background:color-mix(in srgb,var(--md-sys-color-on-surface) var(--md-sys-state-hover-opacity),transparent)}
-.ev:hover::before{opacity:1}
-.ev>*{position:relative;z-index:1}
-.ev time{font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant)}
-.ev .sev{font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-small-size);text-align:center;
-  padding:1px var(--md-sys-space25);border-radius:var(--md-sys-shape-corner-extra-small);border:1px solid currentColor}
-.sev-out{color:var(--md-sys-color-on-surface-variant)}
-.sev-err{color:var(--md-sys-color-error)}
-.sev-in{color:var(--d4-b3)}
-.ev p{font-size:var(--md-sys-typescale-body-medium-size);color:var(--md-sys-color-on-surface-variant);
-  font-family:var(--d4-mono);white-space:pre-wrap;word-break:break-all}
-.stdin{display:flex;gap:var(--md-sys-space100);margin-top:var(--md-sys-space150)}
-.fld{flex:1;min-width:0;height:40px;padding:0 var(--md-sys-space150);user-select:text;-webkit-user-select:text;
-  background:var(--md-sys-color-surface-container);color:var(--md-sys-color-on-surface);
-  border:1px solid var(--md-sys-color-outline-variant);border-radius:var(--md-sys-shape-corner-extra-small);
-  font-family:var(--d4-mono);font-size:var(--md-sys-typescale-body-medium-size)}
-.fld:focus-visible{outline:var(--md-sys-state-focus-thickness) solid var(--md-sys-color-secondary);outline-offset:var(--md-sys-state-focus-outer-offset)}
+.termhost{min-height:220px;margin-top:var(--md-sys-space50);padding:var(--md-sys-space100);
+  user-select:text;-webkit-user-select:text;
+  background:var(--md-sys-color-surface-container);border-radius:var(--md-sys-shape-corner-small);overflow:hidden}
+/* 触摸滑动滚动（前提件）：xterm 根元素独占竖轴 —— pan-x = 横移仍交浏览器（抽屉手势不受影响）、
+   pinch-zoom 保留双指缩放原行为；缺省 auto 时 Chrome 把竖划判为 page-pan，touchmove 变
+   touchcancel/被吞 → 下方识别器（wireTermSwipe）收不到序列，yazi 与缓冲区两分支全失效。
+   作用域只到 .xterm 本体：卡盒 padding、按键条、抽屉把手照旧随页面滚动 */
+.termhost .xterm{touch-action:pan-x pinch-zoom}
+.conshint{padding:var(--md-sys-space300);text-align:center;color:var(--md-sys-color-on-surface-variant);
+  font-size:var(--md-sys-typescale-body-small-size)}
+#consKb{display:flex;flex-wrap:wrap;gap:var(--md-sys-space50);margin-top:var(--md-sys-space100)}
+#consKb button{min-width:34px;height:30px;padding:0 var(--md-sys-space100);cursor:pointer;
+  background:transparent;color:var(--md-sys-color-on-surface-variant);
+  border:1px solid var(--md-sys-color-outline-variant);border-radius:var(--md-sys-shape-corner-small);
+  font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-medium-size);
+  line-height:var(--md-sys-typescale-label-medium-line-height);
+  transition:background var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard)}
+#consKb button:hover{background:color-mix(in srgb,var(--md-sys-color-on-surface) var(--md-sys-state-hover-opacity),transparent)}
+#consKb button:active{background:color-mix(in srgb,var(--md-sys-color-on-surface) var(--md-sys-state-pressed-opacity),transparent)}
+#consKb button:focus-visible{outline:var(--md-sys-state-focus-thickness) solid var(--md-sys-color-secondary);outline-offset:var(--md-sys-state-focus-outer-offset)}
+/* 全屏：原生 Fullscreen API（:fullscreen）+ CSS 覆盖层回退（.cons-fs）。
+   抽屉 transform 会劫持 position:fixed 包含块 → body.consFs 在回退期中和抽屉 transform */
+#card-cons:fullscreen{padding:var(--md-sys-space150);background:var(--md-sys-color-surface-container);
+  display:flex;flex-direction:column;max-height:none;overflow:hidden}
+#card-cons:fullscreen .ch{flex:none}
+#card-cons:fullscreen .termhost{flex:1;min-height:calc(100vh - 150px);min-height:calc(100dvh - 150px)}
+#card-cons:fullscreen .consKb{flex:none}
+.jobs .card.cons-fs{position:fixed;inset:0;z-index:100;margin:0;max-height:none;overflow:hidden;
+  padding:var(--md-sys-space150);background:var(--md-sys-color-surface-container);display:flex;flex-direction:column}
+.jobs .card.cons-fs .ch{flex:none}
+.jobs .card.cons-fs .termhost{flex:1;min-height:calc(100vh - 150px);min-height:calc(100dvh - 150px)}
+body.consFs .jobs{transform:none}
 
 /* Snackbar */
 .snack{position:fixed;left:50%;bottom:var(--md-sys-space300);transform:translate(-50%,24px);z-index:80;
@@ -698,16 +732,15 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 .jobs .card{background:var(--md-sys-color-surface-container);
   box-shadow:inset 0 0 0 1px var(--md-sys-color-outline-variant)}
 .jobs .card+.card{margin-top:var(--md-sys-space100)}
-.jobs .log{max-height:none}
 
 /* ============================================================
    ⑦ 响应式（单列布局下仅保留壳层/表格/表盘适配）+ reduced-motion
    ============================================================ */
 @media(max-width:760px){
   .shell{padding:var(--md-sys-space150) var(--md-sys-space100) var(--md-sys-space400)}
-  .phead,.prow{grid-template-columns:1fr 84px 124px}
-  .phead>*:nth-child(2),.phead>*:nth-child(4),.phead>*:nth-child(5),.phead>*:nth-child(6),.phead>*:nth-child(7),
-  .prow>*:nth-child(2),.prow>*:nth-child(4),.prow>*:nth-child(5),.prow>*:nth-child(6),.prow>*:nth-child(7){display:none}
+  .phead,.prow{grid-template-columns:1fr 84px 124px}   /* 窄屏三列 = 任务名 / 状态药丸 / 日志行（行内启停移除后第 7 列顶上操作位） */
+  .phead>*:nth-child(2),.phead>*:nth-child(4),.phead>*:nth-child(5),.phead>*:nth-child(6),
+  .prow>*:nth-child(2),.prow>*:nth-child(4),.prow>*:nth-child(5),.prow>*:nth-child(6){display:none}
   .gwrap{gap:var(--md-sys-space100)}
   :root{--d4-gauge:130px}
   .gc .gn{font-size:24px}
@@ -722,6 +755,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   .bg-mesh{animation-duration:30s!important}
 }
 </style>
+<link rel="stylesheet" href="/vendor/xterm.css">
 </head>
 <body>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
@@ -847,15 +881,17 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-04.1 -->
+    <!-- rev 2026-11-09.7 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
 
 <!-- ══════════ 作业抽屉（TASKS + CONSOLE 停靠区）—— 蓝图 ex2_v2 bottom-sheet 把手模式：
      两档 closed（露 56px 把手，§3.29 handle）/ open（停靠 50dvh）；点按开合、
-     竖拖过半定开闭（三档 + 幕布实验已就地回退）；两卡 id/class/结构
-     逐字保留，cardMeta/renderTasks/wireDbl/控制台绑定链零改动 ══════════ -->
+     竖拖过半定开闭（三档 + 幕布实验已就地回退）；两卡 id/class
+       逐字保留，cardMeta/renderTasks/wireDbl 绑定不变；CONSOLE 卡 = xterm.js
+       PTY 终端（会话登记 = consSess 按任务多会话，切换视图不杀会话、离页仅脱离
+       ——进程持久直到「停止」/自然退出/守护重启；全屏依赖 setJobsRef 强展开抽屉） ══════════ -->
 <aside class="jobs" id="jobs" aria-label="作业抽屉">
   <div class="jHandle" id="jobsHandle"><div class="handle"></div>
     <button class="jToggle" id="jobsToggle" type="button" aria-controls="jobs" aria-expanded="false">
@@ -871,29 +907,49 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35a7.96 7.96 0 0 0-6.49-2.31A7.99 7.99 0 0 0 4.07 13.6c.42 1.36 1.27 2.57 2.4 3.45l.55-1.6a5.5 5.5 0 0 1 9.05-2.85l-2.2-2.2v5.6h6.5V5.5l-2.72 2.85zM6.07 19.73a7.96 7.96 0 0 0 6.49 2.31A7.99 7.99 0 0 0 19.84 10.4l-.55 1.6a5.5 5.5 0 0 1-9.05 2.85l2.2 2.2v-5.6h-6.5v6.49l2.13-3.81z"/></svg>
         重扫配置</button></span></header>
     <div class="ptable">
-      <div class="phead"><span>任务 / 命令</span><span>分组</span><span>状态</span><span>PID</span><span>运行时长</span><span>重启</span><span>日志行</span><span style="text-align:right">操作</span></div>
+      <div class="phead"><span>任务 / 命令</span><span>分组</span><span>状态</span><span>PID</span><span>运行时长</span><span>重启</span><span>日志行</span></div>
       <div class="pbody" id="taskBody"><div class="pempty">等待 /task 首次响应…</div></div>
     </div>
   </section>
 
-  <!-- ====== CONSOLE：所选任务输出 + stdin（输出 2s 自动刷新不变） ====== -->
+  <!-- ====== CONSOLE：交互式 PTY 终端（xterm.js 操作界面 · 进程持久化会话：进程活着就该直接看，
+         只有没进程才要启动）。点击 TASKS 行 = 切视图，该任务服务端有活会话且本 tab 未接入 →
+         自动接入（回放直连，零特判）；无会话 → 占位，按「启动进程」起新进程；「停止」=
+          POST /tui/kill 进程级击杀（全部镜像窗口收广播 exit 帧自愈）+ 本地清记录、绑定保留
+          · 全屏 · 移动按键条 · 触摸滑动=滚轮（mouse-report 应用收 SGR 翻页，普通 shell 滚 xterm 缓冲）。
+          五态矩阵（无会话/启动中/已接入/已脱离/退出回落）见 CONSOLE 区块头注释 ====== -->
   <section class="card acc-cons" id="card-cons">
     <header class="ch"><h2>CONSOLE</h2><span class="hta" id="consTask">未绑定任务</span>
-      <span class="hctl"><button class="btn btn-text btn-sm" id="autoBtn">暂停自动刷新</button></span></header>
-    <div class="log" id="outLog"><div class="pempty">在上方任务表点击一行以绑定输出流。</div></div>
-    <form class="stdin" id="stdinForm" autocomplete="off">
-      <input class="fld num" id="stdinLine" placeholder="向所选任务 stdin 发送一行（POST /task/input/id）" maxlength="4096">
-      <button class="btn btn-filled" id="stdinBtn" type="submit" disabled>
-        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-        发送
-      </button>
-    </form>
+      <span class="hctl">
+        <button class="btn btn-tonal btn-sm" id="consBtn" type="button" disabled>启动进程</button>
+        <button class="btn btn-text btn-sm" id="consStop" type="button" disabled>停止</button>
+        <button class="btn btn-text btn-sm" id="consFs" type="button" aria-pressed="false">全屏</button>
+      </span></header>
+    <div class="termhost" id="termHost" aria-label="终端区"></div>
+    <div class="consKb" id="consKb">
+      <button type="button" data-k="esc">Esc</button>
+      <button type="button" data-k="ctrlc">^C</button>
+      <button type="button" data-k="ctrld">^D</button>
+      <button type="button" data-k="tab">Tab</button>
+      <button type="button" data-k="shifttab">⇧Tab</button>
+      <button type="button" data-k="left">←</button>
+      <button type="button" data-k="right">→</button>
+      <button type="button" data-k="up">↑</button>
+      <button type="button" data-k="down">↓</button>
+      <button type="button" data-k="pipe">|</button>
+      <button type="button" data-k="tilde">~</button>
+    </div>
   </section>
   </div>
 </aside>
 
 <div class="snack" id="snack" role="status"></div>
 
+<!-- xterm.js UMD 资源（同源 /vendor 服务；加载顺序固定：xterm → unicode-graphemes → fit → webgl） -->
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-unicode-graphemes.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
 <script>
 (() => {
 "use strict";
@@ -1186,8 +1242,7 @@ function fmtTime(st) { // serde SystemTime = {secs, nanos}
 const active = () => !document.hidden;
 let tasks = [];
 let selId = null;
-let autoOn = true;
-let outTimer = null;
+let tuiIds = new Set();  // 服务端活会话 id 集（GET /tui/sessions，tickTasks 并采换代；拉取失败保留旧值静默）
 const lastData = {};     // 主题翻转时按快照重渲染
 
 /* ---------- Snackbar ---------- */
@@ -1852,7 +1907,6 @@ async function tickProc() {
 
 /* ---------- TASKS（状态列表） ---------- */
 const PHASE_RUNNINGISH = { Running: 1, Starting: 1, Stopping: 1 };
-const PHASE_STOPPABLE = { Running: 1, Starting: 1 };
 function svgIcon(pathD, label) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", label ? "ic" : "ck");
@@ -1869,7 +1923,7 @@ function renderTasks() {
   if (!tasks.length) {
     body.appendChild(el("div", "pempty", "注册表为空 —— 点击「重扫配置」扫描 atlas_task.json / script 目录。"));
   }
-  let runN = 0;                                       // 把手徽标计数：与状态药丸同一谓词（PHASE_RUNNINGISH）
+  let runN = 0;                                       // 把手徽标计数：与状态药丸同一谓词（监督运行中 ∨ PTY 会话活）
   for (const t of tasks) {
     const row = el("div", "prow" + (t.id === selId ? " sel" : ""));
     row.dataset.id = String(t.id);
@@ -1881,6 +1935,9 @@ function renderTasks() {
     wrap.appendChild(el("small", null, String(t.id) + " · " + String(t.command || "")));
     nm.append(wrap);
     const phase = String(t.phase || "Idle");
+    const pty = tuiIds.has(t.id);                     // 服务端 PTY 会话存活（/tui/sessions 并采）
+    const live = !!PHASE_RUNNINGISH[phase] || pty;    // 药丸谓词 = 监督运行中 ∨ PTY 会话活 → 一律叠加「运行中」样式与文案
+    if (live) runN++;                                 // 徽标计数 = 与状态药丸同一谓词（与按钮无关）
     const pid = el("div", "pnum" + (t.pid ? " act" : ""), t.pid ? String(t.pid) : "—");
     pid.title = t.started_at && typeof t.started_at === "object" ? "启动于 " + fmtTime(t.started_at) : "";
     const le = t.last_exit && typeof t.last_exit === "object" ? t.last_exit : null;
@@ -1891,18 +1948,9 @@ function renderTasks() {
     const lg = el("div", "pnum", String(Number(t.log_lines) || 0) +
       (Number(t.log_dropped) > 0 ? " ↓" + Number(t.log_dropped) : ""));
     lg.title = "日志行 " + String(t.log_lines || 0) + " · 已丢弃 " + String(t.log_dropped || 0);
-    const acts = el("div", "pacts");
-    const run = el("button", "btn btn-tonal btn-ico");
-    run.title = "启动"; run.dataset.act = "run";
-    run.appendChild(svgIcon("M8 5v14l11-7z", "启动"));
-    if (PHASE_RUNNINGISH[phase]) { runN++; run.disabled = true; }
-    const stp = el("button", "btn btn-tonal btn-ico");
-    stp.title = "停止"; stp.dataset.act = "stop";
-    stp.appendChild(svgIcon("M6 6h12v12H6z", "停止"));
-    if (!PHASE_STOPPABLE[phase]) stp.disabled = true;
-    acts.append(run, stp);
     row.append(nm, el("div", "g", String(t.group || "—")),
-      el("span", "ph " + phase, phase), pid, up, rs, lg, acts);
+      el("span", "ph " + (live && !PHASE_RUNNINGISH[phase] ? "Running" : phase),   // 仅 PTY 会话活（监督 Idle/Exited 等）→ 药丸覆盖为 Running 样式+文案；监督原值兜底
+         live && !PHASE_RUNNINGISH[phase] ? "Running" : phase), pid, up, rs, lg);
     body.appendChild(row);
   }
   const jb = $("#jobsBadge");                         // 把手徽标 = running 数（0 隐藏）
@@ -1911,32 +1959,31 @@ function renderTasks() {
 }
 async function tickTasks() {
   try {
-    const d = await getJSON("/task");
+    const [d, sess] = await Promise.all([             // 并采（走本卡现有定时器，零第二循环）：/task 失败 = 整拍失败
+      getJSON("/task"),
+      getJSON("/tui/sessions").catch(() => null)      // sessions 拉取失败 → null → 保留旧 tuiIds、静默
+    ]);
     if (!Array.isArray(d)) throw new Error("/task not array");
     tasks = d.filter(t => t && typeof t.id === "string");
-    if (selId && !tasks.some(t => t.id === selId)) { selId = null; closeConsole(); }
+    if (sess && Array.isArray(sess.sessions)) {       // tuiIds 换代 = 服务端会话真相自愈（进程自然退出/被停/被 prune → 本拍从集里消失）
+      tuiIds = new Set(sess.sessions.filter(x => x && typeof x.id === "string").map(x => x.id));
+      for (const rec of Array.from(consSess.values()))
+        if (!recLive(rec) && !tuiIds.has(rec.id)) destroySession(rec);   // 本 tab 死/脱离残留且服务端已无会话 → 清（正显示者回落占位「未启动」）
+      if (!consPending) { consRenderStatus(); consSyncButtons(); }       // 他窗启停 → 状态行/按钮矩阵随 tuiIds 重算（POST 在途不抢写）
+    }
+    consPruneVanished();                              // 任务消失 → 仅杀该 id 会话；正显示者清 selId 回初始态
     renderTasks();
     okPanel("task");
   } catch { failPanel("task"); }
 }
-async function actOn(id, act) {
-  try {
-    await postJSON("/task/" + act + "/" + encodeURIComponent(id));
-    toast(act === "run" ? "已请求启动 " + id : "已请求停止 " + id);
-    tickTasks();
-  } catch (e) { toast(act + " " + id + " 失败：" + e.message, "err"); }
-}
 $("#taskBody").addEventListener("click", ev => {
   const row = ev.target.closest(".prow");
-  if (!row) return;
-  const btn = ev.target.closest("button[data-act]");
-  if (btn) { if (!btn.disabled) actOn(row.dataset.id, btn.dataset.act); return; }
-  bindConsole(row.dataset.id);
+  if (row) bindTask(row.dataset.id);                  // 行点击 = 切该任务视图（不杀会话；服务端有会话 → 自动接入，无会话零请求不起进程）
 });
 $("#taskBody").addEventListener("keydown", ev => {
   if (ev.key !== "Enter") return;
   const row = ev.target.closest(".prow");
-  if (row) bindConsole(row.dataset.id);
+  if (row) bindTask(row.dataset.id);                  // Enter = 与点击同义（切视图 + 有会话即自动接入）
 });
 $("#updBtn").addEventListener("click", async () => {
   const b = $("#updBtn");
@@ -1945,7 +1992,7 @@ $("#updBtn").addEventListener("click", async () => {
     const d = await postJSON("/task/update");
     if (Array.isArray(d)) {
       tasks = d.filter(t => t && typeof t.id === "string");
-      if (selId && !tasks.some(t => t.id === selId)) { selId = null; closeConsole(); }
+      consPruneVanished();                            // 任务消失 → 仅杀该 id 会话；正显示者清 selId 回初始态
       renderTasks();
       toast("重扫完成 · " + tasks.length + " 个任务");
     } else {
@@ -1956,73 +2003,441 @@ $("#updBtn").addEventListener("click", async () => {
   finally { b.disabled = false; }
 });
 
-/* ---------- CONSOLE ---------- */
-function closeConsole() {
-  stopOutPoll();
-  $("#consTask").textContent = "未绑定任务";
-  $("#stdinBtn").disabled = true;
-  const log = $("#outLog");
-  log.textContent = "";
-  log.appendChild(el("div", "pempty", "在上方任务表点击一行以绑定输出流。"));
+/* ---------- CONSOLE（xterm.js PTY 终端：进程持久化会话 / 自动接入 / 镜像共享 / 一次性令牌） ----------
+   后端契约（冻结，逐字消费）：POST /tui/session {"id"} → 200 {"token","mode":"spawn"|"attach"}
+   （该 id 已有活会话 → attach，不查容量不 spawn）| 400 bad_request | 404 unknown_task
+   （attach 撞会话刚回收亦 404）| 503 busy（只可能出现在 spawn 意图）；
+   WS /tui/ws?token=&cols=&rows=：二进制帧 = PTY 字节双向，文本 JSON 控制帧（发 resize/ping，
+   收 pong/exit）；attach 成功服务端先回放环形缓冲（裸二进制帧、与实时流同一渲染路径，前端
+   零特判）；POST /tui/kill {"id"} → 200 {"killed"}（幂等，向全部镜像窗口广播 exit 帧再 Close）；
+   GET /tui/sessions → 活会话清单（tickTasks 并采 → tuiIds，失败保留旧值静默）。
+   进程生命周期 = 服务端会话，与本页无关：pagehide 仅脱离（ws.close），进程不死
+   （推翻旧「离页即杀」）；终结只经 自然退出（exit 帧）/「停止」（/tui/kill）/任务消失 prune。
+   点击运行中任务 = 第二交互实例/镜像接入（同看同输入），与守护实例并存：监督器起的守护进程
+   本身无 PTY，终端里跑的是该任务命令的另一个进程（常驻服务型任务可能与守护实例抢端口，
+   行为如实显示在终端里，属预期）。
+    WebGL 渲染器可选：上下文丢失 → dispose 回落 canvas；unicode-graphemes 先于 webgl 挂载。
+    触摸滑动滚动：vendored xterm 无 gesture→wheel 通路，自带识别器 wireTermSwipe 合成 WheelEvent
+    交 xterm 裁决（SGR vs 缓冲滚动），前提 = .termhost .xterm{touch-action:pan-x}；详见函数注释。
+   状态唯一真相 = consSess（本 tab 会话记录：id → {…term/ws/fit/webgl/exited/intentional/status/ping…}）
+   ∧ tuiIds（服务端活会话集）；consSyncButtons = 按钮唯一真相。判定输入仅 selId/记录/tuiIds/consPending。
+   ┌ 状态矩阵（五态；「按」= #consBtn，「停」= #consStop）─────────────────────────────
+   │ 无会话   绑定、无记录、!tuiIds.has      │ 已绑定 <id> · 未启动               │ 按「启动进程」可用     │ 停 禁用 │
+   │ 启动中   POST/WS 在途（connecting）     │ 已绑定 <id> · 连接中…              │ 按 禁用（label 随 tuiIds）│ 停 随 tuiIds │
+   │ 已接入   本 tab 记录活（recLive）       │ 交互中 · <id>                      │ 按 禁用「重新接入」    │ 停 启用 │
+   │ 已脱离   tuiIds.has ∧ 本 tab 无活记录   │ 已绑定 <id> · 已脱离（进程仍在运行）│ 按「重新接入」可用     │ 停 启用 │
+   │ 退出回落 exit 帧→本 tab 即清记录+踢 id  │ 已退出 code=N · <id>（下拍回未启动）│ 按「启动进程」可用     │ 停 禁用 │
+   └ 已脱离触发源：ws 非主动 onclose（网络抖/服务端重启/pagehide）或他窗已起会话本 tab 未接入。
+   行点击/Enter = 切视图 + 有会话即自动接入（consConnect(auto)，失败静默回占位）；无会话零请求。
+   健康点/状态行/按键条/全屏 fit 只跟随活动视图：非活动会话断连不打红点，激活时懒刷新。
+   并发 ≤ 64（服务端上限）：第 65 个启动 → 503 toast。 */
+const TERM_KEYMAP = {
+  esc: "\x1b", ctrlc: "\x03", ctrld: "\x04",
+  tab: "\x09", shifttab: "\x1b[Z",
+  left: "\x1b[D", right: "\x1b[C", up: "\x1b[A", down: "\x1b[B",
+  pipe: "|", tilde: "~"
+};
+const WS_PROTO = location.protocol === "https:" ? "wss" : "ws";
+const TERM_PING_MS = 25000;                           // 25s keepalive（仅 ws OPEN 期发送）
+const termEncoder = new TextEncoder();
+const cardCons = $("#card-cons");
+let fsFallback = false;
+let setJobsRef = null;                                // 抽屉 IIFE 注入 setJobs（全屏前强展开抽屉用）
+const consSess = new Map();                           // id → 会话记录 {id,term,fit,webgl,ws,exited,intentional,status,mode,ping,lastSize}（本 tab 会话唯一真相；服务端真相 = tuiIds）
+const consPlaceholder = el("div", "conshint");        // 单例占位节点（绑定且服务端无会话时挂进终端区）
+consPlaceholder.textContent = "未启动 —— 按「启动进程」开始与该任务交互（进程存活与页面无关，刷新/离页不杀）";
+
+/* 终端配色 = MD3 令牌现解（cacheColors 同款口径；mqLight 翻转时整体热替换） */
+function termTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = n => cs.getPropertyValue(n).trim();
+  return {
+    background: v("--md-sys-color-surface-container") || "#211F26",
+    foreground: v("--md-sys-color-on-surface") || "#E6E0E9",
+    cursor: v("--md-sys-color-primary") || "#D0BCFF",
+    selectionBackground: v("--md-sys-color-primary-container") || "#4F378B",
+    black: v("--md-sys-color-outline"),                 red: v("--md-sys-color-error"),
+    green: v("--a-mem"),                                yellow: v("--a-sto"),
+    blue: v("--a-net"),                                 magenta: v("--a-cpu"),
+    cyan: v("--a-gpu"),                                 white: v("--md-sys-color-on-surface-variant"),
+    brightBlack: v("--md-sys-color-outline-variant"),   brightRed: v("--a-therm"),
+    brightGreen: v("--d4-b3"),                          brightYellow: v("--a-pow"),
+    brightBlue: v("--d4-b1"),                           brightMagenta: v("--md-sys-color-primary"),
+    brightCyan: v("--d4-b2"),                           brightWhite: v("--md-sys-color-on-surface")
+  };
 }
-function bindConsole(id) {
-  selId = id;
-  renderTasks();
-  $("#consTask").textContent = "已绑定 " + id + (autoOn ? " · 自动刷新 2s" : " · 自动刷新已暂停");
-  $("#stdinBtn").disabled = false;
-  const log = $("#outLog");
-  log.textContent = "";
-  log.appendChild(el("div", "pempty", "拉取输出中…"));
-  tickOut();
-  startOutPoll();
+function activeRec() { return selId ? consSess.get(selId) || null : null; }   // 活动视图的会话记录（未绑定/未启动 = null）
+/* 活会话判定（按记录）：WS 句柄在且尚未收到 exit 帧（退出/断连后 term 可能仍驻留屏上，但不算活） */
+function recLive(rec) { return !!rec && !!rec.ws && !rec.exited; }
+function consLive() { return recLive(activeRec()); }   // 活动视图是否活会话（按钮矩阵输入）
+/* 状态行 = f(selId, 活动记录 status, tuiIds) 纯函数：规范文案集，激活/换代时懒重绘 */
+function consStatusText() {
+  if (!selId) return "未绑定任务";
+  const rec = consSess.get(selId);
+  if (!rec) return tuiIds.has(selId)                  // 服务端有会话、本 tab 未接入（刷新后/他窗起的）→ 脱离态（进程仍在运行）
+    ? "已绑定 " + selId + " · 已脱离（进程仍在运行）"
+    : "已绑定 " + selId + " · 未启动";
+  if (rec.status.kind === "connecting") return "已绑定 " + selId + " · 连接中…";
+  if (rec.status.kind === "live") return "交互中 · " + selId;
+  if (rec.status.kind === "exited") return "已退出 code=" + (rec.status.code === null || rec.status.code === undefined ? "null" : String(rec.status.code)) + " · " + selId;
+  return "已绑定 " + selId + " · 已脱离（进程仍在运行）";   // detached：非主动断线（不再标「已退出/连接中断」）
 }
-function startOutPoll() {
-  stopOutPoll();
-  if (autoOn) outTimer = setInterval(() => { if (active() && selId) tickOut(); }, 2000);
+function consRenderStatus() { $("#consTask").textContent = consStatusText(); }
+function consSyncButtons() {                           // 按钮矩阵（唯一真相；输入 = selId/记录/tuiIds/consPending，五态表见区块头）：
+  const b = $("#consBtn");
+  if (!selId) { b.disabled = true; $("#consStop").disabled = true; return; }   // 未绑定 → 双禁（label 保留上次，不可点）
+  const server = tuiIds.has(selId);                    // 服务端有活会话 = 进程级真相，不看本 tab 记录
+  b.textContent = server ? "重新接入" : "启动进程";     // 有会话未接入 = 「重新接入」；无会话 = 「启动进程」（点击同走 consConnect，服务端裁决 mode）
+  b.disabled = consLive() || consPending;               // 已接入/在途 = 禁用（残留记录点按钮 = consConnect 先 dispose 再重建，「重启」语义内化于此）
+  $("#consStop").disabled = !server;                    // 停止 = 进程级：服务端有会话即可停；exit 后 tuiIds 已踢 → 自然禁用
 }
-function stopOutPoll() { if (outTimer) { clearInterval(outTimer); outTimer = null; } }
-const SEV_CLS = { Stdout: ["sev-out", "OUT"], Stderr: ["sev-err", "ERR"], Stdin: ["sev-in", "IN"] };
-async function tickOut() {
-  if (!selId) return;
-  try {
-    const d = await getJSON("/task/output/" + encodeURIComponent(selId));
-    if (!Array.isArray(d)) throw new Error("output not array");
-    const log = $("#outLog");
-    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
-    log.textContent = "";
-    const view = d.slice(-500);
-    if (!view.length) log.appendChild(el("div", "pempty", "（该任务暂无输出）"));
-    for (const ln of view) {
-      if (!ln || typeof ln.text !== "string") continue;
-      const ev2 = el("div", "ev");
-      const tm = document.createElement("time");
-      tm.textContent = fmtTime(ln.at);
-      const sv = SEV_CLS[String(ln.stream)] || SEV_CLS.Stdout;
-      ev2.append(tm, el("span", "sev " + sv[0], sv[1]), el("p", null, ln.text));
-      log.appendChild(ev2);
+function safeFit(rec) { if (rec && rec.term && rec.fit) { try { rec.fit.fit(); } catch { /* 零尺寸容器（折叠抽屉/未挂载宿主）会抛 */ } } }
+function sendResize(rec, cols, rows) {                 // 每记录 lastSize 去重：尺寸未变不发帧
+  if (!rec.ws || rec.ws.readyState !== WebSocket.OPEN) return;
+  if (cols === rec.lastSize.cols && rows === rec.lastSize.rows) return;
+  rec.lastSize = { cols, rows };
+  try { rec.ws.send(JSON.stringify({ type: "resize", cols, rows })); } catch { /* ignore */ }
+}
+function stopPing(rec) { if (rec.ping) { clearInterval(rec.ping); rec.ping = 0; } }
+/* 会话归属判定：ws 事件帧经闭包归属自己记录；仅当该记录正是活动视图时才动 UI，否则只记记录（激活时懒刷新） */
+function consIsView(rec) { return consSess.get(selId) === rec; }
+/* 浏览器保留键：F5/F12（含 Ctrl/Ctrl+Shift 组合）与 Ctrl(+Shift)+R 放行给浏览器；
+   其余（Ctrl+W/Ctrl+C/Ctrl+方向/Esc…）交 xterm 编码发送。 */
+function termKeyAllow(ev) {
+  if (ev.type !== "keydown") return true;
+  if (ev.key === "F5" || ev.key === "F12") return false;
+  if (ev.ctrlKey && (ev.key === "r" || ev.key === "R")) return false;
+  return true;
+}
+function consMarkExited(rec, code) {                   // exit 帧 = 服务端权威终态（自然退出 / kill 广播）
+  rec.exited = true;
+  rec.status = { kind: "exited", code: (code === null || code === undefined) ? null : code };
+  stopPing(rec);
+  const view = consIsView(rec);
+  if (view) consRenderStatus();                        // 先落「已退出 code=N · id」（非活动记录只改记录，激活时懒刷新）
+  const txt = consStatusText();                        // 记录出册前定格退出文案
+  tuiIds.delete(rec.id);                               // 进程已死：本地即刻踢出（药丸/停止键/脱离误文案防陈旧）
+  destroySession(rec);                                 // 本 tab 清记录（正显示者回落占位；他窗各收自己的 exit 帧自愈）
+  if (view) {                                          // showView 覆写后回写退出文案；矩阵随「无记录 + 已踢 tuiIds」= 启动进程可用、停禁用
+    consStatus(txt);
+    failPanel("cons");
+    consSyncButtons();
+  }
+}
+function destroySession(rec) {                         // 收资源 + 出册；不动 selId（解绑语义归调用方）
+  if (!rec) return;
+  rec.intentional = true;
+  stopPing(rec);
+  consSess.delete(rec.id);
+  if (rec.ws) { const w = rec.ws; rec.ws = null; try { w.close(1000); } catch { /* ignore */ } }
+  if (rec.webgl) { try { rec.webgl.dispose(); } catch { /* ignore */ } rec.webgl = null; }
+  if (rec.swipe) { try { rec.swipe(); } catch { /* ignore */ } rec.swipe = null; }   // 滑动识别器先于 term 解绑（监听挂在 term.element 上，防跨会话幽灵监听）
+  if (rec.term) { try { rec.term.dispose(); } catch { /* ignore */ } rec.term = null; }
+  if (selId === rec.id) showView(selId);               // 正显示的本记录没了 → 回落占位（「未启动/已脱离」文案由 showView 按 tuiIds 裁决）
+}
+/* 视图切换（唯一挂载点）：有记录 → 挂其终端（活：重 fit + 聚焦；死：驻留输出原样）；
+   绑定无记录 → 占位提示；id=null → 清空。零请求、不杀任何会话。 */
+function showView(id) {
+  const host = $("#termHost");
+  const rec = id ? consSess.get(id) || null : null;
+  if (rec && rec.term) {
+    host.replaceChildren(rec.term.element);
+    requestAnimationFrame(() => safeFit(rec));          // 回挂后重 fit（离屏期 webgl 可能停渲染，缓冲照常累积）
+    if (recLive(rec)) rec.term.focus();
+  } else {
+    host.replaceChildren();                              // id=null → 清空（replaceChildren(null) 会插字面量 "null" 文本节点，禁）
+    if (id) {                                            // 绑定无记录 → 占位提示（文案随服务端真相：有会话=脱离、无=未启动）
+      consPlaceholder.textContent = tuiIds.has(id)
+        ? "已脱离 —— 进程仍在运行，按「重新接入」续看"
+        : "未启动 —— 按「启动进程」开始与该任务交互（进程存活与页面无关，刷新/离页不杀）";
+      host.appendChild(consPlaceholder);
     }
-    if (nearBottom) log.scrollTop = log.scrollHeight;
-    okPanel("cons");
-  } catch { failPanel("cons"); }
+  }
+  consRenderStatus();
+  consSyncButtons();
+  cardMeta.cons.elm.classList.toggle("stale", !!rec && !recLive(rec));   // 健康点跟随活动视图（懒刷新，不弹 toast）
 }
-$("#autoBtn").addEventListener("click", () => {
-  autoOn = !autoOn;
-  $("#autoBtn").textContent = autoOn ? "暂停自动刷新" : "恢复自动刷新";
-  if (selId) $("#consTask").textContent = "已绑定 " + selId +
-    (autoOn ? " · 自动刷新 2s" : " · 自动刷新已暂停");
-  if (autoOn) { if (selId) tickOut(); startOutPoll(); } else stopOutPoll();
-});
-$("#stdinForm").addEventListener("submit", async ev => {
-  ev.preventDefault();
-  if (!selId) return;
-  const input = $("#stdinLine");
-  const line = input.value;
-  if (!line) return;
+function consStatus(s) { $("#consTask").textContent = s; }   // 在途直写口（「连接中…」）；常态文案走 consRenderStatus
+function openTermWs(rec, token) {                     // ws 处理器经闭包归属自己记录（多会话并存互不串台）
+  const url = WS_PROTO + "://" + location.host + "/tui/ws?token=" + encodeURIComponent(token) +
+    "&cols=" + rec.term.cols + "&rows=" + rec.term.rows;
+  const ws = new WebSocket(url);
+  rec.ws = ws;
+  let gotFrame = false;                               // 首个二进制帧 = 会话健康（健康点 ok 时机）
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    stopPing(rec);                                    // 每记录 25s keepalive（仅 ws OPEN 期发送）
+    rec.ping = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
+    }, TERM_PING_MS);
+  };
+  ws.onmessage = ev => {
+    if (typeof ev.data === "string") {                // 控制帧：exit 生效，pong/未知忽略
+      let m = null;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (m && m.type === "exit" && rec.ws === ws) consMarkExited(rec, m.code);   // 陈旧会话的 exit 帧不改状态（自己 ws 身份校验）
+      return;
+    }
+    if (rec.term) rec.term.write(new Uint8Array(ev.data));   // 离屏记录输出照常入缓冲
+    if (!gotFrame && rec.ws === ws) {                 // 首个二进制帧 = 会话健康（健康点 ok 时机）
+      gotFrame = true;
+      rec.status = { kind: "live" };
+      if (consIsView(rec)) { consRenderStatus(); okPanel("cons"); }
+    }
+  };
+  ws.onclose = () => {
+    stopPing(rec);
+    if (rec.ws !== ws) return;                        // 陈旧 close（本记录已销毁/替换）：不改状态
+    rec.ws = null;
+    if (rec.exited) {                                 // exit 帧已定终态（exit 路径通常已连记录一起出册，此处兜底）
+      if (consIsView(rec)) { consRenderStatus(); consSyncButtons(); }
+      return;
+    }
+    if (rec.intentional) return;                      // 主动路径（停止/残留重建）：记录已出册，视图归 destroySession 管
+    rec.status = { kind: "detached" };                // 非主动断线（网络抖/服务端重启/pagehide）→「已脱离」：不再标「已退出」，
+    if (consIsView(rec)) {                            // 进程大概率仍活（服务端会话独立于本连接）；真伪由下拍 tuiIds 裁决（tickTasks 自愈）
+      consRenderStatus();                             // 「已绑定 <id> · 已脱离（进程仍在运行）」
+      failPanel("cons");
+      consSyncButtons();                              // 按钮转「重新接入」（tuiIds 尚有时）/「启动进程」（服务端已无会话）
+    }
+  };
+  ws.onerror = () => { /* close 事件负责状态处理 */ };
+}
+function bootTerminal(id, token, mode) {              // 起新会话记录入册并挂载（调用时 selId===id，本记录即活动视图）；spawn/attach 同路——
+                                                      // mode（"spawn"|"attach"）仅记录留痕：attach 回放 = 裸二进制帧走同一渲染路径，前端零特判
+  const host = $("#termHost");
+  host.replaceChildren();
+  const monoTok = getComputedStyle(document.documentElement).getPropertyValue("--d4-mono").trim();
+  const term = new Terminal({
+    fontFamily: monoTok || "'Maple Mono','Roboto Mono','Noto Sans SC',ui-monospace,monospace",
+    fontSize: 13, lineHeight: 1.2, scrollback: 5000,
+    allowProposedApi: true, theme: termTheme()
+  });
+  const rec = { id, term, fit: null, webgl: null, ws: null, exited: false, intentional: false, swipe: null,
+    status: { kind: "connecting" }, mode: (mode === "attach" ? "attach" : "spawn"), ping: 0, lastSize: { cols: 0, rows: 0 } };
+  try { if (typeof UnicodeGraphemesAddon !== "undefined") term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon()); } catch { /* 缺资源容忍 */ }
+  rec.fit = new FitAddon.FitAddon();
+  term.loadAddon(rec.fit);
   try {
-    await postJSON("/task/input/" + encodeURIComponent(selId), { line });
-    input.value = "";
-    tickOut();
-  } catch (e) { toast("stdin 失败：" + e.message, "err"); }
+    rec.webgl = new WebglAddon.WebglAddon();
+    const onLost = () => {                            // WebGL 上下文丢失：丢弃 addon，回落 canvas 渲染器，不崩溃
+      const a = rec.webgl; rec.webgl = null;
+      try { if (a) a.dispose(); } catch { /* ignore */ }
+    };
+    if (typeof rec.webgl.onContextLoss === "function") rec.webgl.onContextLoss(onLost);
+    else if (typeof rec.webgl.onContextLost === "function") rec.webgl.onContextLost(onLost);
+    term.loadAddon(rec.webgl);
+  } catch { rec.webgl = null; }                       // WebGL 不可用 → xterm 默认渲染器
+  term.attachCustomKeyEventHandler(termKeyAllow);
+  term.open(host);
+  safeFit(rec);
+  rec.lastSize = { cols: term.cols, rows: term.rows };
+  term.onData(d => { if (rec.ws && rec.ws.readyState === WebSocket.OPEN) rec.ws.send(termEncoder.encode(d)); });
+  term.onResize(sz => sendResize(rec, sz.cols, sz.rows));
+  rec.swipe = wireTermSwipe(term);                    // 触摸滑动→合成滚轮（含 mouse-report 应用 SGR 分页；销毁时经 rec.swipe 解绑）
+  consSess.set(id, rec);                              // 新会话入册（同 id 重建覆盖前驱已由 consConnect 先行 destroy）
+  if (mode === "spawn") tuiIds.add(id);                 // spawn 成功 = 服务端必有会话：乐观入册（停止键立即可用，与 kill 乐观踢出对称；下拍 sessions 换代校准）
+  openTermWs(rec, token);                             // 以当前 fit 尺寸开 WS
+  consRenderStatus();
+  consSyncButtons();                                  // 已接入：按钮禁用（label=「重新接入」）、停止可用
+}
+/* 触摸滑动滚动（仅移动手势；桌面滚轮走 xterm 自身链路，与此无关）：
+   vendored xterm 的 TouchFrontend（Gesture 类）在本 bundle 是断头路 —— 派发的 -xterm-gesturechange
+   无任何消费者（全包检索 translationY 有写无读），永不合成 wheel；所以自带识别器补齐：
+   单指竖轴锁定后，位移每累计满一行高，向命中元素派发合成 WheelEvent（bubbles+cancelable、
+   deltaMode=LINE、deltaY=±1），由 xterm 自己的 wheel 处理裁决语义 —— 应用开了鼠标上报（yazi
+   ?1000;?1002;?1006）→ wheel 被编码成 SGR 序列写进 PTY（yazi 翻页）；未开 → xterm 滚自己的
+   缓冲区（主屏 scrollback；alt 屏发方向键），与桌面滚轮逐项同语义。若本 build 无人接走
+   （无布局/边界场景：事件未 cancel），兜底 term.scrollLines(±1) 保证缓冲区必滚。
+   方向 = 移动终端行业惯例（Termux/iOS 终端）：手指下拉 = 轮上移 = 回看历史（SGR 64），
+   手上推 = 轮下移 = 回到底部（SGR 65）。
+   约束：tap（位移 <6px）从不 preventDefault → 点选落 caret / 长按选择菜单原样；横滑锁 x 轴
+   即弃权 → 页面/抽屉横移不受影响；双指 = pinch 完全交浏览器。.termhost .xterm 的
+   touch-action:pan-x（CSS ⑥）是本识别器的前提：缺它 Chrome 判竖划为 page-pan，本序列夭折。 */
+function wireTermSwipe(term) {
+  const root = term.element;
+  if (!root) return () => {};
+  let tid = -1, x0 = 0, y0 = 0, sx = 0, sy = 0, axis = null, acc = 0;
+  const lineH = () => {                               // 行高 = 屏幕高/行数（fit 后与实际网格一致；零布局兜底 20px）
+    const se = root.querySelector(".xterm-screen");
+    const v = se && se.clientHeight ? Math.round(se.clientHeight / Math.max(1, term.rows)) : 0;
+    return v >= 6 ? v : 20;
+  };
+  const ts = ev => {
+    if (ev.touches.length !== 1) { tid = -1; axis = null; return; }   // ≥2 指 = pinch：完全交浏览器，弃权
+    const t = ev.touches[0];
+    tid = t.identifier; x0 = sx = t.clientX; y0 = sy = t.clientY; axis = null; acc = 0;
+  };
+  const tm = ev => {
+    if (tid < 0 || ev.touches.length !== 1 || ev.touches[0].identifier !== tid) return;
+    const t = ev.touches[0];
+    const cx = t.clientX, cy = t.clientY, dy = cy - sy;
+    sx = cx; sy = cy;
+    if (!axis) {
+      const gx = cx - x0, gy = cy - y0;
+      if (Math.abs(gx) < 6 && Math.abs(gy) < 6) return;               // 6px 死区：tap 永不干预
+      axis = Math.abs(gy) >= Math.abs(gx) ? "y" : "x";                // 轴锁定（一次性）
+    }
+    if (axis !== "y") return;                                         // 横滑锁定：本手势整体弃权（页面/抽屉 pan 原样）
+    ev.preventDefault();                                              // 竖意向确立：吞后续事件（pan-x 已挡原生 pan，双保险防选中拖拽抢手势）
+    acc += dy;
+    const lh = lineH(), se = root.querySelector(".xterm-screen") || root;
+    while (Math.abs(acc) >= lh) {
+      const dir = acc > 0 ? -1 : 1;                                   // 手指下拉→轮上（历史）；对称反向
+      acc += dir * lh;                                                // 按已派发一整行清账，余量留待下一行
+      try {
+        const hit = typeof document.elementFromPoint === "function" ? document.elementFromPoint(cx, cy) : null;
+        const tgt = hit && root.contains(hit) ? hit : se;             // 命中真实元素；无布局环境回退屏幕元素
+        // deltaMode=1（行粒度）：vendored consumeWheelEvent 像素通道带分数累加器（|dy|<50 先×0.3 再取整），
+        // 短行程会被整段吞掉 → LINE 模式原样透传 ±1，保证「每累计一行 = 恰好一个 SGR 滚轮事件」契约
+        const wv = new WheelEvent("wheel", { deltaMode: 1, deltaY: dir, clientX: cx, clientY: cy, bubbles: true, cancelable: true });
+        tgt.dispatchEvent(wv);
+        if (!wv.defaultPrevented) term.scrollLines(dir);              // 无人接走 → 兜底滚缓冲（scrollLines 负=向历史，与 scrollToTop 同向）
+      } catch { /* 极端环境无 WheelEvent 构造：滑动降级为无效，不炸会话 */ }
+    }
+  };
+  const te = () => { tid = -1; axis = null; acc = 0; };               // 不做惯性甩动：行数与手指位移严格对应，语义可预期
+  root.addEventListener("touchstart", ts, { passive: true });         // start 从不 preventDefault：tap 落 caret、长按选择照旧
+  root.addEventListener("touchmove", tm, { passive: false });         // 竖轴锁定后才 preventDefault
+  root.addEventListener("touchend", te, { passive: true });
+  root.addEventListener("touchcancel", te, { passive: true });
+  return () => {
+    root.removeEventListener("touchstart", ts);
+    root.removeEventListener("touchmove", tm);
+    root.removeEventListener("touchend", te);
+    root.removeEventListener("touchcancel", te);
+  };
+}
+if (typeof ResizeObserver === "function") {           // 全局唯一 RO：卡盒变化（抽屉开合/全屏/视口/切视图）→ 重 fit 活动会话 → resize 帧
+  const consRo = new ResizeObserver(() => safeFit(activeRec()));
+  consRo.observe(cardCons);
+}
+window.addEventListener("orientationchange", () => requestAnimationFrame(() => safeFit(activeRec())));   // 旋转屏幕 → 下一帧重 fit 活动会话
+let consPending = false;                              // POST /tui/session 在途标记（连点去重；全局：同一时刻至多一个在途 POST）
+async function consConnect(auto) {                    // 唯一接入/起进程入口：「启动进程/重新接入」按钮 + bindTask 自动接入（auto=true）调用；
+  if (consLive() || consPending) return;              // 活动视图活会话护栏 + 在途去重（起 spawn 还是挂 attach 由服务端裁决，前端不问）
+  if (!selId) { if (!auto) toast("先点击一个任务", "err"); return; }   // 未绑定 = 无任务可接，零请求
+  if (typeof Terminal === "undefined") { if (!auto) toast("终端组件未加载（/vendor 资源缺失）", "err"); return; }
+  const residue = consSess.get(selId);
+  if (residue) {
+    if (auto && residue.exited) { showView(selId); return; }   // 自动接入不复活已退出进程（等下拍 tuiIds 自愈清残留；「启动进程」= 用户显式 spawn）
+    destroySession(residue);                          // 该 id 退出/脱离残留会话：先 dispose 再重建
+  }
+  const id = selId;                                   // 本次请求归属（陈旧响应判定基准）
+  $("#consBtn").disabled = true;                      // 请求期禁用防连点
+  consStatus("已绑定 " + id + " · 连接中…");
+  consPending = true;                                 // 在途标记：本请求结束（finally）前拒绝重复 POST
+  let status = 0, d = null, net = null;
+  try {
+    const r = await fetch("/tui/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({id})
+    });
+    status = r.status;
+    try { d = await r.json(); } catch { /* 空体 / 非 JSON 容忍 */ }
+  } catch (e) { net = e.message; }
+  finally { consPending = false; }
+  if (selId !== id) {                                 // 陈旧响应：期间已切视图/解绑 → 结果整体作废（新视图各自的 bindTask 已做自动接入判定）
+    showView(selId);
+    return;
+  }
+  if (consLive()) return;                             // 期间已有活会话抢跑 → 令牌作废（服务端自行过期）
+  const warn = msg => { if (!auto) toast(msg, "err"); };               // 自动接入失败静默（用户没点任何东西，不打扰）
+  if (net !== null) warn("终端会话创建失败：" + net);
+  else if (status === 503) warn("终端会话已满（503）");               // busy 只在 spawn 意图出现；并发 ≤ 64（服务端上限），第 65 个起落此处
+  else if (status === 404) {                          // 任务不存在（或 attach 撞会话刚回收）：手动 = 解绑回初始态；自动 = 回占位、下拍 tuiIds 自愈
+    warn("任务已不存在");
+    const gone = consSess.get(id);
+    if (gone) destroySession(gone);
+    if (auto && tasks.some(t => t.id === id)) { showView(id); return; }
+    consClearBind();
+    return;
+  }
+  else if (status < 200 || status > 299)
+    warn("终端会话创建失败：" + ((d && d.error) || ("HTTP " + status)));
+  else if (!(d && typeof d.token === "string")) warn("终端会话响应缺少 token");   // 200 畸形响应
+  else if (auto && d.mode === "spawn") showView(id);  // F1#5：自动接入永不 spawn（陈旧 tuiIds 误判窗口：服务端已无会话 → 弃用 spawn 令牌自然过期，回落占位，下拍校准）
+  else { bootTerminal(id, d.token, d.mode); return; } // mode 感知：spawn/attach 同路入 bootTerminal（回放经 ws 二进制帧自然渲染，零特判）
+  if (auto) showView(id);                             // 自动接入失败 → 回落占位态（状态行/矩阵随下拍 tuiIds 校准）
+  else { consRenderStatus(); consSyncButtons(); }     // 手动失败只弹 snackbar：不脏健康点，回绑定「未启动」态
+}
+$("#consBtn").addEventListener("click", () => { consConnect(); });   // 无会话 =「启动进程」/ 有会话未接入 =「重新接入」：同一入口，服务端裁决 mode
+$("#consStop").addEventListener("click", () => {                     // 停止 = 进程级（selId ∧ tuiIds.has 即可停，不看本 tab 记录）：
+  const id = selId;
+  if (!id || !tuiIds.has(id)) return;
+  postJSON("/tui/kill", { id }).catch(() => {});      //   ① kill 不 await 细节（幂等 200 {killed}；服务端向全部镜像广播 exit 帧）
+  tuiIds.delete(id);                                  //   ② 本地乐观踢出（防「已脱离」误文案/陈旧停止键窗口，下拍 sessions 拉取校准）
+  const rec = consSess.get(id);
+  if (rec) destroySession(rec);                       //   ③ 本 tab：收资源 + 出册 + 回落占位（intentional，零告警）；
+  else showView(selId);                               //   本 tab 未接入（他窗会话）：仅刷视图/状态行/按钮矩阵
+});                                                   //   ④ 他窗口：靠广播 exit 帧走 consMarkExited 各自自愈；守护重启 = 会话全清、下拍归零
+/* 绑定链（本区块出口，供 TASKS 行点击/Enter 与任务表消失挂点调用）：
+   bindTask = 视图切换 + 自动接入（进程活着就该直接看：服务端有会话且本 tab 无活记录 →
+   consConnect(auto) 走 attach，回放即重挂画面；不杀会话、无会话时不自动起进程）；
+   consClearBind = 解绑回初始态；consPruneVanished = 任务从注册表消失 → 仅杀该 id 会话
+   （正显示则清 selId 回初始态）。 */
+function bindTask(id) {
+  selId = id;
+  renderTasks();                                      // 行选中高亮 = 绑定态可视化
+  showView(id);                                       // 挂既有会话或占位「未启动」
+  if (tuiIds.has(id) && !recLive(consSess.get(id))) consConnect(true);   // 自动接入（404/503 → 静默回落占位，下拍 tuiIds 自愈）；「停止」永不自接
+}
+function consClearBind() {
+  selId = null;
+  renderTasks();                                      // 高亮随绑定消失
+  showView(null);                                     // 「未绑定任务」+ 双禁回初始态
+}
+function consPruneVanished() {
+  for (const id of Array.from(consSess.keys()))
+    if (!tasks.some(t => t.id === id)) destroySession(consSess.get(id));   // 仅杀消失任务自己的会话（切换永不杀）
+  if (selId && !tasks.some(t => t.id === selId)) consClearBind();          // 正显示的绑定消失 → 回初始态
+}
+/* 全屏：先强展开抽屉（保证卡可见 + CSS 回退覆盖层可用）→ 原生 Fullscreen API，
+   失败/不支持 → .cons-fs CSS 覆盖层 + body.consFs（中和抽屉 transform 对 fixed 的劫持）。 */
+const consFsBtn = $("#consFs");
+function setFsLabel(on) {
+  consFsBtn.textContent = on ? "退出全屏" : "全屏";
+  consFsBtn.setAttribute("aria-pressed", String(on));
+  requestAnimationFrame(() => safeFit(activeRec()));  // 布局落定后重 fit 活动会话 → resize 帧
+}
+function consFsFallback(on) {
+  fsFallback = on;
+  cardCons.classList.toggle("cons-fs", on);
+  document.body.classList.toggle("consFs", on);
+  setFsLabel(on);
+}
+function toggleConsFs() {
+  if (fsFallback) { consFsFallback(false); return; }
+  if (document.fullscreenElement === cardCons) {
+    try { const p = document.exitFullscreen(); if (p && typeof p.catch === "function") p.catch(() => {}); } catch { /* ignore */ }
+    return;
+  }
+  if (setJobsRef) setJobsRef("open", false);          // 不写 localStorage：仅全屏期间展开抽屉
+  try {
+    if (typeof cardCons.requestFullscreen === "function") {
+      const p = cardCons.requestFullscreen();
+      if (p && typeof p.catch === "function") p.catch(() => consFsFallback(true));
+    } else consFsFallback(true);
+  } catch { consFsFallback(true); }
+}
+consFsBtn.addEventListener("click", toggleConsFs);
+document.addEventListener("fullscreenchange", () => {
+  if (document.fullscreenElement === cardCons) setFsLabel(true);
+  else if (!fsFallback) setFsLabel(false);
+});
+/* 移动按键条：路由到活动视图的终端；无活动会话时静默无效 */
+$("#consKb").addEventListener("click", ev => {
+  const b = ev.target instanceof Element ? ev.target.closest("button[data-k]") : null;
+  const rec = activeRec();
+  if (!b || !rec || !rec.term) return;
+  rec.term.input(TERM_KEYMAP[b.dataset.k] || "");
+});
+window.addEventListener("pagehide", () => {           // 离页 = 脱离（detach）：对全部记录仅关 ws，服务端进程不死、会话不销毁
+  for (const rec of Array.from(consSess.values())) {  // （推翻旧「离页即杀」）；onclose 走非主动分支标「已脱离」——bfcache 回页时
+    stopPing(rec);                                    // 状态行/「重新接入」按钮即为真；整页卸载则随页面一起消亡
+    if (rec.ws) { try { rec.ws.close(); } catch { /* ignore */ } }
+  }
 });
 
 /* ---------- 调度（每卡独立定时器；快速卡 1⇄5fps；BATTERY 5s⇄1s；NETWORK 5s；慢速卡 60s + 双击补拍） ---------- */
@@ -2075,7 +2490,10 @@ function redrawAll() {
   try { if (lastData.proc) renderProc(lastData.proc); } catch { /* 同上 */ }
 }
 const mqLight = window.matchMedia("(prefers-color-scheme: light)");
-mqLight.addEventListener("change", () => { cacheColors(); redrawAll(); });
+mqLight.addEventListener("change", () => {
+  cacheColors(); redrawAll();
+  for (const rec of consSess.values()) { try { rec.term.options.theme = termTheme(); } catch { /* 主题热替换容忍 */ } }   // 全部会话终端配色随 OS 明暗热翻转
+});
 
 /* ---------- 历史回填（/db/history：打开即播种，随后实时续采） ----------
    行契约 = [{t:RFC3339 字符串,k:键,v:数值}]，服务端已按 t 升序；limit 服务端钳 1..5000。
@@ -2218,6 +2636,7 @@ function redrawHistCharts() {
     tg.setAttribute("aria-expanded", s === "open" ? "true" : "false");
     if (save) { try { localStorage.setItem("atlas-drawer", s); } catch { /* 无痕容忍 */ } }
   }
+  setJobsRef = setJobs;                               // 注入 CONSOLE 全屏链路（全屏前强展开抽屉）
   function toggleJobs() { setJobs(isOpen() ? "closed" : "open", true); }
   try {                                               // 恢复上次状态：先挂 .drag 免滑入动画
     j.classList.add("drag");
@@ -2303,10 +2722,9 @@ $("#stoFoldBtn").addEventListener("click", () => {             // STORAGE 卡展
   fold.setAttribute("aria-expanded", String(stoExpanded));
 });
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
-wireDbl("#card-cons", () => { if (selId) tickOut(); });
+wireDbl("#card-cons", () => { safeFit(activeRec()); });   // 双击 = 对活动会话一次重 fit（无会话 = 安全 no-op，终端卡不参与刷语义）
 function tickAll() {
   tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickProc(); tickTasks();
-  if (selId) tickOut();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) tickAll(); });
 requestAnimationFrame(() => {
@@ -2314,6 +2732,7 @@ requestAnimationFrame(() => {
   cards.forEach((c, i) => setTimeout(() => c.classList.add("in"), 60 * i));
 });
 window.addEventListener("resize", () => { redrawAll(); });
+window.__atlas = { tickTasks, consSess, tuiIdsAdd: id => tuiIds.add(id), boot: bootTerminal, swipe: wireTermSwipe, dbg: () => ({ sel: selId, pending: consPending, tui: Array.from(tuiIds), sess: Array.from(consSess.keys()).map(k => ({ k, live: recLive(consSess.get(k)), st: consSess.get(k).status.kind })) }) };      // QA 句柄（jsdom harness 显式补拍/查册/注入陈旧集/直启终端+直挂滑动器；纯导出零行为）
 })();
 </script>
 </body>

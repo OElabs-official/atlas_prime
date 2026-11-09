@@ -43,6 +43,17 @@
 //!   数据目录（与 v1/db 同源）存在 dashboard.html → **存在即覆盖**，每次读盘（走阻塞池，
 //!   改动刷新即见，开发热替换；删文件回落内嵌）；否则直接回内嵌字节，**永不 404**。
 //!   不限流，响应带 `cache-control: no-cache` 杜绝浏览器启发式缓存；
+//! - `POST /tui/session` 发一次性令牌（body `{"id"}`，令牌绑定任务 id 与 kind；无
+//!   PIN；404 unknown_task；**已有活会话 → `mode:"attach"` 免容量**；无会话满员 503
+//!   busy；无会话 → `mode:"spawn"`）/ `GET /tui/ws?token=&cols=&rows=`
+//!   PTY↔WS 桥（任务绑定**常驻** PTY 会话册，≤8 并发，镜像多窗口，attach 回放
+//!   ≤512KB 环形缓冲；令牌一次性 + 5min TTL，二进制帧 = 裸 PTY
+//!   字节双向，文本帧 = resize/ping JSON 控制）/ `POST /tui/kill`（body `{"id"}`，
+//!   幂等 `{"killed":bool}`）/ `GET /tui/sessions`（`{"sessions":[{"id","attached"}]}`）
+//!   ——本域只管传输（[`tui`]），会话核心（PTY/子进程/槽位/会话册/回放环）在
+//!   **task 域**（`task::tui`），不限流（WS 长连接）；
+//! - `GET /vendor/{name}` → 内嵌前端资产（xterm 五件白名单名，`include_bytes!` 随二进制
+//!   发布），响应带 `cache-control: public, max-age=86400`（24h），其余名字 404 JSON；
 //! - CORS 全放开（本地工具 API）；task / 静态路由不设限（写操作语义，重复提交自有幂等错误）。
 //!
 //! # 限流设计
@@ -72,6 +83,8 @@ use crate::v1::db::Db;
 use crate::v1::operator::Operator;
 use crate::v1::system::{battery, cpu, disk, gpu, mem, network, proc, thermal};
 use crate::v1::task::{Task, TaskError};
+
+mod tui;
 
 // ---------------- 公开入口 ----------------
 
@@ -103,9 +116,14 @@ impl Web {
                     .route("/task/output/{id}", web::get().to(h_task_output))
                     .route("/task/input/{id}", web::post().to(h_task_input))
                     .route("/db/history", web::get().to(h_db_history))
-                    .route("/", web::get().to(h_root))
-                    .route("/dashboard.html", web::get().to(h_dashboard))
-            });
+                     .route("/", web::get().to(h_root))
+                     .route("/dashboard.html", web::get().to(h_dashboard))
+                     .route("/tui/session", web::post().to(tui::h_session))
+                     .route("/tui/ws", web::get().to(tui::h_ws))
+                     .route("/tui/kill", web::post().to(tui::h_kill))
+                     .route("/tui/sessions", web::get().to(tui::h_sessions))
+                     .route("/vendor/{name}", web::get().to(tui::h_vendor))
+             });
             let mut srv = Some(srv);
             for a in addrs {
                 let s = srv.take().expect("loop once per addr");
