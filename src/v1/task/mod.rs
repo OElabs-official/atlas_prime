@@ -25,6 +25,12 @@
 //!   降级 Failed；Warn/Never 不重拉，区别仅在语义标注；
 //! - 配置源 = `<project_dir>/atlas_task.json` + `<project_dir>/script/*.ts`（Bun 生成项，
 //!   `bun run <file>`；Bun 无权限闸，等价 deno -A，无需 flag）。
+//!
+//! # 子模块
+//! - [`tui`]：浏览器 TUI 会话核心——PTY 下的交互式 shell 也是一种子进程
+//!   （令牌门 + 槽位 + 三线程流水线，零 ntex）；WS 传输在 v1/web/tui。
+
+pub mod tui;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
@@ -259,6 +265,9 @@ impl Task {
         for id in stale {
             reg.remove(&id);
         }
+
+        // 会话册对账：注册表已消失的任务，其常驻 PTY 会话即刻回收（guard drop 击杀）。
+        tui::prune_missing(&live);
 
         Self::snapshot_all(&reg)
     }
@@ -500,6 +509,7 @@ fn supervise(
             s.started_at = None;
         });
 
+        // 交叉引用：task/tui.rs 的 task_cmd()（PTY 第二实例）镜像本构造——两处命令构造须同步。
         let mut cmd = Command::new(&desc.command);
         cmd.args(&desc.args)
             .stdin(Stdio::piped())
