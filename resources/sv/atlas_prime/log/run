@@ -1,0 +1,5 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# atlas_prime runit 日志服务（0700）；svlogd 轮转目录 $LOGDIR/sv/atlas_prime
+LOG="${LOGDIR:-/data/data/com.termux/files/usr/var/log}"
+SVLOGD="$(command -v svlogd || echo /data/data/com.termux/files/usr/bin/svlogd)"
+exec "$SVLOGD" -tt "$LOG/sv/atlas_prime"

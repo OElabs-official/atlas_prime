@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# atlas_prime runit service（0700；安装器：resources/sv-install.sh）
+# 部署于 $SVDIR/atlas_prime/run；exec 前台 + 2>&1（runsv 把 stdout 导入 log 服务）
+exec /data/data/com.termux/files/usr/bin/atlas_prime 2>&1
