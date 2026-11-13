@@ -131,19 +131,46 @@ fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
     })
 }
 
-/// enable：sv-enable（PATH → $PREFIX/bin 兜底）。失败/缺失不判死——目录内无 down
-/// 占位，runsvdir 若在跑 ≤5s 自动拉起；打印监管状态与手动 enable 路径。
+/// runsvdir 是否已注册该服务：supervise/ 控制目录就位即已注册（纯判定，无时序）。
+fn supervise_ready(svc_dir: &Path) -> bool {
+    svc_dir.join("supervise").is_dir()
+}
+
+/// 有界等待 runsvdir 注册（100ms 步长、上限 6000ms；runsvdir 对新建服务目录的
+/// 扫描周期 ≤5s——一次性 CLI，阻塞可接受，超时即走降级路径）。
+fn wait_supervise_registered(svc_dir: &Path) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if supervise_ready(svc_dir) {
+            return true;
+        }
+        if start.elapsed() >= std::time::Duration::from_millis(6000) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// enable：先等 runsvdir 注册服务目录（全新安装目录刚建时 sv-enable 内的 sv 找不到
+/// 控制目录必败 rc=1——真机 SEG-1 实证），注册后走 sv-enable（PATH → $PREFIX/bin 兜底）。
+/// 失败/缺失/超时不判死——目录内无 down 占位，runsvdir 若在跑 ≤5s 自动拉起；
+/// 打印监管状态与手动 enable 路径（含 SVDIR 导出提示：sv-* 助手缺 SVDIR 会踩空）。
 fn enable(svroot: &Path) {
-    let manual = match find_helper("sv-enable") {
-        Some(bin) => match Command::new(&bin).arg(SV_NAME).status() {
-            Ok(st) if st.success() => {
-                eprintln!("[atlas] sv-enable {SV_NAME} 完成");
-                return;
-            }
-            Ok(st) => format!("sv-enable 退出码 {:?}", st.code()),
-            Err(e) => format!("sv-enable 拉起失败: {e}"),
-        },
-        None => "未找到 sv-enable（termux-services 未安装？）".to_string(),
+    let svc = svroot.join(SV_NAME);
+    let manual = if !wait_supervise_registered(&svc) {
+        "runsvdir 6000ms 内未注册服务目录（supervise/ 未出现；runsvdir 未在跑？）".to_string()
+    } else {
+        match find_helper("sv-enable") {
+            Some(bin) => match Command::new(&bin).arg(SV_NAME).status() {
+                Ok(st) if st.success() => {
+                    eprintln!("[atlas] sv-enable {SV_NAME} 完成");
+                    return;
+                }
+                Ok(st) => format!("sv-enable 退出码 {:?}", st.code()),
+                Err(e) => format!("sv-enable 拉起失败: {e}"),
+            },
+            None => "未找到 sv-enable（termux-services 未安装？）".to_string(),
+        }
     };
     eprintln!("[atlas] WARN {manual}，降级为手动 enable");
     match runsvdir_alive() {
@@ -155,7 +182,8 @@ fn enable(svroot: &Path) {
         }
         None => eprintln!("[atlas] runsvdir 存活状态不可探测（/proc 不可读）"),
     }
-    eprintln!("[atlas] 手动 enable：sv-enable {SV_NAME}（服务目录 {}）", svroot.display());
+    eprintln!("[atlas] 先导出 SVDIR（sv-* 助手依赖）：export SVDIR={}", svroot.display());
+    eprintln!("[atlas] 手动 enable：sv-enable {SV_NAME}（服务目录 {}）", svc.display());
 }
 
 /// 安装/刷新 runit 服务（幂等：资产覆盖、二进制刷新——同路径就地重装则跳过；
@@ -322,6 +350,19 @@ mod tests {
         assert!(p.iter().all(|e| e.path.file_name() != Some(OsStr::new("down"))));
         assert_eq!(p[2].path.parent(), Some(p[0].path.as_path()));
         assert_eq!(p[3].path.parent(), Some(p[1].path.as_path()));
+    }
+
+    /// supervise_ready 纯判定：服务目录缺失或无 supervise/ 控制目录 = 未注册；
+    /// 控制目录就位 = 已注册（等待逻辑的时序部分不在此测）。
+    #[test]
+    fn supervise_ready_tracks_control_dir() {
+        let base = std::env::temp_dir().join(format!("atlas_sv_qa_{}", std::process::id()));
+        let svc = base.join(SV_NAME);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!supervise_ready(&svc), "目录缺失应判未注册");
+        std::fs::create_dir_all(svc.join("supervise")).expect("临时 supervise/ 可建");
+        assert!(supervise_ready(&svc), "supervise/ 就位应判已注册");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 进程环境读路径（svroot()）：SVDIR 显式值覆盖兜底。set_var/remove_var 在
