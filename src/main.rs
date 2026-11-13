@@ -3,7 +3,7 @@
 //! 启动顺序：0 单例锁（flock 数据目录 atlas_prime.lock，进程退出——含崩溃/kill——自动释放；
 //! 二启检测到锁被占用直接退出 1）→ 任务规格装载（autostart 项即拉）→ 操作器（唯一自主
 //! 驱动数据的模块，周期采样入 sqlite）→ ntex API。
-//! Ctrl+C 优雅收尾：停操作器、停全部受管任务。
+//! Ctrl+C 及 SIGTERM 优雅收尾：停操作器、停全部受管任务（systemd/监督器可终止）。
 
 mod v1;
 
@@ -77,13 +77,30 @@ fn main() {
     let _web = Web::spawn(bind.clone());
     eprintln!("[atlas] api listening on http://{bind}");
 
-    // 4. 阻塞至 Ctrl+C（自带最小 runtime，不污染 v1 各域）
+    // 4. 阻塞至 Ctrl+C 或 SIGTERM（自带最小 runtime，不污染 v1 各域）
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("ctrl-c runtime");
     rt.block_on(async {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("[atlas] SIGTERM handler 注册失败，降级为仅 SIGINT: {e}");
+                None
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match term.as_mut() {
+                    Some(s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
     });
     eprintln!("[atlas] shutting down");
 
