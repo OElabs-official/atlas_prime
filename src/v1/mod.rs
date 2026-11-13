@@ -4,7 +4,8 @@
 //! [`api`] ntex HTTP API（路由 ↔ 模块一一对应），
 //! [`operator`] 操作器（程序内唯一自主驱动数据的模块：周期采样），
 //! [`db`] sqlite 被动存储（open/schema/insert/history，永不自发产数据），
-//! [`notify`] 被动出站（termux-notification 薄桥，零状态零策略）。
+//! [`notify`] 被动出站（termux-notification 薄桥，零状态零策略），
+//! [`service`] runit 服务内置安装/卸载（CLI 一次性调用的被动模块，零常驻状态）。
 //! 除 [`prelude`]（标准路径三元组等通用数据）外六域零共享。
 
 pub mod prelude;
@@ -22,3 +23,5 @@ pub mod db;
 pub mod notify;
 #[allow(dead_code)]
 pub mod operator;
+#[allow(dead_code)]
+pub mod service;

@@ -1,5 +1,11 @@
 //! atlas_prime v1 —— headless 编排入口（TUI 已随 _deprecated_src/ 退役）。
 //!
+//! CLI 表面（clap；两旗标互斥，`--help` 全量列出）：
+//! - `atlas_prime`                守护模式（下述启动顺序；flock 拿到后附带 runit 状态提示）
+//! - `atlas_prime --sv-install`   一次性：安装/刷新 runit 服务（复制二进制到 $PREFIX/bin +
+//!   内嵌服务资产落 $SVDIR + sv-enable），成功 exit 0（逻辑在 [`v1::service`]）
+//! - `atlas_prime --sv-uninstall` 一次性：卸载 runit 服务（二进制与日志历史有意保留），exit 0
+//!
 //! 启动顺序：0 单例锁（flock 数据目录 atlas_prime.lock，进程退出——含崩溃/kill——自动释放；
 //! 二启检测到锁被占用直接退出 1）→ 任务规格装载（autostart 项即拉）→ 操作器（唯一自主
 //! 驱动数据的模块，周期采样入 sqlite）→ ntex API。
@@ -12,9 +18,34 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
+
 use v1::operator::Operator;
 use v1::task::{Phase, Task};
 use v1::api::Web;
+
+/// CLI 表面：守护模式（无旗标）+ runit 安装/卸载（互斥两旗标，一次性退出不取单例锁）。
+#[derive(Parser)]
+#[command(author, version, about)]
+struct Cli {
+    /// 安装/刷新 runit 服务：复制二进制到 $PREFIX/bin、内嵌资产落 $SVDIR、sv-enable
+    #[arg(long, conflicts_with = "sv_uninstall")]
+    sv_install: bool,
+    /// 卸载 runit 服务：sv-disable + 删服务目录（二进制与日志历史有意保留）
+    #[arg(long)]
+    sv_uninstall: bool,
+}
+
+/// 一次性服务命令统一出口：Ok → exit 0；Err(msg) → [atlas] 前缀打印后 exit 1。
+fn one_shot(r: Result<(), String>) -> ! {
+    match r {
+        Ok(()) => std::process::exit(0),
+        Err(msg) => {
+            eprintln!("[atlas] {msg}");
+            std::process::exit(1)
+        }
+    }
+}
 
 /// 项目数据目录（统一走 [`v1::prelude`]：directories 三元组 + create_dir_all）。
 fn data_dir() -> Option<PathBuf> {
@@ -48,6 +79,15 @@ fn single_instance() -> Option<std::fs::File> {
 }
 
 fn main() {
+    // 一次性服务命令：不取单例锁（服务在跑时亦可安装/卸载），执行完直接退
+    let cli = Cli::parse();
+    if cli.sv_install {
+        one_shot(v1::service::install());
+    }
+    if cli.sv_uninstall {
+        one_shot(v1::service::uninstall());
+    }
+
     // 0. 单例锁：绑定贯穿整个 main，锁持至进程结束
     let _lock = match single_instance() {
         Some(f) => f,
@@ -59,6 +99,8 @@ fn main() {
             std::process::exit(1)
         }
     };
+    // runit 状态提示（单次 stat，任何 IO 状况静默，绝不打断启动）
+    v1::service::status_hint();
 
     // 1. 任务监督：重扫配置，autostart 项拉起
     let specs = Task::update();
