@@ -4,4 +4,9 @@
 *.log
 /idx.bak
 /idx.out
-/Docs
+/_docs
+/_drafts
+/_research
+/_analyze
+/AGENTS.md
+
