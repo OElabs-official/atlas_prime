@@ -152,16 +152,17 @@ fn wait_supervise_registered(svc_dir: &Path) -> bool {
 }
 
 /// enable：先等 runsvdir 注册服务目录（全新安装目录刚建时 sv-enable 内的 sv 找不到
-/// 控制目录必败 rc=1——真机 SEG-1 实证），注册后走 sv-enable（PATH → $PREFIX/bin 兜底）。
-/// 失败/缺失/超时不判死——目录内无 down 占位，runsvdir 若在跑 ≤5s 自动拉起；
-/// 打印监管状态与手动 enable 路径（含 SVDIR 导出提示：sv-* 助手缺 SVDIR 会踩空）。
+/// 控制目录必败 rc=1——真机 SEG-1 实证），注册后走 sv-enable（PATH → $PREFIX/bin 兜底，
+/// 子进程环境注入解析后的 SVDIR——sv-* 助手自身依赖 $SVDIR，缺了会踩空，env 已显式
+/// 导出时值相同、行为不变）。失败/缺失/超时不判死——目录内无 down 占位，runsvdir 若在跑
+/// ≤5s 自动拉起；打印监管状态与手动 enable 路径（SVDIR 导出提示保留，供手动路径用）。
 fn enable(svroot: &Path) {
     let svc = svroot.join(SV_NAME);
     let manual = if !wait_supervise_registered(&svc) {
         "runsvdir 6000ms 内未注册服务目录（supervise/ 未出现；runsvdir 未在跑？）".to_string()
     } else {
         match find_helper("sv-enable") {
-            Some(bin) => match Command::new(&bin).arg(SV_NAME).status() {
+            Some(bin) => match Command::new(&bin).env("SVDIR", svroot).arg(SV_NAME).status() {
                 Ok(st) if st.success() => {
                     eprintln!("[atlas] sv-enable {SV_NAME} 完成");
                     return;
@@ -250,7 +251,8 @@ pub fn uninstall() -> Result<(), String> {
     eprintln!("[atlas] SVDIR = {}（{}）", svroot.display(), root_label(&svdir));
 
     if let Some(bin) = find_helper("sv-disable") {
-        match Command::new(&bin).arg(SV_NAME).status() {
+        // 注入解析后的 SVDIR：sv-* 助手自身依赖 $SVDIR（与 enable 侧同源同理）
+        match Command::new(&bin).env("SVDIR", &svroot).arg(SV_NAME).status() {
             Ok(st) if st.success() => eprintln!("[atlas] sv-disable {SV_NAME} 完成"),
             Ok(st) => eprintln!("[atlas] sv-disable 退出码 {:?}（忽略，继续删目录）", st.code()),
             Err(e) => eprintln!("[atlas] sv-disable 拉起失败（忽略）: {e}"),
