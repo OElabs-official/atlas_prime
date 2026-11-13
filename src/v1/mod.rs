@@ -6,7 +6,8 @@
 //! [`db`] sqlite 被动存储（open/schema/insert/history，永不自发产数据），
 //! [`notify`] 被动出站（termux-notification 薄桥，零状态零策略），
 //! [`service`] runit 服务内置安装/卸载（CLI 一次性调用的被动模块，零常驻状态）。
-//! 除 [`prelude`]（标准路径三元组等通用数据）外六域零共享。
+//! 除 [`prelude`]（标准路径三元组等通用数据）外零共享：六个驱动/采集域彼此隔离，
+//! 被动工具模块 [`service`]（CLI 一次性调用）同样零状态零共享。
 
 pub mod prelude;
 
