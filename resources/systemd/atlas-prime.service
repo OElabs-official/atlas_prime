@@ -2,6 +2,8 @@
 #   systemctl daemon-reload && systemctl enable --now atlas-prime）
 # Type=simple：ExecStart 即前台进程（守护现状契约）；停止走默认 KillSignal=SIGTERM，
 # 超时 TimeoutStopSec（默认 90s）后 systemd 兜底 SIGKILL；stdout/stderr 自动进 journald。
+# 监听：默认 127.0.0.1:1025（loopback）；对外建议由 APG atlas_network 承担 HTTPS 反代
+# （监听高位端口），或取消下方 Environment 注释改全网卡暴露。
 [Unit]
 Description=atlas_prime system monitor daemon
 After=network.target
@@ -9,7 +11,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/atlas_prime
-Environment=ATLAS_BIND=0.0.0.0:1025
+# Environment=ATLAS_BIND=0.0.0.0:1025  # 需要暴露时取消注释
 Restart=on-failure
 RestartSec=2
 
