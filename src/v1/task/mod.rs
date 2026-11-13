@@ -28,7 +28,7 @@
 //!
 //! # 子模块
 //! - [`tui`]：浏览器 TUI 会话核心——PTY 下的交互式 shell 也是一种子进程
-//!   （令牌门 + 槽位 + 三线程流水线，零 ntex）；WS 传输在 v1/web/tui。
+//!   （令牌门 + 槽位 + 三线程流水线，零 ntex）；WS 传输在 v1/api/tui。
 
 pub mod tui;
 
@@ -44,10 +44,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::v1::PROJECT;
+use crate::v1::prelude;
 
 // ---------------- 公开数据体 ----------------
 
@@ -749,11 +748,7 @@ fn pump<T: Read + Send + 'static>(
 // ---------------- 配置加载与 diff 辅助 ----------------
 
 fn project_dir() -> Option<PathBuf> {
-    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| {
-        ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2]).map(|p| p.data_dir().to_path_buf())
-    })
-    .clone()
+    prelude::data_dir().map(PathBuf::from)
 }
 
 /// 读 atlas_task.json + 扫描 script/*.ts 生成描述符全集；按 id 去重（JSON 优先）。

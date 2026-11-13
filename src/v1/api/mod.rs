@@ -1,8 +1,8 @@
-//! v1/web: ntex HTTP/JSON API 服务器（黑箱），只暴露 [`Web`]。
+//! v1/api: ntex HTTP/JSON API 服务器（黑箱），只暴露 [`Web`]。
 //!
 //! # 公开接口用法
 //! ```ignore
-//! use crate::v1::web::Web;
+//! use crate::v1::api::Web;
 //!
 //! // 阻塞运行（自带 ntex System，不依赖外层 tokio）
 //! Web::serve("127.0.0.1:8080").ok();
@@ -39,7 +39,7 @@
 //!   响应按时间**升序** `[{t:"YYYY-MM-DDTHH:MM:SSZ",k,v}]`——`t` 为 RFC3339 字符串原文
 //!   （前端 `Date.parse` 直吃）；DB 读走阻塞池（`Db::history` 内部驱动共享 runtime），不限流；
 //! - `GET /` → 302 重定向到 `/dashboard.html`；
-//! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改根目录 dashboard.html 重编）：
+//! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改 resources/dashboard.html 重编）：
 //!   数据目录（与 v1/db 同源）存在 dashboard.html → **存在即覆盖**，每次读盘（走阻塞池，
 //!   改动刷新即见，开发热替换；删文件回落内嵌）；否则直接回内嵌字节，**永不 404**。
 //!   不限流，响应带 `cache-control: no-cache` 杜绝浏览器启发式缓存；
@@ -71,14 +71,13 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use directories::ProjectDirs;
 use ntex::SharedCfg;
 use ntex::http::error::BlockingError;
 use ntex::web::{self, App, HttpResponse};
 use ntex_cors::Cors;
 use serde::Deserialize;
 
-use crate::v1::PROJECT;
+use crate::v1::prelude;
 use crate::v1::db::Db;
 use crate::v1::operator::Operator;
 use crate::v1::system::{battery, cpu, disk, gpu, mem, network, proc, thermal};
@@ -316,17 +315,12 @@ async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
 
 // ---------------- 静态路由（面板，不过 Gate、不缓存） ----------------
 
-/// 面板前端内嵌于二进制随发布（UI 随二进制发布；改版 = 改根目录 dashboard.html 重编）。
-pub const DASHBOARD_HTML: &str = include_str!("../../../dashboard.html");
+/// 面板前端内嵌于二进制随发布（UI 随二进制发布；改版 = 改 resources/dashboard.html 重编）。
+pub const DASHBOARD_HTML: &str = include_str!("../../../resources/dashboard.html");
 
-/// 数据目录下的 dashboard.html（开发热替换覆盖文件；解析与 v1/db 的 db_path 同源：directories + PROJECT 常量）
+/// 数据目录下的 dashboard.html（开发热替换覆盖文件；解析与 v1/db 的 db_path 同源：v1::prelude 数据目录）
 fn dashboard_path() -> Option<PathBuf> {
-    static P: OnceLock<Option<PathBuf>> = OnceLock::new();
-    P.get_or_init(|| {
-        ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2])
-            .map(|p| p.data_dir().join("dashboard.html"))
-    })
-    .clone()
+    prelude::data_dir().map(|d| d.join("dashboard.html"))
 }
 
 /// 本次要服务的字节来源（判定见 [`pick_serve`]）。
@@ -600,7 +594,7 @@ mod tests {
 
     /// 真机冒烟：起服务 → 裸 HTTP GET 各路由 → 操作器 1Hz 速度回路两拍 →
     /// speed 成员 + kind=net 历史 → 关停。
-    /// `cargo test v1::web -- --ignored --test-threads=1`
+    /// `cargo test v1::api -- --ignored --test-threads=1`
     #[test]
     #[ignore]
     fn live_serve_smoke() {

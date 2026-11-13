@@ -1,5 +1,5 @@
 //! v1/task/tui: 浏览器 TUI 会话核心（**任务绑定**的常驻 PTY 会话册），移植自
-//! atlas_prototype_group/atlas_agentflow；WS 传输在 `v1/web/tui.rs`，本模块
+//! atlas_prototype_group/atlas_agentflow；WS 传输在 `v1/api/tui.rs`，本模块
 //! **零 ntex**——task 域管子进程，web 域管字节管道，接缝 = [`attach_or_spawn`]
 //! 回 [`SessionRef`] + [`ReplayBuf`] + 订阅 `Receiver<TuiEvent>`，外加
 //! [`kill`] / [`session_snapshot`] / [`prune_missing`] 三个控制面纯函数。
