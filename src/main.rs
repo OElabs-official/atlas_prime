@@ -2,6 +2,9 @@
 //!
 //! CLI 表面（clap；两旗标互斥，`--help` 全量列出）：
 //! - `atlas_prime`                守护模式（下述启动顺序；flock 拿到后附带 runit 状态提示）
+//! - `--host ADDR`                仅守护模式：监听地址。ADDR 含 ':' 即 host:port 原样使用，
+//!   裸 host 补默认端口 1025；未给则退 ATLAS_BIND 环境变量，最终默认 127.0.0.1:1025
+//!   （loopback——旧默认 0.0.0.0:1025 已收窄，优先级逻辑见 [`resolve_bind`]）
 //! - `atlas_prime --sv-install`   一次性：安装/刷新 runit 服务（复制二进制到 $PREFIX/bin +
 //!   内嵌服务资产落 $SVDIR + sv-enable），成功 exit 0（逻辑在 [`v1::service`]）
 //! - `atlas_prime --sv-uninstall` 一次性：卸载 runit 服务（二进制与日志历史有意保留），exit 0
@@ -24,9 +27,22 @@ use v1::operator::Operator;
 use v1::task::{Phase, Task};
 use v1::api::Web;
 
-/// CLI 表面：守护模式（无旗标）+ runit 安装/卸载（互斥两旗标，一次性退出不取单例锁）。
+/// CLI 表面：守护模式（无旗标）+ runit 安装/卸载（互斥两旗标，一次性退出不取单例锁）
+/// + 守护模式监听地址覆盖（--host，与两旗标正交，仅守护模式生效）。
 #[derive(Parser)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "atlas_prime —— headless 系统监控守护进程：周期采样硬件/网络写入本地 sqlite，\
+                  经 HTTP/JSON API 服务面板（守护模式）；另提供一次性服务命令 \
+                  --sv-install / --sv-uninstall（runit 安装/卸载，执行完即退）。",
+    after_help = "监听（仅守护模式）：默认 127.0.0.1:1025（loopback）。\n  \
+        --host 0.0.0.0          全网卡监听，端口自动补 1025（ADDR 接受 host 或 host:port，含 ':' 原样使用）\n  \
+        --host 0.0.0.0:8123     全网卡 + 自定义端口\n  \
+        ATLAS_BIND=host:port    环境变量兜底（--host 未给时生效，值原样使用）\n  \
+        建议由 APG atlas_network 承担对外 HTTPS 反向代理（监听高位端口），守护进程保持 loopback。"
+)]
 struct Cli {
     /// 安装/刷新 runit 服务：复制二进制到 $PREFIX/bin、内嵌资产落 $SVDIR、sv-enable
     #[arg(long, conflicts_with = "sv_uninstall")]
@@ -34,6 +50,10 @@ struct Cli {
     /// 卸载 runit 服务：sv-disable + 删服务目录（二进制与日志历史有意保留）
     #[arg(long)]
     sv_uninstall: bool,
+    /// 守护模式监听地址（仅守护模式生效）：ADDR 含 ':' 按 host:port 原样使用，裸 host 补端口 1025；
+    /// 未给退 ATLAS_BIND 环境变量，均缺省则 127.0.0.1:1025（loopback）
+    #[arg(long, value_name = "ADDR")]
+    host: Option<String>,
 }
 
 /// 一次性服务命令统一出口：Ok → exit 0；Err(msg) → [atlas] 前缀打印后 exit 1。
@@ -78,6 +98,27 @@ fn single_instance() -> Option<std::fs::File> {
     lock_file_on(&dir.join("atlas_prime.lock"))
 }
 
+/// API 监听地址解析（仅守护模式；纯函数，单测见 bind_tests）。优先级：
+/// 1. `--host ADDR`：含 ':' 即 host:port，原样使用；不含则视为裸 host，补默认端口 1025。
+///    空串按未给处理——「未给」以 None 编码（clap 未传该旗标时字段即 None，不会传 Some("")）。
+/// 2. 否则 ATLAS_BIND 环境变量非空值，host:port 原样使用。
+/// 3. 否则默认 `127.0.0.1:1025`——loopback。旧默认 0.0.0.0:1025 全网卡监听，现已收窄；
+///    对外暴露建议由 APG atlas_network 承担 HTTPS 反代（高位端口），或显式 --host / ATLAS_BIND。
+fn resolve_bind(host_flag: Option<&str>, atlas_bind: Option<&str>) -> String {
+    const DEFAULT_PORT: u16 = 1025;
+    if let Some(addr) = host_flag.filter(|a| !a.is_empty()) {
+        return if addr.contains(':') {
+            addr.to_string()
+        } else {
+            format!("{addr}:{DEFAULT_PORT}")
+        };
+    }
+    if let Some(v) = atlas_bind.filter(|v| !v.is_empty()) {
+        return v.to_string();
+    }
+    format!("127.0.0.1:{DEFAULT_PORT}")
+}
+
 fn main() {
     // 一次性服务命令：不取单例锁（服务在跑时亦可安装/卸载），执行完直接退
     let cli = Cli::parse();
@@ -114,8 +155,9 @@ fn main() {
         eprintln!("[atlas] operator start failed: {e}");
     }
 
-    // 3. Web API：后台线程内建 ntex System（句柄保活至进程结束）
-    let bind = env::var("ATLAS_BIND").unwrap_or_else(|_| "0.0.0.0:1025".to_string());
+    // 3. Web API：后台线程内建 ntex System（句柄保活至进程结束）；
+    // 监听地址 = --host > ATLAS_BIND > 默认 127.0.0.1:1025（loopback），见 resolve_bind
+    let bind = resolve_bind(cli.host.as_deref(), env::var("ATLAS_BIND").ok().as_deref());
     let _web = Web::spawn(bind.clone());
     eprintln!("[atlas] api listening on http://{bind}");
 
@@ -180,5 +222,54 @@ mod singleton_tests {
             "释放后重新加锁应成功（Some 句柄随即 drop）"
         );
         let _ = std::fs::remove_file(&file);
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::resolve_bind;
+
+    /// 旗标带端口：含 ':' 即 host:port，原样使用（env 同样在也优先旗标）
+    #[test]
+    fn host_flag_with_port_is_used_verbatim() {
+        assert_eq!(resolve_bind(Some("0.0.0.0:8123"), None), "0.0.0.0:8123");
+        assert_eq!(
+            resolve_bind(Some("[::]:8123"), Some("10.0.0.1:9999")),
+            "[::]:8123"
+        );
+    }
+
+    /// 旗标裸 host：补默认端口 1025（即便 env 在，旗标优先级更高）
+    #[test]
+    fn host_flag_bare_address_gets_default_port() {
+        assert_eq!(resolve_bind(Some("0.0.0.0"), None), "0.0.0.0:1025");
+        assert_eq!(
+            resolve_bind(Some("127.0.0.1"), Some("10.0.0.1:9999")),
+            "127.0.0.1:1025"
+        );
+    }
+
+    /// env 兜底：旗标未给时 ATLAS_BIND 原样使用
+    #[test]
+    fn env_fallback_used_verbatim_when_flag_absent() {
+        assert_eq!(resolve_bind(None, Some("10.0.0.1:8080")), "10.0.0.1:8080");
+    }
+
+    /// 双缺省：默认 loopback（旧默认 0.0.0.0:1025 已收窄）
+    #[test]
+    fn default_is_loopback_when_nothing_given() {
+        assert_eq!(resolve_bind(None, None), "127.0.0.1:1025");
+    }
+
+    /// 旗标压过 env（两种旗标形态各验一次）+ 空串按未给处理：
+    /// 空旗标退到 env、空 env 退到默认——「未给」以 None/空编码，绝不算合法地址
+    #[test]
+    fn flag_beats_env_and_empty_strings_count_as_absent() {
+        assert_eq!(
+            resolve_bind(Some("192.168.1.5:1234"), Some("10.0.0.1:8080")),
+            "192.168.1.5:1234"
+        );
+        assert_eq!(resolve_bind(Some(""), Some("10.0.0.1:8080")), "10.0.0.1:8080");
+        assert_eq!(resolve_bind(None, Some("")), "127.0.0.1:1025");
     }
 }
