@@ -29,14 +29,14 @@
 //!   去重，仅保留挂载点最短的一条；
 //! - 容量走 `libc::statvfs`，权限不足（EACCES）的挂载点静默跳过；
 //! - 路径表用 `OnceLock` 惰性缓存（本机 Termux std 构建无 `sync::OnceCell`，
-//!   `OnceLock` 为等价物），项目段沿用 `crate::v1::PROJECT` 三元组。
+//!   `OnceLock` 为等价物），项目段走 [`crate::v1::prelude::project_dirs`] 单例。
 
 use serde::Serialize;
 use std::sync::OnceLock;
 
-use directories::{BaseDirs, ProjectDirs, UserDirs};
+use directories::{BaseDirs, UserDirs};
 
-use crate::v1::PROJECT;
+use crate::v1::prelude;
 
 /// 单个真实块设备挂载点的容量快照（本模块对外类型之一）。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -188,8 +188,8 @@ fn build_dirs() -> Vec<String> {
         std::env::current_dir().unwrap_or_default()
     ));
 
-    // 2. 项目标准路径（与 crate::v1::PROJECT 三元组一致）
-    if let Some(proj) = ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2]) {
+    // 2. 项目标准路径（v1::prelude 单例，org.oelabs.atlas_prime 三元组）
+    if let Some(proj) = prelude::project_dirs() {
         list.push("\n--- [ Project Standard Dirs ] ---".to_string());
         list.push(format!("Data Root:   {:?}", proj.data_dir()));
         list.push(format!("Cache Root:  {:?}", proj.cache_dir()));

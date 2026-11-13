@@ -1,4 +1,4 @@
-//! v1/web/tui: 浏览器 TUI 的 **WS 传输层**——路由、帧语义、HTTP 状态码映射。
+//! v1/api/tui: 浏览器 TUI 的 **WS 传输层**——路由、帧语义、HTTP 状态码映射。
 //! 会话核心（PTY、任务子进程、令牌门、**常驻会话册**、回放环）在 [`task::tui`]：
 //! task 域管子进程，web 域管字节管道（本模块零会话状态，纯搬运；拆除只退订，
 //! **不杀会话**——回收唯 task 域四路径：子进程退出 / `/tui/kill` / 注册表
@@ -330,31 +330,31 @@ pub async fn h_sessions() -> HttpResponse {
 
 // ---------------- /vendor 前端资产（内嵌，白名单五件） ----------------
 
-/// 白名单资产：名字 → 内嵌字节 → MIME。路径相对本文件上溯至仓库根 vendor/。
+/// 白名单资产：名字 → 内嵌字节 → MIME。路径相对本文件上溯至仓库根 resources/vendor/。
 const VENDOR: &[(&str, &[u8], &str)] = &[
     (
         "xterm.css",
-        include_bytes!("../../../vendor/xterm.css"),
+        include_bytes!("../../../resources/vendor/xterm.css"),
         "text/css; charset=utf-8",
     ),
     (
         "xterm.js",
-        include_bytes!("../../../vendor/xterm.js"),
+        include_bytes!("../../../resources/vendor/xterm.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-fit.js",
-        include_bytes!("../../../vendor/addon-fit.js"),
+        include_bytes!("../../../resources/vendor/addon-fit.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-webgl.js",
-        include_bytes!("../../../vendor/addon-webgl.js"),
+        include_bytes!("../../../resources/vendor/addon-webgl.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-unicode-graphemes.js",
-        include_bytes!("../../../vendor/addon-unicode-graphemes.js"),
+        include_bytes!("../../../resources/vendor/addon-unicode-graphemes.js"),
         "text/javascript; charset=utf-8",
     ),
 ];

@@ -1,21 +1,20 @@
-//! v1: 采集/管理层根模块，按域分子目录：[`system`] 硬件/系统黑箱采集，
-//! [`task`] 任务监督器，[`web`] ntex HTTP API（路由 ↔ 模块一一对应），
+//! v1: 采集/管理层根模块，按域分子目录：[`prelude`] 通用数据底座（版本号、
+//! org.oelabs.* 标准路径、配置加载；standard_dev.md 规范 mod），
+//! [`system`] 硬件/系统黑箱采集，[`task`] 任务监督器，
+//! [`api`] ntex HTTP API（路由 ↔ 模块一一对应），
 //! [`operator`] 操作器（程序内唯一自主驱动数据的模块：周期采样），
 //! [`db`] sqlite 被动存储（open/schema/insert/history，永不自发产数据），
 //! [`notify`] 被动出站（termux-notification 薄桥，零状态零策略）。
-//! 除标准路径三元组外六域零共享。
+//! 除 [`prelude`]（标准路径三元组等通用数据）外六域零共享。
 
-/// 标准路径三元组（organization, vendor/application）+ 版本槽（随 Cargo.toml
-/// 走，`env!` 编译期注入，永不手改）；directories/sqlite/任务配置共用
-/// （原 constans::PROJECT，随 v1 自包含化迁入；消费侧只取 [0..3]，版本槽留审计）。
-pub const PROJECT: &[&str] = &["org", "oelabs", "atlas_prime", env!("CARGO_PKG_VERSION")];
+pub mod prelude;
 
 #[allow(dead_code)]
 pub mod system;
 #[allow(dead_code)]
 pub mod task;
 #[allow(dead_code)]
-pub mod web;
+pub mod api;
 
 #[allow(dead_code)]
 pub mod db;

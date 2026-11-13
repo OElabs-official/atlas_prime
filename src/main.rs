@@ -12,19 +12,13 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
-
 use v1::operator::Operator;
 use v1::task::{Phase, Task};
-use v1::web::Web;
+use v1::api::Web;
 
-/// 项目数据目录（与 v1/db 的 db_path 同一解析：directories 三元组 + create_dir_all）。
+/// 项目数据目录（统一走 [`v1::prelude`]：directories 三元组 + create_dir_all）。
 fn data_dir() -> Option<PathBuf> {
-    ProjectDirs::from(v1::PROJECT[0], v1::PROJECT[1], v1::PROJECT[2]).map(|p| {
-        let d = p.data_dir().to_path_buf();
-        let _ = std::fs::create_dir_all(&d);
-        d
-    })
+    v1::prelude::data_dir().map(PathBuf::from)
 }
 
 /// 对 `path` 施加非阻塞独占 flock 并写入当前 pid。

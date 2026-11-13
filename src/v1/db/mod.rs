@@ -58,12 +58,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use directories::ProjectDirs;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{Connection, Row};
 
-use crate::v1::PROJECT;
+use crate::v1::prelude;
 
 /// 非 net kind 的滚动上限（采样轮数；一轮 ≈ 百行，2 分钟/轮 ≈ 27.7 天）
 pub const MAX_ROUNDS: i64 = 20_000;
@@ -234,15 +233,9 @@ async fn trim_rounds(
 
 fn db_path() -> Result<PathBuf, DbError> {
     static P: OnceLock<Option<PathBuf>> = OnceLock::new();
-    P.get_or_init(|| {
-        ProjectDirs::from(PROJECT[0], PROJECT[1], PROJECT[2]).map(|p| {
-            let d = p.data_dir().to_path_buf();
-            let _ = std::fs::create_dir_all(&d);
-            d.join("atlas_history.db")
-        })
-    })
-    .clone()
-    .ok_or_else(|| DbError::Open("no project data dir".into()))
+    P.get_or_init(|| prelude::data_dir().map(|d| d.join("atlas_history.db")))
+        .clone()
+        .ok_or_else(|| DbError::Open("no project data dir".into()))
 }
 
 async fn open() -> Result<SqliteConnection, DbError> {
