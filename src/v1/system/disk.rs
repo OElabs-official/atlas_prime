@@ -133,26 +133,32 @@ fn candidates(text: &str) -> Vec<(String, String, String)> {
     out
 }
 
-/// 还原 /proc/mounts 的八进制转义：`\040`=空格 `\011`=tab `\012`=换行 `\134`=反斜杠
+/// 还原 /proc/mounts 的八进制转义：`\NNN`（三位八进制）→ 对应字符，
+/// 内核实际只会产出 `\040`=空格 `\011`=tab `\012`=换行 `\134`=反斜杠。
+/// 非转义（反斜杠后不足三位、或含非八进制数字，如尾部裸 `\`、`\999`、`\08`）
+/// 时反斜杠按字面保留且其后字符不被吞掉（逐字面透传）。
 fn unescape_mount(s: &str) -> String {
     if !s.contains('\\') {
         return s.to_owned();
     }
     let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
+    let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         if c != '\\' {
             out.push(c);
             continue;
         }
-        let (Some('0'), Some(o), Some(d)) = (it.next(), it.next(), it.next()) else {
+        // 前瞻（不消费）反斜杠后 3 个字符：全部为八进制数字才构成转义。
+        // 任一非八进制数字会被 flat_map 滤掉 → 位数不足 → 不匹配。
+        let digits: Vec<u32> = it.clone().take(3).flat_map(|d| d.to_digit(8)).collect();
+        if let [a, b, d] = digits[..] {
+            // 三位八进制最大 0o777=511，恒为合法 Unicode 标量
+            let ch = char::from_u32(a * 64 + b * 8 + d).unwrap_or('\\');
+            it.by_ref().take(3).for_each(drop);
+            out.push(ch);
             continue;
-        };
-        if let (Some(o), Some(d)) = (o.to_digit(8), d.to_digit(8)) {
-            if let Some(ch) = char::from_u32(o * 8 + d) {
-                out.push(ch);
-            }
         }
+        out.push('\\');
     }
     out
 }
@@ -269,6 +275,28 @@ mod tests {
     fn unescapes_octal_paths() {
         assert_eq!(unescape_mount("/mnt/My\\040Disk"), "/mnt/My Disk");
         assert_eq!(unescape_mount("/plain"), "/plain");
+    }
+
+    /// 内核四转义全集：`\040` 空格、`\011` tab、`\012` 换行、`\134` 反斜杠。
+    /// 其中 `\134` 为 red-first：旧实现只认 '0' 前缀，会把 `\134` 连同数字一起吞掉。
+    #[test]
+    fn unescapes_all_kernel_octal_escapes() {
+        assert_eq!(unescape_mount("/a\\040b"), "/a b");
+        assert_eq!(unescape_mount("/a\\011b"), "/a\tb");
+        assert_eq!(unescape_mount("/a\\012b"), "/a\nb");
+        assert_eq!(unescape_mount("/a\\134b"), "/a\\b");
+        // \000（NUL）同样是合法八进制转义，还原为真实 NUL 字符
+        assert_eq!(unescape_mount("/a\\000b"), "/a\0b");
+    }
+
+    /// 畸形转义一律按字面保留（反斜杠原样输出、其后字符不被吞掉）：
+    /// 尾部裸反斜杠 / 非八进制数字 / 部分八进制 / 不足三位。
+    #[test]
+    fn malformed_escapes_pass_through_literally() {
+        assert_eq!(unescape_mount("/a\\"), "/a\\");
+        assert_eq!(unescape_mount("/a\\999b"), "/a\\999b");
+        assert_eq!(unescape_mount("/a\\08b"), "/a\\08b");
+        assert_eq!(unescape_mount("/a\\04"), "/a\\04");
     }
 
     #[test]
