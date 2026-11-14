@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! // crate 内调用路径：crate::v1::system::thermal
-//! let t = crate::v1::system::thermal::Temp::get();      // 一次采集
+//! let t = crate::v1::system::thermal::Temp::get();      // 采集（10s TTL 缓存，窗内零 openat）
 //!
 //! t.cpu_core[0].0;   // f32  每核CPU探头组第0个探头的摄氏度，如 61.4
 //! t.cpu_core[0].1;   // String 对应传感器 type 名，如 "cpu-0-0-0"
@@ -31,15 +31,23 @@
 //! ```
 //!
 //! 内部策略（本机实测：68 zones，全部可通过 sysfs 读取）：
+//! - [`Temp::get`] 外套 10s TTL 缓存（审计 perf F6）：新鲜窗内回放快照、零 openat，
+//!   过期才逐探头真采；单飞锁令并发迟到者并入同一轮采集；
 //! - 首次采集时扫描 `/sys/class/thermal/thermal_zone*`，读取每个 zone 的 `type`
 //!   并按前缀归类（`OnceLock` 只初始化一次），**不写死 zone 号**
 //!   （zone 编号跨机型不稳定，例如本机 zone0 实为 `aoss-0` 而非 CPU 温度）；
+//!   各 zone 的 temp 文件路径随扫描一次拼好（`PathBuf` 预建，热路径零分配）；
 //! - `*-bcl-lvl*` 为电池电流限制计数器，不是温度，枚举阶段即排除；
 //! - 读数 `-273000`（毫度）代表探头未贴装，过滤后不进入样本组。
 
 use serde::Serialize;
 use std::fs;
-use std::sync::OnceLock;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const THERMAL_ROOT: &str = "/sys/class/thermal";
 
@@ -79,31 +87,86 @@ pub struct Temp {
 }
 
 impl Temp {
-    /// 【唯一公开关联函数】执行一次分组温度采集（传感器列表首次调用时初始化并缓存）
+    /// 【唯一公开关联函数】带 10s TTL 缓存的分组温度采集（审计 perf F6）：新鲜窗内
+    /// 直接回放快照、零 openat；过期才真采一轮（[`collect`]，传感器列表首采时初始化
+    /// 并永久缓存），并发迟到者经单飞锁并入同轮。
     pub fn get() -> Self {
-        // 分桶顺序必须与 CATS（即字段声明顺序）一致
-        let mut b: [Vec<(f32, String)>; 12] = std::array::from_fn(|_| Vec::new());
-        for s in sensors() {
-            if let Some(t) = read_celsius(s.zone) {
-                b[cat_index(s.category)].push((t, s.name.clone()));
-            }
+        snapshot(Instant::now())
+    }
+}
+
+// ---------------- 10s TTL 缓存（审计 perf F6：1/s 读不再逐次 openat 全部 zone） ----------------
+
+/// 新鲜窗：窗内回放缓存不再采集；age 恰等于 TTL 即过期（TTL 到期必重采）。
+const CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// 进程级快照格（计划钉死形态 `OnceLock<Mutex<Option<(Instant, Snapshot)>>>`）。
+/// 单飞（single-flight）：锁跨 [`collect`] 持有——并发迟到者阻塞至在途采集完成，
+/// 随即并入其新鲜缓存；collect 中途 panic 只毒锁不损缓存本体（写回是整体赋值），
+/// `into_inner` 回收即用旧缓存，过期再采。
+static CACHE: OnceLock<Mutex<Option<(Instant, Temp)>>> = OnceLock::new();
+
+/// 采集计数（测试缝，生产构建不挂载）：冷启动区域必恰好 +1；TTL 到期再 +1。
+#[cfg(test)]
+static COLLECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// 生产绑定：进程级格 + 真采集体 + 墙钟。
+fn snapshot(now: Instant) -> Temp {
+    snapshot_in(&CACHE, now, collect)
+}
+
+/// 时钟与格位可注入的缓存骨架（测试缝：局部格 + 注入 Instant + 计数闭包，
+/// 免睡 10s、免与并行测试串扰）。新鲜判据 age < TTL，age 恰等于 TTL 即过期；
+/// 时钟倒走/并发先写者的微超前列（checked 取 None）按新鲜消化：回放旧缓存
+/// 等窗口自然到期，宁供稍陈数据也不 panic、不重复扫读。
+fn snapshot_in(
+    cell: &OnceLock<Mutex<Option<(Instant, Temp)>>>,
+    now: Instant,
+    collect: impl FnOnce() -> Temp,
+) -> Temp {
+    let cell = cell.get_or_init(Mutex::default);
+    let mut cache = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, snap)) = cache.as_ref() {
+        let fresh = match now.checked_duration_since(*at) {
+            Some(age) => age < CACHE_TTL,
+            None => true,
+        };
+        if fresh {
+            return snap.clone();
         }
-        let mut it = b.into_iter();
-        let mut next = move || it.next().unwrap_or_default();
-        Self {
-            cpu_core: next(),
-            cpu_cluster: next(),
-            gpu: next(),
-            dsp: next(),
-            modem: next(),
-            camera: next(),
-            aoss: next(),
-            ddr: next(),
-            pmic: next(),
-            battery: next(),
-            radio: next(),
-            other: next(),
+    }
+    let snap = collect();
+    *cache = Some((now, snap.clone()));
+    snap
+}
+
+/// 真采集体（原 `Temp::get` 正文）：逐探头读 temp（路径已在扫描期拼好，热路径
+/// 零分配，cpu.rs Topology::paths 同款纪律），按类别分桶。
+fn collect() -> Temp {
+    #[cfg(test)]
+    COLLECTS.fetch_add(1, Ordering::Relaxed);
+    // 分桶顺序必须与 CATS（即字段声明顺序）一致
+    let mut b: [Vec<(f32, String)>; 12] = std::array::from_fn(|_| Vec::new());
+    for s in sensors() {
+        if let Some(t) = read_celsius(&s.path) {
+            b[cat_index(s.category)].push((t, s.name.clone()));
         }
+    }
+    let mut it = b.into_iter();
+    let mut next = move || it.next().unwrap_or_default();
+    Temp {
+        cpu_core: next(),
+        cpu_cluster: next(),
+        gpu: next(),
+        dsp: next(),
+        modem: next(),
+        camera: next(),
+        aoss: next(),
+        ddr: next(),
+        pmic: next(),
+        battery: next(),
+        radio: next(),
+        other: next(),
     }
 }
 
@@ -179,11 +242,14 @@ fn classify(type_name: &str) -> Option<Category> {
     })
 }
 
-/// 内部传感器静态信息（初始化时确定，运行期不变）
+/// 内部传感器静态信息（初始化时确定，运行期不变）。
+/// `path` 在扫描期一次拼好（审计 perf F6；cpu.rs `Topology::paths` 同款纪律），
+/// 采集热路径直接复用、零逐次 format! 分配。
 struct Sensor {
     zone: u32,
     name: String,
     category: Category,
+    path: PathBuf,
 }
 
 /// 传感器列表（本机 std 构建无 `sync::OnceCell`，用等价的 `OnceLock`）
@@ -220,6 +286,7 @@ fn scan_sensors() -> Vec<Sensor> {
                 zone,
                 name: type_name,
                 category,
+                path: PathBuf::from(format!("{THERMAL_ROOT}/thermal_zone{zone}/temp")),
             });
         }
     }
@@ -228,8 +295,9 @@ fn scan_sensors() -> Vec<Sensor> {
 }
 
 /// 读取单个传感器的温度（°C）。探头无效（-273°C 占位）或读取失败返回 `None`。
-fn read_celsius(zone: u32) -> Option<f32> {
-    let raw = fs::read_to_string(format!("{THERMAL_ROOT}/thermal_zone{zone}/temp"))
+/// 路径由 [`scan_sensors`] 一次拼好传入，热路径零分配。
+fn read_celsius(path: &std::path::Path) -> Option<f32> {
+    let raw = fs::read_to_string(path)
         .ok()?
         .trim()
         .parse::<i64>()
@@ -243,7 +311,70 @@ fn read_celsius(zone: u32) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Category, classify};
+    use super::{CACHE_TTL, COLLECTS, Category, Temp, classify, snapshot_in};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// 触碰进程级 TTL 格/全局采集计数的测试共锁（hermetic 的 ttl_cache_* 用局部格）。
+    fn cache_guard() -> MutexGuard<'static, ()> {
+        static L: Mutex<()> = Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn fake_temp(mark: f32) -> Temp {
+        Temp {
+            cpu_core: vec![(mark, "cpu-0-0-0".to_string())],
+            ..Default::default()
+        }
+    }
+
+    /// TTL 缓存契约（计数精确钉死；红-先：改动前无缓存，两次调用 counter==2）：
+    /// 冷启动恰采一次；TTL 窗内 4 连呼零新增且逐字回放；age==TTL 边界即过期重采
+    /// 并顶替旧快照；重采写回即成新窗。注入时钟驱动过期，零墙钟等待。
+    #[test]
+    fn ttl_cache_fresh_hit_and_expiry_recollect_exact_counts() {
+        let cell: OnceLock<Mutex<Option<(Instant, Temp)>>> = OnceLock::new();
+        let n = AtomicUsize::new(0);
+        let t0 = Instant::now();
+        let first = snapshot_in(&cell, t0, || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_temp(1.0)
+        });
+        assert_eq!(n.load(Ordering::Relaxed), 1, "冷启动必恰采一次");
+        let want = format!("{first:?}");
+        for k in 1..=4u32 {
+            let hit = snapshot_in(&cell, t0 + Duration::from_millis(250 * u64::from(k)), || {
+                n.fetch_add(1, Ordering::Relaxed);
+                fake_temp(2.0)
+            });
+            assert_eq!(format!("{hit:?}"), want, "窗内命中须逐字回放缓存");
+        }
+        assert_eq!(n.load(Ordering::Relaxed), 1, "窗内 4 连呼零新增采集（counter==1 红线）");
+        let after = snapshot_in(&cell, t0 + CACHE_TTL, || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_temp(3.0)
+        });
+        assert_eq!(n.load(Ordering::Relaxed), 2, "TTL 到期（age==TTL）必重采");
+        assert_eq!(after.cpu_core.first().map(|(v, _)| *v), Some(3.0), "过期后新采顶格");
+        let replay = snapshot_in(&cell, t0 + CACHE_TTL + Duration::from_millis(1), || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_temp(4.0)
+        });
+        assert_eq!(replay.cpu_core.first().map(|(v, _)| *v), Some(3.0), "新窗回放新值");
+        assert_eq!(n.load(Ordering::Relaxed), 2, "全程累计仅两次真采集");
+    }
+
+    /// 生产接线钉：Temp::get() 必走全局 TTL 格（首呼后格必新鲜，第二呼零采集且逐字回放）。
+    #[test]
+    fn production_get_serves_next_call_from_ttl_cache() {
+        let _g = cache_guard();
+        let first = Temp::get();
+        let base = COLLECTS.load(Ordering::Relaxed);
+        let again = Temp::get();
+        assert_eq!(COLLECTS.load(Ordering::Relaxed), base, "新鲜窗内第二呼零采集");
+        assert_eq!(format!("{again:?}"), format!("{first:?}"), "回放内容逐字一致");
+    }
 
     #[test]
     fn classify_real_device_types() {
