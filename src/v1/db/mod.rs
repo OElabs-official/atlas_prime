@@ -189,8 +189,15 @@ pub struct Db;
 
 impl Db {
     /// 写入一轮记录（常驻连接：单事务多值插入 → 入队+按节奏滚动修剪 → 节流 WAL
-    /// 截断）。唯一调用方 = 操作器。
-    pub(crate) async fn insert(records: &[Record]) -> Result<usize, DbError> {
+    /// 截断）。唯一调用方 = 操作器，编译期契约（audit task-25）：`DbWriteLane` 令牌
+    /// 只能由 operator 铸造（`pub(in crate::v1::operator)` 构造口），api/其他域拿不到
+    /// 令牌即无法调用本入口（铸造口 E0624、自造 E0451、缺参 E0061）。不用
+    /// `pub(in crate::v1::operator)` 直接标注
+    /// 本方法：db 与 operator 平级，precise visibility 只允许祖先模块（E0742）。
+    pub(crate) async fn insert(
+        records: &[Record],
+        _lane: crate::v1::operator::DbWriteLane,
+    ) -> Result<usize, DbError> {
         let cell = shared_conn().await?;
         let mut core = cell.lock().await;
         let n = run_insert(&mut core.conn, records).await?;
@@ -375,7 +382,7 @@ static INIT_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 /// 测试专用 CONN 复位（锁定决策 iv）：std `OnceLock` 无 `&self` 反初始化
 /// （`take` 要 `&mut`；对 static 手写 `addr_of_mut` 写入会与并发 `CONN.get()`——
-/// 操作器测试线程可 1Hz 驱动 `Db::insert`——竞争成 UB），故复位语义为
+/// 操作器测试线程可 1Hz 驱动写入口——竞争成 UB），故复位语义为
 /// 「异步锁排空在途读写 + TRUNCATE 截断收尾」：常驻连接留槽至进程退出，
 /// init-once 断言全部用相对增量、不依赖反初始化。仅在共享测试锁持有时调用。
 #[cfg(test)]
@@ -1665,7 +1672,7 @@ mod tests {
     // ---- todo 16：常驻连接一次性 init + 节流 WAL 截断 ----
 
     /// 触碰全局 CONN/CKPT_GATE（及真实库文件）的测试串行化（cargo test 默认并行线程；
-    /// 操作器/api 测试的采样也可能经 Db::insert 抢先 init，故断言全部用相对增量）。
+    /// 操作器测试的采样也可能经写入口（operator 测试缝）抢先 init，故断言全部用相对增量）。
     static SHARED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// 红先（GAP-2 验收）：两次顺序写入只 init 一次（旧「每操作开新连接」下 init
@@ -1683,8 +1690,8 @@ mod tests {
             value: 7.5,
         };
         block_on(async {
-            assert_eq!(Db::insert(&[rec.clone()]).await.unwrap(), 1);
-            assert_eq!(Db::insert(&[rec.clone()]).await.unwrap(), 1);
+            assert_eq!(crate::v1::operator::db_insert_for_tests(&[rec.clone()]).await.unwrap(), 1);
+            assert_eq!(crate::v1::operator::db_insert_for_tests(&[rec.clone()]).await.unwrap(), 1);
             assert_eq!(
                 INIT_RUNS.load(Ordering::SeqCst),
                 before + 1,

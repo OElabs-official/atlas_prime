@@ -420,7 +420,7 @@ async fn run_net_meter(tick: Duration) {
                 let rates = grouper.step(&cur, dt);
                 *net_cache().lock().unwrap_or_else(|e| e.into_inner()) = rates.clone();
                 if !rates.is_empty() {
-                    let _ = Db::insert(&net_records(&rates)).await;
+                    let _ = Db::insert(&net_records(&rates), DbWriteLane::acquire()).await;
                 }
             }
             Ok(Err(e)) => {
@@ -547,6 +547,33 @@ async fn work_hook_wait() {
     }
 }
 
+/// db 写道令牌（audit task-25，GAP-7/A-07）：`Db::insert` 的调用凭证，编译期把
+/// 「操作器是唯一写者」钉死——令牌类型 pub(crate) 全域可见，但唯一铸造口
+/// [`DbWriteLane::acquire`] 仅 operator 内可见，api/其他域既无令牌也无法自造
+/// （私有字段 → 结构体字面量 E0451；直调铸造口 → E0624，item-private 家族的
+/// 关联函数变体）。
+/// 不用方法本体 `pub(in crate::v1::operator)`：db 与 operator 平级，precise
+/// visibility 只能指向祖先模块（E0742，编译实证见 evidence task-25）。
+#[derive(Clone, Copy)]
+pub(crate) struct DbWriteLane {
+    _sealed: (),
+}
+
+impl DbWriteLane {
+    /// 唯一铸造口：operator 车道专属。
+    pub(in crate::v1::operator) const fn acquire() -> Self {
+        Self { _sealed: () }
+    }
+}
+
+/// 测试缝（audit task-25）：`Db::insert` 的调用凭证收归 operator 后，operator 之外
+/// 的测试（db 的常驻连接探针）经本函数转发调用唯一写入口——编译契约不因测试而
+/// 放宽，生产构建下本缝不存在。
+#[cfg(test)]
+pub(crate) async fn db_insert_for_tests(records: &[Record]) -> Result<usize, DbError> {
+    Db::insert(records, DbWriteLane::acquire()).await
+}
+
 /// 一轮网速 → 存储行：kind=`net`，key=`<组名>.rx_bps` / `<组名>.tx_bps`
 /// （组名 ∈ wifi / cellular / 有流量的其他网卡名）。
 /// 打戳与 [`collect`] 同一机制：采集时刻单点、秒精度 UTC RFC3339，同拍同行同 ts。
@@ -590,7 +617,7 @@ async fn sample_round() -> Result<usize, OperatorError> {
     let Some(records) = spawn_collect(collect).await else {
         return Ok(0); // 采集任务失败已示警，本轮跳过
     };
-    let n = Db::insert(&records).await?;
+    let n = Db::insert(&records, DbWriteLane::acquire()).await?;
     memwatch::policy(&records, notify::notify, notify::vibrate);
     batterywatch::policy(&records, notify::notify);
     eprintln!(
