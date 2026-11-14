@@ -22,8 +22,7 @@
 //! - `disk` key=`{挂载点}|used` / `{挂载点}|total`（MB）。
 //!
 //! 滚动上限按 **kind 分档**（轮粒度：一轮 = 同一 ts 的全部样本行；RFC3339 统一
-//! 格式 ⇒ 字典序即时间序，`DELETE ... WHERE kind范围 AND ts < (该范围内第 N 新的
-//! DISTINCT ts)` 依旧整轮丢弃）：
+//! 格式 ⇒ 字典序即时间序，修剪恒整轮丢弃）：
 //! - `net`（网卡速度，操作器 1Hz 回路写入）：[`NET_MAX_ROUNDS`] = 28800 轮 ≈ 8h 回溯；
 //!   key 为**分组级** `<组>.rx_bps` / `<组>.tx_bps`（组 = `wifi` / `cellular` /
 //!   有流量的其他网卡名，见 [`crate::v1::system::network::speed`]）；2026-10-20.28
@@ -32,8 +31,22 @@
 //! - 其余 kind（2 分钟/轮）：[`MAX_ROUNDS`] = 20000 轮 ≈ 27.7 天回溯。
 //!
 //! net 与非 net 各自只在本范围内数轮、互不混算（否则 1Hz 的海量 ts 会把 120s 类
-//! 的窗口压没）。每批落库后按批内所含范围各发一条 DELETE（固定两条 prepared
-//! 语句路径；net tick 每轮删一行级，1Hz 下开销可忽略）。
+//! 的窗口压没）。修剪 cutoff **不再**走每轮 `DISTINCT ts … LIMIT 1 OFFSET N` 子查询
+//! 扫描（audit GAP-2 task-17：SCOPE_OTHER 一腿每次全索引 walk 0.65–0.91s，纯扫描税）：
+//! 每个范围在**常驻锁内**维护一条轮首 ts 环形队列（[`ScopeTrim`]，与常驻连接同一把
+//! 锁，无第二把锁）。该范围首轮落库时以**全量列表查询**引导（`SELECT DISTINCT
+//! CAST(strftime('%s',ts) AS INTEGER) … ORDER BY ts DESC LIMIT window+1`，进程内
+//! 一次性；`window+1` 即激活位——超限库重启后首轮即收敛）；此后每轮推入本轮 ts
+//! （相邻同秒去重），队列长度 > window 时取 `queue[window-1]`（第 window 新轮）为
+//! cutoff，发 `DELETE … AND ts < strftime('%Y-%m-%dT%H:%M:%SZ', ?cutoff_secs,
+//! 'unixepoch')`——cutoff 秒数**必须经右侧 strftime 生成 RFC3339 文本比对**：ts 为
+//! TEXT 列，裸 i64 直接比对触发 affinity 转换（'1731…' vs '2026…'），DELETE 静默
+//! 永不命中、表无界增长；右侧表达式不包裹列 ⇒ 索引范围扫描（`idx_records_kind_ts`
+//! /`idx_records_ts`）保留。删成后弹出队尾所有 < cutoff 的项。net 范围每
+//! [`NET_TRIM_TICKS`] 个 net 插入轮才删一次（可观测窗口 8h±60s，计划已锁；入队仍
+//! 每轮），其余范围每轮一次。冷空库/未满窗不是失败：trim 仅在队列长度 > window 后
+//! 激活；引导 SQL 真错则该范围停用修剪并记 WARN（行数临时超窗，宁多删勿误删）。
+//! 硬守卫：**绝不在空/未引导队列上算 cutoff**。
 //!
 //! # schema 迁移（幂等；生产路径仅常驻连接 init 时执行一次，测试缝 `open_at` 逐次
 //! 执行、二次 open = no-op）
@@ -71,8 +84,10 @@
 //! 增长、截断处归零（对照旧基线的每操作 checkpoint 锯齿）；被外部读事务卡住返回
 //! BUSY 时**记 WARN 跳过、绝不令本轮失败**，下一轮重试。
 //! 一轮 = 单事务内若干条 **多值 INSERT**（每片 ≤200 行 = ≤800 绑定，低于
-//! SQLITE_MAX_VARIABLE_NUMBER=999），提交后整轮修剪。
+//! SQLITE_MAX_VARIABLE_NUMBER=999），提交后经 [`post_insert`] 按范围入队并按节奏修剪
+//! （[`ScopeTrim`] 两条环形队列 + net 60 轮计数）。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -101,6 +116,11 @@ const INSERT_CHUNK: usize = 200;
 /// 每批落库后经 [`checkpoint_paced`] 至多每此间隔发一条 TRUNCATE；BUSY 记 WARN 跳过、
 /// 守卫不推进，下一轮重试。取代旧「每操作 open/close 各触发一次自动 checkpoint」的锯齿。
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(120);
+
+/// net 范围修剪节奏（task-17）：每 N 个**含 net 行的插入轮**才发一条 SCOPE_NET
+/// DELETE（入队每轮照做）。1Hz 下 ≈ 每 60s 一删，可观测窗口 8h±60s（计划锁定）；
+/// 120s 大轮内随行写入的 net 行也计一个 tick。
+const NET_TRIM_TICKS: u32 = 60;
 
 /// records 列定义（全新建表与迁移重建 records_new 共用同一事实源）
 const RECORDS_COLUMNS: &str =
@@ -140,19 +160,13 @@ impl std::error::Error for DbError {}
 pub struct Db;
 
 impl Db {
-    /// 写入一轮记录（常驻连接：单事务多值插入 → 提交后滚动修剪 → 节流 WAL
+    /// 写入一轮记录（常驻连接：单事务多值插入 → 入队+按节奏滚动修剪 → 节流 WAL
     /// 截断）。唯一调用方 = 操作器。
     pub(crate) async fn insert(records: &[Record]) -> Result<usize, DbError> {
         let cell = shared_conn().await?;
         let mut core = cell.lock().await;
         let n = run_insert(&mut core.conn, records).await?;
-        // 按批内所含范围各自修剪：net 批只修剪 net，120s 批只修剪其余 kind
-        if records.iter().any(|r| r.kind == "net") {
-            trim_rounds(&mut core.conn, SCOPE_NET, NET_MAX_ROUNDS).await?;
-        }
-        if records.iter().any(|r| r.kind != "net") {
-            trim_rounds(&mut core.conn, SCOPE_OTHER, MAX_ROUNDS).await?;
-        }
+        post_insert(&mut core, records).await?;
         // best-effort（锁定决策 iii）：checkpoint 失败只 WARN，绝不令本轮失败
         checkpoint_paced(&mut core.conn).await;
         Ok(n)
@@ -196,18 +210,134 @@ impl Db {
 /// （三 PRAGMA + 迁移 + 建表/建索引只随该次 init 执行），此后全进程经独占锁复用。
 /// `tokio::sync::Mutex` 而非 std（锁定决策 ii）：guard 跨 await，std 版会在单一驱动
 /// runtime 上阻塞驱动线程、饿死同线程的 sqlite driver 任务 = 自死锁。
-/// 锁内负载是 [`DbCore`]（当前仅连接本体），读写与修剪同锁串行、无跨锁竞态。
+/// 锁内负载是 [`DbCore`]：连接 + 两条修剪环形队列（task-17）同锁互斥——入队/修剪
+/// 与读写天然串行，无第二把锁、无跨锁竞态。
 static CONN: OnceLock<tokio::sync::Mutex<DbCore>> = OnceLock::new();
 
-/// 常驻锁内负载：唯一连接。测试经 [`DbCore::new`] 在自有连接上实例化，
+/// 常驻锁内负载：唯一连接 + 两范围修剪状态 + net 修剪计数（task-17）。
+/// 测试经 [`DbCore::new`] 在自有连接上实例化（队列态 = 每缝实例自带），
 /// 不依赖全局 CONN；生产只有 [`init_conn`] 构造一次。
 struct DbCore {
     conn: SqliteConnection,
+    /// SCOPE_NET（1Hz 写入）修剪队列；每 [`NET_TRIM_TICKS`] 个 net 插入轮删一次
+    net: ScopeTrim,
+    /// SCOPE_OTHER（120s 写入）修剪队列；每轮删一次
+    other: ScopeTrim,
+    /// 距上次 net 修剪的 net 插入轮计数
+    net_ticks: u32,
 }
 
 impl DbCore {
     fn new(conn: SqliteConnection) -> Self {
-        DbCore { conn }
+        DbCore {
+            conn,
+            net: ScopeTrim::with_window(NET_MAX_ROUNDS),
+            other: ScopeTrim::with_window(MAX_ROUNDS),
+            net_ticks: 0,
+        }
+    }
+}
+
+/// 修剪队列生命周期：Pending = 未引导（该范围尚未有首轮落库）；Active = 队列可用
+/// （长度可 < window = 窗口未满，修剪待激）；Disabled = 引导 SQL 真错，本范围修剪
+/// 永久停用（宁可不删=行数临时超窗，绝不误删）。
+enum TrimPhase {
+    Pending,
+    Active,
+    Disabled,
+}
+
+/// 单范围修剪状态（task-17）：轮首 ts_secs 环形队列替代
+/// `DISTINCT ts … LIMIT 1 OFFSET N` 每轮扫描。队列新→旧（front = 最新轮），
+/// 每轮一项（相邻同秒去重）；长度 > window 时 `queue[window-1]`（第 window 新轮）
+/// 即 cutoff，删严格老于它的整轮 ⇒ 删后库中该范围恰剩 window 轮。
+struct ScopeTrim {
+    phase: TrimPhase,
+    ring: VecDeque<i64>,
+    /// 本范围滚动上限（生产 = 28800 / 20000；测试缝用小窗口复刻）
+    window: usize,
+}
+
+impl ScopeTrim {
+    fn with_window(window: i64) -> Self {
+        ScopeTrim {
+            phase: TrimPhase::Pending,
+            ring: VecDeque::new(),
+            window: window.max(1) as usize,
+        }
+    }
+
+    /// 入队本轮轮首（仅 Active；与队首同秒 = 同轮，去重）。时间必须单调：
+    /// 时钟回跳令乱序项滞留在队列中，最多致一轮少删/多删，重启引导即纠回。
+    fn push(&mut self, ts_secs: i64) {
+        if matches!(self.phase, TrimPhase::Active) && self.ring.front() != Some(&ts_secs) {
+            self.ring.push_front(ts_secs);
+        }
+    }
+
+    /// 引导（该范围至多执行一次）：**全量列表**查询灌入队列（旧
+    /// `LIMIT 1 OFFSET N` 边界子查询只返回边界一个 ts，不是队列——冷启动超限库
+    /// 拿它引导会当窗口未满、永不追删）。`LIMIT window+1`：多取的一项即激活位，
+    /// 超限库首轮 trim_now 即收敛。库未满（含冷空库 = 0 行）只是待激、不是失败；
+    /// SQL 真错才 Disabled（WARN 一次，本范围此后不修剪）。
+    async fn ensure_bootstrap(&mut self, conn: &mut SqliteConnection, scope: &str) {
+        if !matches!(self.phase, TrimPhase::Pending) {
+            return;
+        }
+        let sql = format!(
+            "SELECT DISTINCT CAST(strftime('%s', ts) AS INTEGER) FROM records \
+             WHERE {scope} ORDER BY ts DESC LIMIT ?1"
+        );
+        match sqlx::query_scalar::<_, i64>(&sql)
+            .bind((self.window + 1) as i64)
+            .fetch_all(conn)
+            .await
+        {
+            Ok(rows) => {
+                self.ring = rows.into_iter().collect();
+                self.phase = TrimPhase::Active;
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARN db trim bootstrap scope [{scope}] failed, trim disabled for scope \
+                     (rows may exceed window): {e}"
+                );
+                self.ring.clear();
+                self.phase = TrimPhase::Disabled;
+            }
+        }
+    }
+
+    /// 修剪一次（不含节奏门）：未满窗（len ≤ window）或 Disabled 直接 0 行；
+    /// 否则以 queue[window-1] 为 cutoff 整轮删除（守卫 len > window ⇒ 下标必在界）。
+    /// DELETE 谓词右侧 strftime 把 cutoff 秒数**生成 RFC3339 TEXT 再比对**：ts 列是
+    /// TEXT，裸 i64 绑定触发 SQLite affinity 转换（'1731…' 数字 vs '2026…' 文本），
+    /// 谓词静默永不真值、DELETE 空转、表无界增长。右值表达式不包裹列 ⇒ 保留
+    /// `idx_records_kind_ts`（net 等值腿）/ `idx_records_ts`（other 范围腿）range 扫描。
+    /// DELETE 失败向上传播且**不弹队**——下轮重算同一 cutoff，天然重试。
+    async fn trim_now(
+        &mut self,
+        conn: &mut SqliteConnection,
+        scope: &str,
+    ) -> Result<u64, DbError> {
+        if !matches!(self.phase, TrimPhase::Active) || self.ring.len() <= self.window {
+            return Ok(0);
+        }
+        let cutoff = self.ring[self.window - 1];
+        let sql = format!(
+            "DELETE FROM records WHERE {scope} AND ts < \
+             strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch')"
+        );
+        let deleted = sqlx::query(&sql)
+            .bind(cutoff)
+            .execute(conn)
+            .await
+            .map_err(|e| DbError::Sql(e.to_string()))?
+            .rows_affected();
+        while self.ring.back().is_some_and(|t| *t < cutoff) {
+            self.ring.pop_back();
+        }
+        Ok(deleted)
     }
 }
 
@@ -373,22 +503,17 @@ async fn history_on(
         .collect()
 }
 
-/// 写入一轮（测试缝：自带 open，完整轮语义——插入 + 提交后滚动修剪；生产路径
-/// 走常驻连接的同名编排）。
+/// 写入一轮（测试缝：自带 open + 每缝实例修剪队列，完整轮语义——插入 + 入队 +
+/// 按节奏修剪；生产路径走常驻连接的同名编排）。
 async fn insert_at(path: &Path, records: &[Record]) -> Result<usize, DbError> {
     let mut core = DbCore::new(open_at(path).await?);
     let n = run_insert(&mut core.conn, records).await?;
-    if records.iter().any(|r| r.kind == "net") {
-        trim_rounds(&mut core.conn, SCOPE_NET, NET_MAX_ROUNDS).await?;
-    }
-    if records.iter().any(|r| r.kind != "net") {
-        trim_rounds(&mut core.conn, SCOPE_OTHER, MAX_ROUNDS).await?;
-    }
+    post_insert(&mut core, records).await?;
     Ok(n)
 }
 
 /// 插入主体（在调用方提供的连接上执行；生产 = 常驻连接独占锁内）：
-/// 单事务多值插入，不含修剪——修剪由调用方编排（生产 [`Db::insert`]、测试 [`insert_at`]）。
+/// 单事务多值插入，不含修剪——修剪属 [`post_insert`]（提交后账目）。
 async fn run_insert(conn: &mut SqliteConnection, records: &[Record]) -> Result<usize, DbError> {
     let mut tx = conn
         .begin()
@@ -416,24 +541,39 @@ async fn run_insert(conn: &mut SqliteConnection, records: &[Record]) -> Result<u
     Ok(records.len())
 }
 
-/// 滚动修剪（单范围）：该 kind 范围内只保留最新 rounds 轮（同 ts = 同轮；
-/// RFC3339 字典序即时间序；轮数不足时子查询为 NULL，不删）。
-/// `scope` 只接收本模块常量片段，不进外部输入。
-async fn trim_rounds(
-    conn: &mut SqliteConnection,
-    scope: &str,
-    rounds: i64,
-) -> Result<u64, DbError> {
-    let sql = format!(
-        "DELETE FROM records WHERE {scope} AND ts < \
-         (SELECT DISTINCT ts FROM records WHERE {scope} ORDER BY ts DESC LIMIT 1 OFFSET ?1)"
-    );
-    Ok(sqlx::query(&sql)
-        .bind(rounds - 1)
-        .execute(conn)
-        .await
-        .map_err(|e| DbError::Sql(e.to_string()))?
-        .rows_affected())
+/// 提交后的修剪账目（task-17；生产 = 常驻锁内，测试 = 自持 DbCore）：按批内所含
+/// 范围各自入队轮首，再按节奏修剪——net 每 [`NET_TRIM_TICKS`] 个 net 插入轮一次
+/// （计数只统计含 net 行的轮；先引导后入队），其余每轮一次。引导错误已在
+/// [`ScopeTrim::ensure_bootstrap`] 内消化（Disabled + WARN，本轮不失败）；DELETE 失败
+/// 向上传播且不弹队，下轮重试——队列与库始终同锁同序，无脱钩窗口。
+async fn post_insert(core: &mut DbCore, records: &[Record]) -> Result<(), DbError> {
+    let (net_head, other_head) = round_heads(records);
+    if let Some(ts) = net_head {
+        core.net.ensure_bootstrap(&mut core.conn, SCOPE_NET).await;
+        core.net.push(ts);
+        core.net_ticks += 1;
+        if core.net_ticks >= NET_TRIM_TICKS {
+            core.net_ticks = 0;
+            core.net.trim_now(&mut core.conn, SCOPE_NET).await?;
+        }
+    }
+    if let Some(ts) = other_head {
+        core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+        core.other.push(ts);
+        core.other.trim_now(&mut core.conn, SCOPE_OTHER).await?;
+    }
+    Ok(())
+}
+
+/// 批内两范围各自的轮首（该范围行集合的最大 ts_secs；None = 本批无该范围的行）。
+/// 一轮可混装（120s 大轮同时带 system 行与当秒 net 行）→ 两范围各自成轮。
+fn round_heads(records: &[Record]) -> (Option<i64>, Option<i64>) {
+    let (mut net, mut other) = (None, None);
+    for r in records {
+        let slot = if r.kind == "net" { &mut net } else { &mut other };
+        *slot = Some(slot.map_or(r.ts_secs, |m: i64| m.max(r.ts_secs)));
+    }
+    (net, other)
 }
 
 fn db_path() -> Result<PathBuf, DbError> {
@@ -635,87 +775,381 @@ mod tests {
         }
     }
 
+    // ---- todo 17：环形队列修剪（引导 / 节奏 / affinity / 重启 / 重试）----
+
+    /// 测试时刻基准（1700000000 = 2023-11-14T22:13:20Z）；off 秒偏移 → RFC3339 文本
+    const T0: i64 = 1_700_000_000;
+
+    fn rfc(off: i64) -> String {
+        chrono::DateTime::from_timestamp(T0 + off, 0)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    /// 单行样本（每轮一行制测试用；ts 与 ts_secs 同一时刻）
+    fn round_at(kind: &str, off: i64, key: &str) -> Record {
+        Record {
+            ts: rfc(off),
+            ts_secs: T0 + off,
+            kind: kind.into(),
+            key: key.into(),
+            value: 1.0,
+        }
+    }
+
+    /// n 轮 × 每轮一行（off = 0..n，秒步进）——>window 种子库用
+    fn seed_rounds(kind: &str, n: i64) -> Vec<Record> {
+        (0..n).map(|i| round_at(kind, i, "k")).collect()
+    }
+
+    async fn distinct_rounds(conn: &mut SqliteConnection, kind_clause: &str) -> i64 {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(DISTINCT ts) FROM records {kind_clause}"
+        ))
+        .fetch_one(conn)
+        .await
+        .unwrap()
+    }
+
     #[test]
     fn trim_keeps_newest_rounds_whole() {
         let file = temp_db("trim");
         block_on(async {
-            let opts = SqliteConnectOptions::new()
-                .filename(&file)
-                .create_if_missing(true);
-            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
-            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT, key TEXT, value REAL)")
-                .execute(&mut conn)
-                .await
-                .unwrap();
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.other = ScopeTrim::with_window(10);
             for i in 0..12i64 {
                 // 每轮两行，验证按轮整删；ts=RFC3339，字典序即时间序
-                let ts = format!("2024-01-01T{i:02}:00:00Z");
+                let ts = rfc(i);
                 for k in ["a", "b"] {
                     sqlx::query("INSERT INTO records(ts,kind,key,value) VALUES(?1,'k',?2,1)")
                         .bind(&ts)
                         .bind(k)
-                        .execute(&mut conn)
+                        .execute(&mut core.conn)
                         .await
                         .unwrap();
                 }
             }
-            let deleted = trim_rounds(&mut conn, SCOPE_OTHER, 10).await.unwrap();
-            assert_eq!(deleted, 4, "应恰好删最老 2 轮 = 4 行");
+            // 新轮（off=12）经完整提交后账目入队并触发修剪：引导快照 11 项
+            //（window+1）+ 本轮 → len 12 > 10 → cutoff = ring[9] = 第 4 新…第 3 偏移轮
+            // → 最老 3 轮整轮删除
+            let round = vec![round_at("k", 12, "a"), round_at("k", 12, "b")];
+            run_insert(&mut core.conn, &round).await.unwrap();
+            post_insert(&mut core, &round).await.unwrap();
+            let rounds = distinct_rounds(&mut core.conn, "").await;
+            assert_eq!(rounds, 10, "应剩恰 window=10 轮");
             let oldest: String = sqlx::query_scalar("SELECT MIN(ts) FROM records")
-                .fetch_one(&mut conn)
+                .fetch_one(&mut core.conn)
                 .await
                 .unwrap();
-            assert_eq!(oldest, "2024-01-01T02:00:00Z", "剩余最老轮应为第 3 轮");
-            let rounds: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT ts) FROM records")
-                .fetch_one(&mut conn)
+            assert_eq!(oldest, rfc(3), "剩余最老轮应为第 4 轮（off=3）");
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
+                .fetch_one(&mut core.conn)
                 .await
                 .unwrap();
-            assert_eq!(rounds, 10, "应剩 10 轮");
-            drop(conn);
+            assert_eq!(rows, 20, "整轮保留：每轮 2 行 × 10 轮");
         });
         cleanup(&file);
     }
 
     /// net 与非 net 各自独立数轮：对 SCOPE_OTHER 修剪不动 net 行，反之亦然；
-    /// 两档上限不同（此处以 10 / 5 小规模复刻 20000 / 28800 的分档语义）。
+    /// 两档上限与 net 60 轮节奏用小窗口/逐 tick 复刻（生产 20000 / 28800 / 60）。
     #[test]
     fn trim_per_kind_scopes_are_independent() {
         let file = temp_db("trim_scope");
         block_on(async {
-            let opts = SqliteConnectOptions::new()
-                .filename(&file)
-                .create_if_missing(true);
-            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
-            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT, key TEXT, value REAL)")
-                .execute(&mut conn)
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.net = ScopeTrim::with_window(5);
+            core.other = ScopeTrim::with_window(10);
+            let seed: Vec<Record> = (0..12i64)
+                .flat_map(|i| [round_at("net", i, "k"), round_at("mem", i, "k")])
+                .collect();
+            run_insert(&mut core.conn, &seed).await.unwrap();
+            // net-only 批连打 61 tick（off=12..72）：第 60 个 tick（off=71）修剪一次，
+            // 其余 tick 只入队；mem 行从未出现在批内 → other 连引导都不发生
+            for i in 12..73i64 {
+                let batch = [round_at("net", i, "k")];
+                run_insert(&mut core.conn, &batch).await.unwrap();
+                post_insert(&mut core, &batch).await.unwrap();
+                let mem_rounds =
+                    distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+                assert_eq!(mem_rounds, 12, "net tick off={i} 不得动 mem 行");
+                let want_net = match i {
+                    71 => 5,                            // 第 60 tick：修剪落地
+                    72 => 6,                            // 第 61 tick：修剪后重新积累
+                    _ => i + 1,                         // 未到期：只增不删
+                };
+                let net_rounds =
+                    distinct_rounds(&mut core.conn, "WHERE kind='net'").await;
+                assert_eq!(net_rounds, want_net, "tick off={i}：修剪只该在第 60 轮发生");
+            }
+            // mem-only 批：other 此刻才引导（快照 11）+ 入队 → len 12 > 10 → 删 3 轮
+            let batch = [round_at("mem", 73, "k")];
+            run_insert(&mut core.conn, &batch).await.unwrap();
+            post_insert(&mut core, &batch).await.unwrap();
+            // net = 第 60 tick 修剪后的 window=5 + 第 61 tick（off=72）重新积累的一轮
+            for (kind, want) in [("mem", 10), ("net", 6)] {
+                let left =
+                    distinct_rounds(&mut core.conn, &format!("WHERE kind='{kind}'")).await;
+                assert_eq!(left, want, "{kind} 应剩 {want} 轮（两范围互不越界）");
+            }
+            let mem_min: String =
+                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                    .fetch_one(&mut core.conn)
+                    .await
+                    .unwrap();
+            assert_eq!(mem_min, rfc(3), "mem 修剪只删自己最老 3 轮");
+        });
+        cleanup(&file);
+    }
+
+    /// 红先（真窗验收）：tempdir 库种子 MAX_ROUNDS+2 轮（每轮一行）→ 新一轮走完整
+    /// 生产缝（run_insert + post_insert）：全量列表引导（window+1 项含本轮）→ 首轮
+    /// 即激活 → cutoff 整轮删，恰剩 window 轮（观察界 = window，整轮保留）。
+    #[test]
+    fn bootstrap_then_ring_trim() {
+        let file = temp_db("ring_boot");
+        block_on(async {
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            let w = MAX_ROUNDS; // 真实窗 20000（非缩小复刻）
+            let seed = seed_rounds("mem", w + 2);
+            assert_eq!(run_insert(&mut core.conn, &seed).await.unwrap(), (w + 2) as usize);
+            let before = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            assert_eq!(before, w + 2, "前置：种子超限");
+
+            let batch = [round_at("mem", w + 2, "k")];
+            run_insert(&mut core.conn, &batch).await.unwrap();
+            post_insert(&mut core, &batch).await.unwrap();
+
+            let after = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            assert_eq!(after, w, "修剪后恰剩 window 轮（整轮）");
+            let min: String = sqlx::query_scalar("SELECT MIN(ts) FROM records")
+                .fetch_one(&mut core.conn)
                 .await
                 .unwrap();
-            for i in 0..12i64 {
-                // 同一 ts 同时写 net 与非 net 各一行：混在同一时间轴上验证范围隔离
-                let ts = format!("2024-01-01T{i:02}:00:00Z");
-                for kind in ["net", "mem"] {
-                    sqlx::query("INSERT INTO records(ts,kind,key,value) VALUES(?1,?2,'k',1)")
-                        .bind(&ts)
-                        .bind(kind)
-                        .execute(&mut conn)
-                        .await
-                        .unwrap();
+            assert_eq!(min, rfc(3), "最老 3 轮（off 0..2）必须整轮删除");
+            // 队列状态同步：修剪后 ring 恰 window 项
+            assert_eq!(core.other.ring.len(), w as usize);
+        });
+        cleanup(&file);
+    }
+
+    /// 红先（节奏验收）：真窗 NET_MAX_ROUNDS 种子 → 逐 tick 打 net 轮：第 1..59 个
+    /// tick 只增不删（观察界 window+59 ≤ 计划锁定的 window+60），第 60 个 tick 一次
+    /// 性整轮修剪回 window（观察界 window+60 → window）。
+    #[test]
+    fn net_trim_every_60() {
+        let file = temp_db("net60");
+        block_on(async {
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            let w = NET_MAX_ROUNDS; // 真实窗 28800
+            let seed = seed_rounds("net", w);
+            assert_eq!(run_insert(&mut core.conn, &seed).await.unwrap(), w as usize);
+
+            for k in 1..=60i64 {
+                let batch = [round_at("net", w + k, "k")];
+                run_insert(&mut core.conn, &batch).await.unwrap();
+                post_insert(&mut core, &batch).await.unwrap();
+                let rounds = distinct_rounds(&mut core.conn, "WHERE kind='net'").await;
+                if k < 60 {
+                    assert_eq!(rounds, w + k, "第 {k} 个 net tick（<60）不得修剪");
+                } else {
+                    assert_eq!(rounds, w, "第 60 个 net tick 必须修剪回 window");
                 }
             }
-            let d1 = trim_rounds(&mut conn, SCOPE_OTHER, 10).await.unwrap();
-            assert_eq!(d1, 2, "非 net 应只删自己最老 2 轮");
-            let d2 = trim_rounds(&mut conn, SCOPE_NET, 5).await.unwrap();
-            assert_eq!(d2, 7, "net 应删自己最老 7 轮");
-            for (kind, want) in [("mem", 10), ("net", 5)] {
-                let left: i64 = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(DISTINCT ts) FROM records WHERE kind='{kind}'"
-                ))
+            let min: String = sqlx::query_scalar("SELECT MIN(ts) FROM records")
+                .fetch_one(&mut core.conn)
+                .await
+                .unwrap();
+            assert_eq!(min, rfc(60), "修剪删最老 60 轮（种子 off 0..59 出清）");
+        });
+        cleanup(&file);
+    }
+
+    /// 红先（affinity 陷阱）：修剪必须**真实删行**——裸 i64 绑定对 TEXT ts 列做 <
+    /// 比较会命中 SQLite affinity 转换（'1731…' 数字转文本 vs '2026…'），谓词静默
+    /// 恒假、DELETE 空转、表无界增长。断言行数增量 + MIN(ts) 推进 + rows_affected，
+    /// 任何「只回 Ok 不删行」的实现（含 i64 绑定回归）必红。
+    #[test]
+    fn trim_actually_deletes_rows_not_just_ok() {
+        let file = temp_db("affinity");
+        block_on(async {
+            let mut st = ScopeTrim::with_window(10);
+            let mut conn = open_at(&file).await.unwrap();
+            let seed = seed_rounds("mem", 12);
+            run_insert(&mut conn, &seed).await.unwrap();
+            let batch = [round_at("mem", 12, "k")];
+            run_insert(&mut conn, &batch).await.unwrap();
+            let pre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
                 .fetch_one(&mut conn)
                 .await
                 .unwrap();
-                assert_eq!(left, want, "{kind} 应剩 {want} 轮");
+
+            st.ensure_bootstrap(&mut conn, SCOPE_OTHER).await;
+            st.push(T0 + 12);
+            let deleted = st.trim_now(&mut conn, SCOPE_OTHER).await.unwrap();
+
+            assert_eq!(deleted, 3, "rows_affected 必须是真实删除数（3 轮 3 行）");
+            let post: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(post, pre - 3, "行数必须等量减少");
+            let min: String = sqlx::query_scalar("SELECT MIN(ts) FROM records")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(min, rfc(3), "MIN(ts) 必须推进到 cutoff 轮");
+        });
+        cleanup(&file);
+    }
+
+    /// 红先（引导 = 全量列表，非旧边界子查询）：超限库（种子 > window）引导必须
+    /// 拿到 window+1 条 ts（旧 `LIMIT 1 OFFSET N` 只回 1 条边界值 = 库被误判未满、
+    /// 永不追删）；队首 = 最新轮、队尾 = 第 window+1 新轮。
+    #[test]
+    fn bootstrap_seeds_full_list_not_boundary() {
+        let file = temp_db("boot_full");
+        block_on(async {
+            let mut st = ScopeTrim::with_window(10);
+            let mut conn = open_at(&file).await.unwrap();
+            run_insert(&mut conn, &seed_rounds("net", 25)).await.unwrap();
+
+            st.ensure_bootstrap(&mut conn, SCOPE_NET).await;
+            assert!(matches!(st.phase, TrimPhase::Active));
+            assert_eq!(st.ring.len(), 11, "全量引导 = window+1 条，不是 1 条边界");
+            assert_eq!(st.ring.front(), Some(&(T0 + 24)), "队首 = 最新轮");
+            assert_eq!(st.ring.back(), Some(&(T0 + 14)), "队尾 = 第 window+1 新轮");
+            assert!(
+                st.ring.iter().zip(st.ring.iter().skip(1)).all(|(a, b)| a > b),
+                "队列必须严格新→旧"
+            );
+        });
+        cleanup(&file);
+    }
+
+    /// 红先（冷空库 = 待激不是失败）：空库引导 → Active + 空队列；未满窗每轮
+    /// 只入队不删；窗口越满的那一轮激活、恰剩 window（无永久停用）。
+    #[test]
+    fn cold_empty_ring_activates_on_fill() {
+        let file = temp_db("cold_ring");
+        block_on(async {
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.other = ScopeTrim::with_window(10);
+            for i in 0..10i64 {
+                let batch = [round_at("mem", i, "k")];
+                run_insert(&mut core.conn, &batch).await.unwrap();
+                post_insert(&mut core, &batch).await.unwrap();
+                assert!(matches!(core.other.phase, TrimPhase::Active), "引导必须成功");
+                let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+                assert_eq!(rounds, i + 1, "未满窗只增不删（轮 {i}）");
             }
-            drop(conn);
+            let batch = [round_at("mem", 10, "k")];
+            run_insert(&mut core.conn, &batch).await.unwrap();
+            post_insert(&mut core, &batch).await.unwrap();
+            let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            assert_eq!(rounds, 10, "越满窗那轮激活，恰剩 window");
+            let min: String =
+                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                    .fetch_one(&mut core.conn)
+                    .await
+                    .unwrap();
+            assert_eq!(min, rfc(1), "只出清最老一轮");
+        });
+        cleanup(&file);
+    }
+
+    /// 引导 SQL 真错（records 缺失）→ 该范围 Disabled + trim_now 恒 0：绝不从空队列
+    /// 算 cutoff（误删全库是比超窗更可怕的失败模式），也绝不让 insert 轮失败。
+    #[test]
+    fn bootstrap_sql_error_disables_scope_not_insert() {
+        let file = temp_db("boot_err");
+        block_on(async {
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.other = ScopeTrim::with_window(10);
+            sqlx::query("DROP TABLE records")
+                .execute(&mut core.conn)
+                .await
+                .unwrap();
+
+            core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+            assert!(matches!(core.other.phase, TrimPhase::Disabled), "引导真错必须停用");
+            assert_eq!(
+                core.other.trim_now(&mut core.conn, SCOPE_OTHER).await.unwrap(),
+                0,
+                "停用范围不得发 DELETE"
+            );
+            core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+            assert!(matches!(core.other.phase, TrimPhase::Disabled), "停用后不反复重试引导");
+        });
+        cleanup(&file);
+    }
+
+    /// stale-state 对抗（重启语义）：修剪落地后丢弃整个 DbCore（模拟进程重启）再
+    /// 从同一库文件重建 → 引导必须从库里重新灌满队列，新一轮修剪照常、
+    /// **零过删**（行数 ≥ window，恰剩 window，不是一切归零）。
+    #[test]
+    fn restart_rebootstraps_from_db_without_over_trim() {
+        let file = temp_db("restart");
+        block_on(async {
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.other = ScopeTrim::with_window(10);
+            run_insert(&mut core.conn, &seed_rounds("mem", 13)).await.unwrap();
+            let batch = [round_at("mem", 13, "k")];
+            run_insert(&mut core.conn, &batch).await.unwrap();
+            post_insert(&mut core, &batch).await.unwrap();
+            assert_eq!(distinct_rounds(&mut core.conn, "WHERE kind='mem'").await, 10);
+
+            // 队列随 core 整体丢弃（重启）；连接重开、修剪状态全新
+            drop(core);
+            let mut core = DbCore::new(open_at(&file).await.unwrap());
+            core.other = ScopeTrim::with_window(10);
+            let batch = [round_at("mem", 14, "k")];
+            run_insert(&mut core.conn, &batch).await.unwrap();
+            post_insert(&mut core, &batch).await.unwrap();
+
+            let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            assert_eq!(rounds, 10, "重启后修剪照常工作且零过删（恰剩 window）");
+            let min: String =
+                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                    .fetch_one(&mut core.conn)
+                    .await
+                    .unwrap();
+            assert_eq!(min, rfc(5), "仅按新轮推进一格（只出清 off=4），不得多删");
+        });
+        cleanup(&file);
+    }
+
+    /// repeated-interruptions 对抗（修剪 SQL 中途失败）：DELETE 报错必须向上传播
+    /// 且**队不弹**——恢复后重发同一 cutoff 的 DELETE 即追平；失败轮不丢已提交数据。
+    #[test]
+    fn trim_sql_failure_keeps_queue_and_retries_next_round() {
+        let file = temp_db("trim_retry");
+        block_on(async {
+            let mut st = ScopeTrim::with_window(10);
+            let mut conn = open_at(&file).await.unwrap();
+            run_insert(&mut conn, &seed_rounds("mem", 12)).await.unwrap();
+            run_insert(&mut conn, &[round_at("mem", 12, "k")]).await.unwrap();
+            st.ensure_bootstrap(&mut conn, SCOPE_OTHER).await;
+            st.push(T0 + 12);
+            let ring_before = st.ring.len();
+
+            // 中途打断：表被改名 → DELETE 报 no such table，队列必须原样保留
+            sqlx::query("ALTER TABLE records RENAME TO records_bak")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            assert!(st.trim_now(&mut conn, SCOPE_OTHER).await.is_err());
+            assert_eq!(st.ring.len(), ring_before, "失败不得弹队");
+            assert!(matches!(st.phase, TrimPhase::Active), "DELETE 失败不停用范围");
+
+            // 恢复：同一队列、同一 cutoff 重试即追平
+            sqlx::query("ALTER TABLE records_bak RENAME TO records")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            let deleted = st.trim_now(&mut conn, SCOPE_OTHER).await.unwrap();
+            assert_eq!(deleted, 3, "重试必须真实删掉滞后 3 轮");
+            assert_eq!(st.ring.len(), 10, "删成才弹队，队列与库同步");
         });
         cleanup(&file);
     }
