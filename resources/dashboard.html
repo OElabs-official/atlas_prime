@@ -66,7 +66,7 @@
                                      未接入即自动接入（回放直连）；无会话才按「启动进程」；
                                      「停止」= POST /tui/kill 进程级击杀（绑定保留）；
                                      按任务多会话，不再轮询 /task/output）
-    GET  /db/history?kind=[&key=][&limit=]  sqlite 历史行，按时间升序
+    GET  /db/history?kind=[&key=][&limit=][&fmt=arr]  sqlite 历史行，按时间升序
                                   [{t:RFC3339 字符串,k:键,v:数值}]（t=Date.parse
                                   直吃）；kind=battery|mem|
                                   swap|cpu_freq|gpu|temp，limit 1..5000
@@ -1557,13 +1557,13 @@ function renderGpu(d, o) {
 }
 async function seedGpu() {
   try {
-    const rows = await getJSON("/db/history?kind=gpu&limit=200");   // {load_pct,freq_mhz}，t 升序
+    const rows = await getJSON("/db/history?kind=gpu&limit=200&fmt=arr"); // {load_pct,freq_mhz}，t 升序（紧凑形，histRows 适配）
     if (!Array.isArray(rows)) return;
     const cut = Date.now() - 5000;                                  // 去重护栏：过新种子行跳过
     const g = new Map();
-    for (const r of rows) {
-      const ms = (r && typeof r.t === "string" && typeof r.v === "number" && Number.isFinite(r.v)) ? Date.parse(r.t) : NaN;
-      if (!(ms <= cut)) continue;                                   // NaN（畸形 t）或过新 → 跳行
+    for (const r of histRows(rows)) {
+      const ms = r.t;                                               // 适配器已保证有限毫秒（坏行已滤）
+      if (!(ms <= cut)) continue;                                   // 过新 → 跳行
       let e = g.get(ms); if (!e) g.set(ms, e = {});
       if (r.k === "load_pct") e.l = r.v; else if (r.k === "freq_mhz") e.f = r.v;
     }
@@ -2496,24 +2496,32 @@ mqLight.addEventListener("change", () => {
 });
 
 /* ---------- 历史回填（/db/history：打开即播种，随后实时续采） ----------
-   行契约 = [{t:RFC3339 字符串,k:键,v:数值}]，服务端已按 t 升序；limit 服务端钳 1..5000。
-   t 经 Date.parse 解析为毫秒时刻，NaN（畸形串）→ 整行跳过。
-   端点数据必早于任何实时样本 → 先播种后 live 即天然时间序；解析毫秒比
-   Date.now()-5000 更新的行丢弃（避免与即将到来的首个 live 样本重复边缘）。
+   种子请求带 &fmt=arr（task-28 紧凑形，冷启动载荷 ≤60%）：行契约 =
+   [[ts_secs,"k",v],...]（t 为 unix 秒数值）；histRows 统一适配成 {t:<毫秒>,k,v}
+   （秒 ×1000；非三元组/字段类型不符的坏行在此过滤 = 旧「畸形 t → 跳行」语义）。
+   服务端已按 t 升序；limit 服务端钳 1..=5000。
+   t 已是毫秒时刻，比 Date.now()-5000 更新的行丢弃（避免与即将到来的首个 live 样本重复边缘）。
    5min 窗卡（freq/hot/mem）经 winHist 修剪只剩末端 2-3 个种子点 = 预期行为；
    电池 HB 自持 72h 修剪，种子旧点仅在 72h 视图可见 = 正确行为。 */
+// fmt=arr 行适配器：[[ts_secs,"k",v],...] → [{t:毫秒,k,v}]；非数组 → []。
+const histRows = d => Array.isArray(d) ? d
+  .filter(r => Array.isArray(r) && r.length === 3
+    && Number.isFinite(r[0]) && typeof r[1] === "string"
+    && typeof r[2] === "number" && Number.isFinite(r[2]))
+  .map(r => ({ t: r[0] * 1000, k: r[1], v: r[2] })) : [];
 async function seedHistory() {
   const cut = Date.now() - 5000;                       // 去重护栏：解析毫秒 > cut 的种子行跳过
   const [battRows, memRows, swapRows, freqRows, tempRows] = await Promise.all([
-    getJSON("/db/history?kind=battery&limit=4500"),    // 7 键/轮 → ~640 轮 ≈ 21h
-    getJSON("/db/history?kind=mem&limit=200"),         // total/used/avail（MB）
-    getJSON("/db/history?kind=swap&limit=200"),        // total/used（MB）
-    getJSON("/db/history?kind=cpu_freq&limit=200"),    // cpu0..cpuN（GHz）
-    getJSON("/db/history?kind=temp&limit=2000")        // {cpu_core|gpu|camera|pmic|battery}.{i}（°C）
+    getJSON("/db/history?kind=battery&limit=4500&fmt=arr"), // 7 键/轮 → ~640 轮 ≈ 21h
+    getJSON("/db/history?kind=mem&limit=200&fmt=arr"),       // total/used/avail（MB）
+    getJSON("/db/history?kind=swap&limit=200&fmt=arr"),      // total/used（MB）
+    getJSON("/db/history?kind=cpu_freq&limit=200&fmt=arr"),  // cpu0..cpuN（GHz）
+    getJSON("/db/history?kind=temp&limit=2000&fmt=arr")      // {cpu_core|gpu|camera|pmic|battery}.{i}（°C）
   ]);
-  const arr = d => Array.isArray(d) ? d : [];
-  // 行合法性 = t 为 RFC3339 串（Date.parse 可析）且 v 有限数值；返回解析毫秒（坏行 → NaN）
-  const msOf = r => (r && typeof r.t === "string" && typeof r.v === "number" && Number.isFinite(r.v)) ? Date.parse(r.t) : NaN;
+  const arr = histRows;                                // 坏行过滤 + 秒→毫秒 统一在适配器
+  // 行合法性已由 histRows 保证（t=有限毫秒、v=有限数值）；保留数值直取
+  const msOf = r => (r && typeof r.t === "number" && Number.isFinite(r.t)
+    && typeof r.v === "number" && Number.isFinite(r.v)) ? r.t : NaN;
   const asc = m => Array.from(m.keys()).sort((a, b) => a - b);
 
   // ① BATTERY：按 t 分组取 pct + (volt_mv,current_ua)；current_ua = 微安

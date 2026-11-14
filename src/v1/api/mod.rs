@@ -38,6 +38,8 @@
 //!   其他网卡名；bytes/s，1Hz，≈8h 回溯；旧 per-iface 键已退役，随窗口自然出清）。
 //!   响应按时间**升序** `[{t:"YYYY-MM-DDTHH:MM:SSZ",k,v}]`——`t` 为 RFC3339 字符串原文
 //!   （前端 `Date.parse` 直吃）；DB 读走阻塞池（`Db::history` 内部驱动共享 runtime），不限流；
+//!   可选 `&fmt=arr`（增量契约）→ 同一序列的紧凑等价形 `[[ts_secs,"k",v],...]`
+//!   （ts 改 unix 秒数值）；缺省/未知 fmt 值 = 默认对象形，默认字节对外契约不变；
 //! - `GET /` → 302 重定向到 `/dashboard.html`；
 //! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改 resources/dashboard.html 重编）：
 //!   数据目录（与 v1/db 同源）存在 dashboard.html → **存在即覆盖**，每次读盘（走阻塞池，
@@ -335,28 +337,76 @@ struct HistIn {
     kind: String,
     key: Option<String>,
     limit: Option<u32>,
+    /// 可选编码选择：仅精确 `arr` 启用紧凑数组形；缺省/未知/畸形值一律回落默认。
+    fmt: Option<String>,
 }
 
-/// `GET /db/history?kind=&key=&limit=` → 按时间升序 `[{t:<RFC3339>,k,v}]`（`t` = db TEXT 列原文）。
+/// fmt → 编码门控（计划原文：unknown fmt value → default behavior）：
+/// 只有大小写敏感的 `arr` 生效，其余（含 `ARR`/`array`/空串）全部默认。
+fn fmt_wants_arr(fmt: Option<&str>) -> bool {
+    matches!(fmt, Some("arr"))
+}
+
+/// 默认编码（外部稳定契约，Q2）：`[{t:<RFC3339>,k,v}]`，t = db TEXT 列原文。
+/// 与历史内联 `.json(&Vec<Value>)` 出线逐字节一致（serde_json 无 preserve_order）。
+fn hist_body_default(rows: &[crate::v1::db::Record]) -> String {
+    let body: Vec<_> = rows
+        .iter()
+        .map(|r| serde_json::json!({ "t": r.ts, "k": r.key, "v": r.value }))
+        .collect();
+    serde_json::to_string(&body).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 紧凑编码（`fmt=arr`，GAP-2 冷启动载荷）：`[[ts_secs,"k",v],...]`——零逐行 Map，
+/// 直接复用 SQL 投影的 `ts_secs`；键转义交 serde（自定义 net 组名可含引号/反斜杠）；
+/// 非有限值 → null（与默认编码 json!(非有限)→null 同语义，解码两形等价）。
+fn hist_body_arr(rows: &[crate::v1::db::Record]) -> String {
+    let mut s = String::with_capacity(rows.len() * 32 + 2);
+    s.push('[');
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('[');
+        s.push_str(&r.ts_secs.to_string());
+        s.push(',');
+        s.push_str(&serde_json::to_string(&r.key).unwrap_or_else(|_| "\"\"".to_string()));
+        s.push(',');
+        if r.value.is_finite() {
+            s.push_str(&r.value.to_string());
+        } else {
+            s.push_str("null");
+        }
+        s.push(']');
+    }
+    s.push(']');
+    s
+}
+
+/// `GET /db/history?kind=&key=&limit=[&fmt=arr]` → 按时间升序。默认
+/// `[{t:<RFC3339>,k,v}]`（`t` = db TEXT 列原文，外部契约）；`fmt=arr` 回落前缀外
+/// 唯一形态 `[[ts_secs,"k",v],...]`（紧凑、同一序列的等价编码）；未知 fmt 值 = 默认。
 /// 内部按 `ts_secs`（unix 秒投影）排序——迁移后全行统一 RFC3339 格式，字典序即时间序，二者等价。
 /// DB 读（内含共享 runtime 的 block_on）上 ntex 阻塞池；limit 钳位 1..=5000 防爆量。
 async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
     let kind = q.kind.clone();
     let key = q.key.clone();
     let limit = q.limit.unwrap_or(300).clamp(1, 5000);
+    let as_arr = fmt_wants_arr(q.fmt.as_deref());
     match web::block(move || Ok::<_, std::io::Error>(Db::history(&kind, key.as_deref(), limit)))
         .await
     {
         Ok(mut rows) => {
             rows.sort_by_key(|r| r.ts_secs); // 黑箱回新→旧，面板按旧→新吃
-            let body: Vec<_> = rows
-                .iter()
-                .map(|r| serde_json::json!({ "t": r.ts, "k": r.key, "v": r.value }))
-                .collect();
+            let body = if as_arr {
+                hist_body_arr(&rows)
+            } else {
+                hist_body_default(&rows)
+            };
             HttpResponse::Ok()
                 .content_type("application/json; charset=utf-8")
                 .header("cache-control", "no-store")
-                .json(&body)
+                .body(body)
         }
         Err(BlockingError::Error(e)) => {
             HttpResponse::InternalServerError().json(&serde_json::json!({ "error": e.to_string() }))
@@ -702,6 +752,136 @@ mod tests {
         assert!(DASHBOARD_HTML.contains("<!-- rev "));
     }
 
+    // ---------- /db/history 编码（task-28：默认字节金样 + fmt=arr 等价） ----------
+
+    fn rec(ts: &str, secs: i64, k: &str, v: f64) -> crate::v1::db::Record {
+        crate::v1::db::Record {
+            ts: ts.to_string(),
+            ts_secs: secs,
+            kind: "battery".to_string(),
+            key: k.to_string(),
+            value: v,
+        }
+    }
+
+    /// 金样钉死（外部契约 Q2）：默认编码 = 今日内联 `.json(&Vec<Value>)` 的字节
+    /// （serde_json 无 preserve_order → 键序 k,t,v；f64 走 ryu 最短往返，88.0 → "88.0"）。
+    #[test]
+    fn history_default_body_is_byte_golden() {
+        let rows = [
+            rec("2026-11-14T12:00:00+00:00", 1794657600, "pct", 88.0),
+            rec("2026-11-14T12:02:00+00:00", 1794657720, "volt_mv", 4200.0),
+            rec("2026-11-14T12:04:00+00:00", 1794657840, "current_ua", -1234.5),
+        ];
+        assert_eq!(
+            hist_body_default(&rows),
+            concat!(
+                r#"[{"k":"pct","t":"2026-11-14T12:00:00+00:00","v":88.0},"#,
+                r#"{"k":"volt_mv","t":"2026-11-14T12:02:00+00:00","v":4200.0},"#,
+                r#"{"k":"current_ua","t":"2026-11-14T12:04:00+00:00","v":-1234.5}]"#
+            )
+        );
+    }
+
+    /// arr 形态金样：`[[ts_secs,"k",v],...]`——无逐行 Map；键经 serde 转义；
+    /// 非有限值 → null（与默认编码 json!(NaN)→null 同语义）。
+    #[test]
+    fn history_arr_body_is_compact_golden() {
+        let rows = [
+            rec("2026-11-14T12:00:00+00:00", 1794657600, "pct", 88.0),
+            rec("2026-11-14T12:02:00+00:00", 1794657720, "a\"b\\c", 4.25),
+            rec("2026-11-14T12:04:00+00:00", 1794657840, "temp_c", f64::NAN),
+        ];
+        assert_eq!(
+            hist_body_arr(&rows),
+            r#"[[1794657600,"pct",88],[1794657720,"a\"b\\c",4.25],[1794657840,"temp_c",null]]"#
+        );
+    }
+
+    /// 解码等价（反“假成功”：逐元素比对解出的三元组序列，不是比长度）：
+    /// 同一批行经两种编码出线，解码 → (unix 秒, 键, 值) 序列必须逐项相等。
+    #[test]
+    fn history_two_encodings_decode_to_same_series() {
+        let rows = [
+            rec("2026-11-14T12:00:00+00:00", 1794657600, "pct", 88.0),
+            rec("2026-11-14T12:02:00+00:00", 1794657720, "current_ua", -0.0),
+            rec("2026-11-14T12:04:00+00:00", 1794657840, "temp_c", 0.3),
+            rec("2026-11-14T12:06:00+00:00", 1794657960, "volt_mv", 1e21),
+            rec("2026-11-14T12:08:00+00:00", 1794658080, "cur\"2", f64::NAN),
+            rec("2026-11-14T12:10:00+00:00", 1794658200, "health", -350123.75),
+        ];
+        // 默认编码：t = RFC3339 串 → 解析回 unix 秒（消费者视角）
+        let def: Vec<serde_json::Value> =
+            serde_json::from_str(&hist_body_default(&rows)).expect("默认编码必须是合法 JSON");
+        let want: Vec<(i64, String, Option<f64>)> = def
+            .iter()
+            .map(|r| {
+                let t = chrono::DateTime::parse_from_rfc3339(r["t"].as_str().unwrap())
+                    .expect("t 必须是 RFC3339")
+                    .timestamp();
+                (t, r["k"].as_str().unwrap().to_string(), r["v"].as_f64())
+            })
+            .collect();
+        // arr 编码：三元组直取
+        let arr: Vec<serde_json::Value> =
+            serde_json::from_str(&hist_body_arr(&rows)).expect("arr 编码必须是合法 JSON");
+        let got: Vec<(i64, String, Option<f64>)> = arr
+            .iter()
+            .map(|r| {
+                let r = r.as_array().expect("arr 行必须是三元组数组");
+                (
+                    r[0].as_i64().expect("ts_secs 必须是整数"),
+                    r[1].as_str().expect("键必须是字符串").to_string(),
+                    r[2].as_f64(),
+                )
+            })
+            .collect();
+        assert_eq!(got.len(), want.len(), "行数必须一致");
+        assert_eq!(got, want, "两种编码解码后的序列必须逐项相等");
+    }
+
+    /// fmt 门控（计划原文：unknown fmt value → default behavior）：只有精确 `arr` 生效。
+    #[test]
+    fn history_fmt_gate_accepts_only_exact_arr() {
+        assert!(fmt_wants_arr(Some("arr")));
+        for bad in [None, Some(""), Some("ARR"), Some("array"), Some("arr "), Some("json")] {
+            assert!(!fmt_wants_arr(bad), "{bad:?} 必须回落默认编码");
+        }
+    }
+
+    /// 载荷收益（验收线：kind=battery limit=4500 → arr ≤ 60% 默认字节）：
+    /// 合成 640 轮 × 7 键 = 4480 行真实形态 battery 样本实测字节数。
+    #[test]
+    fn history_arr_payload_is_at_most_60_percent_of_default() {
+        const T0: i64 = 1794528000; // 2026-11-13T00:00:00+00:00
+        let mut rows = Vec::new();
+        for round in 0..640i64 {
+            let secs = T0 + round * 120;
+            let ts = chrono::DateTime::from_timestamp(secs, 0)
+                .expect("合成秒必须可析")
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let stamp = chrono::DateTime::parse_from_rfc3339(&ts).expect("合成 ts 必须合法");
+            assert_eq!(stamp.timestamp(), secs, "合成 ts/ts_secs 必须同一时刻");
+            rows.push(rec(&ts, secs, "pct", (round % 100) as f64));
+            rows.push(rec(&ts, secs, "volt_mv", 4000.0 + round as f64));
+            rows.push(rec(&ts, secs, "current_ua", -(300_000.0 + round as f64 * 7.5)));
+            rows.push(rec(&ts, secs, "temp_c", 31.0 + (round % 9) as f64 * 0.4));
+            rows.push(rec(&ts, secs, "status", 1.0));
+            rows.push(rec(&ts, secs, "plugged", 0.0));
+            rows.push(rec(&ts, secs, "health", 2.0));
+        }
+        let def = hist_body_default(&rows);
+        let arr = hist_body_arr(&rows);
+        let ratio = arr.len() as f64 / def.len() as f64;
+        println!(
+            "fmt=arr 载荷实测：{} B vs 默认 {} B → {:.1}%（验收线 ≤ 60%）",
+            arr.len(),
+            def.len(),
+            ratio * 100.0
+        );
+        assert!(ratio <= 0.60, "arr 载荷 {}/{} = {:.1}% 必须 ≤ 60%", arr.len(), def.len(), ratio * 100.0);
+    }
+
     /// 真机冒烟：起服务 → 裸 HTTP GET 各路由 → 操作器 1Hz 速度回路两拍 →
     /// speed 成员 + kind=net 历史 → 关停。
     /// `cargo test v1::api -- --ignored --test-threads=1`
@@ -752,6 +932,45 @@ mod tests {
         assert!(
             stamps.windows(2).all(|w| w[0] <= w[1]),
             "/db/history 必须升序：{stamps:?}"
+        );
+        // task-28 契约（活体面）：fmt=arr 紧凑形 + 头 parity + 未知 fmt 回落。
+        // 此刻操作器未 start（kind=mem 无新写），两请求间数据恒定，可逐字节比。
+        let hist_arr = get("/db/history?kind=mem&key=used&limit=5&fmt=arr");
+        assert!(hist_arr.contains("200 OK"), "{hist_arr}");
+        let hline = |raw: &str, name: &str| {
+            raw.split("\r\n")
+                .find(|l| l.to_ascii_lowercase().starts_with(&format!("{name}:")))
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        // 缓存/类型头与默认编码逐字节一致（计划：本任务不动任何头）
+        for name in ["content-type", "cache-control"] {
+            assert_eq!(
+                hline(&hist, name),
+                hline(&hist_arr, name),
+                "{name} 头必须与默认编码一致（默认：{hist}）"
+            );
+        }
+        let arr_body = hist_arr.split_once("\r\n\r\n").map_or("", |p| p.1);
+        let arows: Vec<serde_json::Value> =
+            serde_json::from_str(arr_body).expect("fmt=arr 应回 JSON 数组");
+        assert_eq!(arows.len(), rows.len(), "两种编码行数必须一致：{arr_body}");
+        for (a, o) in arows.iter().zip(&rows) {
+            let a = a.as_array().expect("arr 行必须是三元组数组");
+            assert_eq!(a.len(), 3, "arr 行必须是三元组：{a:?}");
+            assert_eq!(a[1].as_str().unwrap(), o["k"].as_str().unwrap());
+            assert_eq!(a[2].as_f64(), o["v"].as_f64());
+            let t = chrono::DateTime::parse_from_rfc3339(o["t"].as_str().unwrap())
+                .unwrap()
+                .timestamp();
+            assert_eq!(a[0].as_i64().unwrap(), t, "arr 秒与默认 t 必须同一时刻");
+        }
+        // 未知 fmt → 默认行为：与默认响应体逐字节相同
+        let hist_bad = get("/db/history?kind=mem&key=used&limit=5&fmt=ARR");
+        assert_eq!(
+            hist_bad.split_once("\r\n\r\n").map_or("", |p| p.1),
+            body,
+            "未知 fmt 必须回落默认字节"
         );
         // 网卡速度契约（域感知）：当前 SELinux 域存在可读数据源时，1Hz 回路
         // 两拍（基线 + 2 次 emit）后必须喂缓存并落 kind=net 且升序；sealed 域
