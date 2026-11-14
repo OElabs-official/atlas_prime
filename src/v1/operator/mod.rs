@@ -205,10 +205,15 @@ fn net_cache() -> &'static Mutex<Vec<(String, f64, f64)>> {
 /// 首拍只喂 [`network::speed::Grouper`] 立组级基线不 emit；此后每拍 快照 →
 /// 组和差分（成员增减整组重建基线 emit 0、倒退钳 0，dt 实测）→ 整体刷新缓存
 /// → 落库 kind=net。等待阶段同样是 sleep 与停止 Notify 的 select 竞争。
+/// 快照上 [`tokio::task::spawn_blocking`]（su 子进程/sysfs/netlink 读链延迟
+/// 不定，不占 1Hz 驱动线程，同 [`run_proc_meter`] 模式），每拍必 await 到底：
+/// JoinHandle 不被 select 丢弃、无泄漏。
 /// 源链（[`network::read_dev_snapshot`] 起头，全灭才回 Err）整拍失败时
 /// **缓存冻结**：stale 速率原样暴露、组级基线与 `prev_at` 不动（恢复后 dt 跨
 /// 故障期摊薄），连续 [`NET_FAIL_STREAK`] 拍单行 stderr 示警——连串计数只在
-/// 越过阈值那一拍发声（`==` 语义天然 once-per-streak），成功一拍即重置。
+/// 越过阈值那一拍发声（`==` 语义天然 once-per-streak），成功一拍即重置；
+/// 阻塞任务失败（`Err(JoinError)`，panic/取消）进**同一失败分支**：缓存冻结
+/// + 连败计数一概同格。
 async fn run_net_meter() {
     let mut grouper = network::speed::Grouper::default();
     grouper.step(&network::speed::snapshot(), 0.0); // 首拍只立基线，产出不消费
@@ -224,8 +229,8 @@ async fn run_net_meter() {
         if stop_flag().load(Ordering::SeqCst) {
             break;
         }
-        match network::speed::snapshot_result() {
-            Ok(cur) => {
+        match tokio::task::spawn_blocking(network::speed::snapshot_result).await {
+            Ok(Ok(cur)) => {
                 fails = 0;
                 let now = Instant::now();
                 let dt = now.saturating_duration_since(prev_at).as_secs_f64();
@@ -236,6 +241,15 @@ async fn run_net_meter() {
                     let _ = Db::insert(&net_records(&rates)).await;
                 }
             }
+            Ok(Err(e)) => {
+                fails += 1;
+                if fails == NET_FAIL_STREAK {
+                    eprintln!(
+                        "atlas: 网卡测速源链连败 {NET_FAIL_STREAK} 拍，速度示停于末次成功值: {e}"
+                    );
+                }
+            }
+            // 任务失败（panic/取消）与源链失败同一降级：缓存冻结 + 连败计数
             Err(e) => {
                 fails += 1;
                 if fails == NET_FAIL_STREAK {
