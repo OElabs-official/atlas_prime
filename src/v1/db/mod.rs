@@ -57,9 +57,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{Connection, Row};
 
 use crate::v1::prelude;
@@ -147,9 +148,42 @@ impl Db {
 
 // ---------------- 黑箱内部 ----------------
 
+/// history 读取失败累计计数（audit bug F12：静默空 vec 的唯一新增可观测面）。
+/// 读失败仍返回空 vec（响应形状不变），信号只有本计数 + 一条 WARN 行；
+/// 测试经计数断言，无需捕获 stderr。
+pub(crate) static HISTORY_ERRS: AtomicUsize = AtomicUsize::new(0);
+
+/// history 读取失败的唯一上报出口：计数 +1 并打一行 WARN（含错误文本）。
+/// 调用方维持"空 vec / 默认字段"返回，响应形状不变。
+pub(crate) fn report_history_err(what: &str, err: &dyn core::fmt::Display) {
+    HISTORY_ERRS.fetch_add(1, Ordering::Relaxed);
+    eprintln!("WARN db history {what} failed: {err}");
+}
+
+/// 行级字段读取：失败经 [`report_history_err`] 上报后取 `T::default()`
+///（与原 `try_get().unwrap_or(0)` / `unwrap_or_default()` 行为等价）。
+fn row_field<O>(row: &SqliteRow, idx: usize) -> O
+where
+    O: for<'r> sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + Default,
+{
+    match row.try_get::<O, _>(idx) {
+        Ok(v) => v,
+        Err(e) => {
+            report_history_err("row", &e);
+            O::default()
+        }
+    }
+}
+
+/// 读取最近历史。所有失败路径（open / 查询 / 行解码）经 [`report_history_err`]
+/// 上报（计数 + WARN）后仍返回空 vec / 默认字段——响应形状不变，不再静默。
 async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> Vec<Record> {
-    let Ok(mut conn) = open_at(path).await else {
-        return Vec::new();
+    let mut conn = match open_at(path).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            report_history_err(&format!("open {}", path.display()), &e);
+            return Vec::new();
+        }
     };
     let sql = match key {
         Some(_) => {
@@ -164,14 +198,20 @@ async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> V
         q = q.bind(k);
     }
     q = q.bind(i64::from(limit));
-    let rows = q.fetch_all(&mut conn).await.unwrap_or_default();
+    let rows = match q.fetch_all(&mut conn).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            report_history_err("query", &e);
+            return Vec::new();
+        }
+    };
     rows.iter()
         .map(|r| Record {
-            ts_secs: r.try_get::<i64, _>(0).unwrap_or(0),
-            ts: r.try_get::<String, _>(1).unwrap_or_default(),
-            kind: r.try_get::<String, _>(2).unwrap_or_default(),
-            key: r.try_get::<String, _>(3).unwrap_or_default(),
-            value: r.try_get::<f64, _>(4).unwrap_or(0.0),
+            ts_secs: row_field::<i64>(r, 0),
+            ts: row_field::<String>(r, 1),
+            kind: row_field::<String>(r, 2),
+            key: row_field::<String>(r, 3),
+            value: row_field::<f64>(r, 4),
         })
         .collect()
 }
@@ -541,6 +581,68 @@ mod tests {
             assert_eq!(
                 hist[0].ts_secs, rec.ts_secs,
                 "strftime('%s') 投影必须与存储时刻一致"
+            );
+        });
+        cleanup(&file);
+    }
+
+    /// HISTORY_ERRS 为模块级累计计数、跨测试共享：两条错误路径测试互斥执行，
+    /// 保证"恰好 +1"断言不受并行干扰（其余测试走 happy 路径，从不加数）。
+    static ERR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// red-first（audit bug F12）：open 失败（garbage 文件）不得被吞成静默空 vec——
+    /// 返回空 vec（响应形状不变）且 HISTORY_ERRS 恰好 +1（WARN 为唯一新增信号）。
+    #[test]
+    fn history_open_failure_bumps_err_counter_and_stays_empty() {
+        let _guard = ERR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let file = temp_db("history_err_open");
+        std::fs::write(&file, b"not a sqlite database, just garbage bytes").unwrap();
+
+        let before = HISTORY_ERRS.load(Ordering::Relaxed);
+        let hist = block_on(history_at(&file, "mem", None, 10));
+
+        assert!(hist.is_empty(), "读失败仍返回空 vec（响应形状不变）");
+        assert_eq!(
+            HISTORY_ERRS.load(Ordering::Relaxed),
+            before + 1,
+            "open 失败必须使 HISTORY_ERRS 恰好 +1"
+        );
+        cleanup(&file);
+    }
+
+    /// red-first（audit bug F12）：合法 sqlite 但 records 缺列（wrong-schema）→ SELECT
+    /// 报错路径同样不得静默：空 vec + HISTORY_ERRS 恰好 +1。
+    #[test]
+    fn history_query_failure_bumps_err_counter_and_stays_empty() {
+        let _guard = ERR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let file = temp_db("history_err_query");
+        block_on(async {
+            // Given：真 sqlite 库，records 仅 (ts,kind)——open_at 的迁移/建表/建索引全通过。
+            // 盖章 user_version=2：本库视为已过电池迁移（缺 key/value 列会让该迁移先
+            // 报错走 open 路径），确保失败落在被测的查询路径上。
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT)")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA user_version=2;")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            drop(conn);
+
+            let before = HISTORY_ERRS.load(Ordering::Relaxed);
+            // When：查询取 key/value 列 → no-such-column
+            let hist = history_at(&file, "mem", None, 10).await;
+
+            assert!(hist.is_empty(), "查询失败仍返回空 vec（响应形状不变）");
+            assert_eq!(
+                HISTORY_ERRS.load(Ordering::Relaxed),
+                before + 1,
+                "query 失败必须使 HISTORY_ERRS 恰好 +1"
             );
         });
         cleanup(&file);
