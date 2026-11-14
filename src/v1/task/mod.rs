@@ -1603,4 +1603,149 @@ mod tests {
             "有界深度 64 必须以具名常量落档"
         );
     }
+
+    // ---- checkbox 30（Q2 访谈处置 = 记录在案契约，钉死不改）：spawn 解析行为钉 ----
+    // 处置：不提取 plan_exec，改为把**现行**解析行为按原样钉成契约；日后若做
+    // plan_exec 提取，本组测试即「行为零变化」的奇偶红线。钉住的现状：
+    // * 无任何字段被 sh -c：command 与 args 全量直接进 execve（supervise 的
+    //   Command::new(&desc.command).args(&desc.args)，无壳包装）；shell 语义只
+    //   可能来自 spec 自身的编排（command="sh" + args=["-c", script]），属调用方；
+    // * cwd：本路径只认 desc.cwd（Some → current_dir；None → 继承守护进程自身
+    //   cwd，**无回退链**）；对照 tui 第二实例 task/tui.rs::task_cmd 的回退链为
+    //   desc.cwd → $HOME（须目录）→ /，两处差异是契约的一部分；
+    // * envs：先继承守护进程全量环境、后以 spec `envs` 按键覆盖（绝不 env_clear，
+    //   spec 可遮蔽任何同名继承变量）；
+    // * TERM=xterm-256color / COLORTERM=truecolor 注入是 tui 侧（PTY 会话）的
+    //   **调用方终端基线**，不属于解析器，且注入序在 spec envs 之前（spec 可覆盖）
+    //   ——该拆分在 tui.rs task_cmd 文档注释处同样钉死。
+
+    /// 轮询到 `Task::output(id)` 的 stdout 集合同时覆盖期望行，返回最后一次快照。
+    #[cfg(unix)]
+    fn wait_stdout_lines(id: &str, expect: &[&str], ms: u64) -> Vec<LogLine> {
+        let want: Vec<String> = expect.iter().map(|s| s.to_string()).collect();
+        let hit = poll_until(
+            || {
+                let out = Task::output(id).unwrap_or_default();
+                want.iter().all(|w| {
+                    out.iter()
+                        .any(|x| x.stream == Stream::Stdout && x.text == *w)
+                })
+            },
+            ms,
+        );
+        let out = Task::output(id).unwrap_or_default();
+        assert!(hit, "{id}: stdout 未在 {ms}ms 内凑齐期望行 {want:?}，实收 {out:?}");
+        out
+    }
+
+    /// 钉：command 字段绝不经 sh -c（怪名 = spawn 失败 code=None，而非壳内
+    /// 127）；shell 语义仅在 spec 自带 `sh -c` 编排时出现（6*7 → 42）。
+    #[cfg(unix)]
+    #[test]
+    fn pin_spawn_contract_command_field_never_sh_wrapped() {
+        let _g = spec_test_lock();
+
+        // 若解析器把 command 塞进 `sh -c`，本描述符会被壳当作命令行解释：
+        // sh 本身能起、找不到命令按 127 退出（code=Some(127)）。钉死现状：
+        // 查表失败即 spawn 失败 → Failed(code=None, signal=None) + "[spawn]" 记账。
+        let d = desc("pinx1", "sh -c|g*l*$HOME", &[]);
+        reg().write().unwrap().insert("pinx1".into(), Slot::new(d));
+        Task::run("pinx1").unwrap();
+        let failed = poll_until(
+            || Task::status().iter().any(|s| s.id == "pinx1"
+                && s.phase == Phase::Failed
+                && s.last_exit.as_ref().is_some_and(|m| m.code.is_none() && m.signal.is_none())),
+            5000,
+        );
+        let spawned_line = Task::output("pinx1")
+            .unwrap_or_default()
+            .iter()
+            .any(|x| x.stream == Stream::Stderr && x.text.starts_with("[spawn] "));
+        reg().write().unwrap().remove("pinx1");
+        assert!(failed, "怪 command 未按「直接 execve → spawn 失败」终结（被壳解释了呢？）");
+        assert!(spawned_line, "spawn 失败必须留下 [spawn] stderr 记账");
+
+        // 反向钉：spec 自带 sh 编排时，壳语义（$((...)) 展开）如期出现——
+        // 也就是说壳是调用方引来的，不是解析器加的。
+        let d = desc("pinsh", "sh", &["-c", "echo $((6*7))"]);
+        reg().write().unwrap().insert("pinsh".into(), Slot::new(d));
+        Task::run("pinsh").unwrap();
+        let out = wait_stdout_lines("pinsh", &["42"], 5000);
+        assert!(out.iter().all(|x| !x.text.contains("$(((")));
+        reg().write().unwrap().remove("pinsh");
+    }
+
+    /// 钉：args 整串原样进 execve（$、|、*、空格不展开/不断词/不成 glob）；
+    /// envs = 继承全量 + spec 按键覆盖（可遮蔽 HOME，不清空其余如 PATH）。
+    #[cfg(unix)]
+    #[test]
+    fn pin_spawn_contract_argv_envs_reach_execve_verbatim() {
+        // 前置：cargo 测试进程必有 PATH——继承钉以它为样本。
+        let parent_path = std::env::var("PATH").expect("测试环境须有 PATH");
+        let _g = spec_test_lock();
+
+        // `env` 无程序参数 = 全量转储子进程环境 + argv 前置的 KEY=VAL 赋值项；
+        // 怪值里 $HOME 未展开、| 未成管道、* 未成 glob、空格未断词 ⇒ 原样直送。
+        let mut d = desc("pinenv", "env", &["AP_PIN_ARG=$HOME|a b*"]);
+        d.log_limit = Some(512); // env 全量转储行数可观，别让环裁掉期望行
+        d.envs = Some(HashMap::from([
+            ("AP_PIN_NEW".to_string(), "new".to_string()),
+            ("AP_PIN_WEIRD".to_string(), "$HOME|a b*".to_string()),
+            // 遮蔽同名继承变量：现状 = 继承先行、spec 后置覆盖。
+            ("HOME".to_string(), "/ap-pin-home-override".to_string()),
+        ]));
+        reg().write().unwrap().insert("pinenv".into(), Slot::new(d));
+        Task::run("pinenv").unwrap();
+        let out = wait_stdout_lines(
+            "pinenv",
+            &[
+                "AP_PIN_ARG=$HOME|a b*",
+                "AP_PIN_NEW=new",
+                "AP_PIN_WEIRD=$HOME|a b*",
+                "HOME=/ap-pin-home-override",
+            ],
+            5000,
+        );
+        // 继承面：spec envs 绝不等于 env_clear——未覆盖的 PATH 必须仍是父进程原值。
+        let inherited_path = format!("PATH={parent_path}");
+        assert!(
+            out.iter()
+                .any(|x| x.stream == Stream::Stdout && x.text == inherited_path),
+            "继承环境被清空/改写：未见 {inherited_path}"
+        );
+        reg().write().unwrap().remove("pinenv");
+    }
+
+    /// 钉（supervise 侧）：cwd 只认 desc.cwd，Some 即 current_dir；None 无任何
+    /// 回退链——直接继承守护进程自身 cwd（$HOME→/ 回退链只属于 tui 调用方）。
+    #[cfg(unix)]
+    #[test]
+    fn pin_spawn_contract_cwd_field_only_no_fallback() {
+        let _g = spec_test_lock();
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "atlas_pin_cwd_{}_{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+
+        let mut d = desc("pinc1", "sh", &["-c", "pwd"]);
+        d.cwd = Some(dir.to_string_lossy().into_owned());
+        reg().write().unwrap().insert("pinc1".into(), Slot::new(d));
+        Task::run("pinc1").unwrap();
+        wait_stdout_lines("pinc1", &[dir.to_string_lossy().as_ref()], 5000);
+        reg().write().unwrap().remove("pinc1");
+
+        // None → 守护进程自己的 cwd（测试进程即镜像），绝非 $HOME、更绝非 /。
+        let inherit_cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let d = desc("pinc0", "sh", &["-c", "pwd"]); // desc() 夹具 cwd/envs 皆 None
+        reg().write().unwrap().insert("pinc0".into(), Slot::new(d));
+        Task::run("pinc0").unwrap();
+        wait_stdout_lines("pinc0", &[inherit_cwd.to_string_lossy().as_ref()], 5000);
+        reg().write().unwrap().remove("pinc0");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
