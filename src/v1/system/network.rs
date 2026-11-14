@@ -210,8 +210,8 @@ fn kick_refresh() {
 ///   去重成至多一发探测；
 /// - **探测足迹零变化**：复用 [`probe_public_v4`] 原链——task-22 的 8KiB+1
 ///   读取封顶、1.5s 超时、站表、负缓存语义原样继承，预热不新增任何出网面。
-/// 预热失败静默（debug 单行 + 负缓存，见 [`kick_refresh`]），首个请求最多
-/// 多等一个 TTL 周期，绝不回退成内联探测。
+///   预热失败静默（debug 单行 + 负缓存，见 [`kick_refresh`]），首个请求最多
+///   多等一个 TTL 周期，绝不回退成内联探测。
 pub fn prewarm() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(kick_refresh);

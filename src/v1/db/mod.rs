@@ -432,11 +432,10 @@ static CKPT_GATE: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::cons
 
 async fn checkpoint_paced(conn: &mut SqliteConnection) {
     let mut last_ok = CKPT_GATE.lock().await;
-    if let Some(t) = *last_ok {
-        if t.elapsed() < CHECKPOINT_INTERVAL {
+    if let Some(t) = *last_ok
+        && t.elapsed() < CHECKPOINT_INTERVAL {
             return;
         }
-    }
     #[cfg(test)]
     CKPT_RUNS.fetch_add(1, Ordering::SeqCst);
     // `PRAGMA wal_checkpoint(TRUNCATE)` 被读事务占住时**不报错**：返回
@@ -1693,8 +1692,8 @@ mod tests {
             value: 7.5,
         };
         block_on(async {
-            assert_eq!(crate::v1::operator::db_insert_for_tests(&[rec.clone()]).await.unwrap(), 1);
-            assert_eq!(crate::v1::operator::db_insert_for_tests(&[rec.clone()]).await.unwrap(), 1);
+            assert_eq!(crate::v1::operator::db_insert_for_tests(std::slice::from_ref(&rec)).await.unwrap(), 1);
+            assert_eq!(crate::v1::operator::db_insert_for_tests(std::slice::from_ref(&rec)).await.unwrap(), 1);
             assert_eq!(
                 INIT_RUNS.load(Ordering::SeqCst),
                 before + 1,
