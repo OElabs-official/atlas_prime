@@ -1156,7 +1156,7 @@ mod tests {
             .insert("tui_live1".into(), super::super::Slot::new(d));
 
         let live0 = LIVE.load(Ordering::Relaxed);
-        let (sref, replay, mut rx) =
+        let (sref, replay, rx) =
             attach_or_spawn("tui_live1", TokenKind::Spawn, 80, 24).expect("spawn 必须成功");
         assert!(replay.is_empty(), "新会话回放为空");
 
@@ -1176,7 +1176,7 @@ mod tests {
         );
 
         // Spawn 意图遇已有会话 → 降级 attach：回放必须含前序输出
-        let (sref2, replay2, mut rx2) =
+        let (sref2, replay2, rx2) =
             attach_or_spawn("tui_live1", TokenKind::Spawn, 80, 24).expect("降级 attach 必须成功");
         assert!(
             String::from_utf8_lossy(&replay2.concat()).contains("READY"),
@@ -1251,7 +1251,7 @@ mod tests {
 
         let live0 = LIVE.load(Ordering::Relaxed);
         for i in 0..20 {
-            let (sref, _replay, mut rx) =
+            let (sref, _replay, rx) =
                 attach_or_spawn("tui_race1", TokenKind::Spawn, 80, 24).expect("spawn 必须成功");
             // 订阅若先于 pump 建立，exit 广播必有落点：Exit 必达（Bytes 忽略）。
             let mut got: Option<Option<i32>> = None;

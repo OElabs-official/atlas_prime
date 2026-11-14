@@ -227,6 +227,7 @@ impl Db {
     }
 
     /// 当前存量行数（观察分 kind 滚动上限用）
+    #[allow(dead_code)] // 预留: 可观测性诊断面（模块头文档示例），现无 api/operator 调用位
     pub fn rows() -> Result<i64, DbError> {
         block_on(async {
             let cell = shared_conn().await?;
@@ -488,6 +489,7 @@ where
 /// 读取最近历史（测试缝：自带 open，迁移语义逐次可测；生产路径走常驻连接 + [`history_on`]）。
 /// 所有失败路径（open / 查询 / 行解码）经 [`report_history_err`] 上报（计数 + WARN）后
 /// 仍返回空 vec / 默认字段——响应形状不变，不再静默。
+#[allow(dead_code)] // 预留: 测试缝（仅 cfg(test) 消费，迁移语义逐次可测）；生产路径走常驻连接 history_on
 async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> Vec<Record> {
     let mut conn = match open_at(path).await {
         Ok(conn) => conn,
@@ -540,6 +542,7 @@ async fn history_on(
 
 /// 写入一轮（测试缝：自带 open + 每缝实例修剪队列，完整轮语义——插入 + 入队 +
 /// 按节奏修剪；生产路径走常驻连接的同名编排）。
+#[allow(dead_code)] // 预留: 测试缝（仅 cfg(test) 消费，完整轮语义可测）；生产路径走常驻连接同名编排
 async fn insert_at(path: &Path, records: &[Record]) -> Result<usize, DbError> {
     let mut core = DbCore::new(open_at(path).await?);
     let n = run_insert(&mut core.conn, records).await?;

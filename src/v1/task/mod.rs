@@ -154,6 +154,7 @@ pub enum TaskError {
     NotRunning(String),
     AlreadyRunning(String),
     /// 任务已登记但描述符命令无法启动（详情见 output/last_exit）
+    #[allow(dead_code)] // 预留: spawn 失败现经 output/last_exit 记账，本变体留作显式错误面（api 映射位）
     Spawn(String),
     /// stdin 有界泵队列（`STDIN_QUEUE` 深）已满：写入方必须显式感知背压
     /// （api 将本变体映射为 HTTP 503，让客户端退避重试而非静默丢行）

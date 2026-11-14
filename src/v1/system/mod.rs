@@ -28,19 +28,13 @@
 //! - [`proc`]：进程快照（`scan()` 现扫 + [`proc::update`]/[`proc::current`] 缓存对；
 //!   5s 节拍归操作器，web 纯缓存读，本域不落库）。
 
-#[allow(dead_code)]
 pub mod battery;
-#[allow(dead_code)]
 pub mod cpu;
-#[allow(dead_code)]
 pub mod disk;
 pub mod gpu;
-#[allow(dead_code)]
 pub mod mem;
-#[allow(dead_code)]
 pub mod network;
 pub mod proc;
-#[allow(dead_code)]
 pub mod thermal;
 
 #[cfg(test)]

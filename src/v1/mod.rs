@@ -11,18 +11,11 @@
 
 pub mod prelude;
 
-#[allow(dead_code)]
 pub mod system;
-#[allow(dead_code)]
 pub mod task;
-#[allow(dead_code)]
 pub mod api;
 
-#[allow(dead_code)]
 pub mod db;
-#[allow(dead_code)]
 pub mod notify;
-#[allow(dead_code)]
 pub mod operator;
-#[allow(dead_code)]
 pub mod service;
