@@ -76,7 +76,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -257,7 +257,7 @@ pub struct TuiGuard {
     sid: u64,
     /// 在下面的 kill 解除 `wait()` 阻塞之前，先把 wait 线程从 outbox 摘线。
     /// 字段顺序承重：Rust 按声明序自上而下 drop，故本字段先释放通道。
-    _in_tx: Sender<Vec<u8>>,
+    _in_tx: SyncSender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     _slot: SlotGuard,
 }
@@ -273,17 +273,28 @@ impl Drop for TuiGuard {
     }
 }
 
+/// PTY 入向有界队列深度（audit perf F11 同契约）：与 task stdin 泵同形,
+/// 64 帧 × 64KiB 帧上限 = 每会话个位数 MiB 确定性内存界。队满丢帧（按键流
+/// 的背压形态就是丢弃过载，绝不允许无界排队拖爆会话）。
+const PTY_INPUT_QUEUE: usize = 64;
+
 /// 入向句柄：按键/粘贴字节 + 改尺寸。共享核的 `Mutex<TuiInput>` 内容；
 /// 桥拆除后 [`Self::send`] 自然失败。
 pub struct TuiInput {
-    in_tx: Sender<Vec<u8>>,
+    in_tx: SyncSender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
 }
 
 impl TuiInput {
-    /// 写入 PTY（按键 / 粘贴 / SGR 鼠标序列的裸字节）。桥已拆则静默丢弃。
+    /// 写入 PTY（按键 / 粘贴 / SGR 鼠标序列的裸字节）。桥已拆则静默丢弃；
+    /// 有界队列（[`PTY_INPUT_QUEUE`]）满时丢最旧不如丢最新——本帧直接丢弃,
+    /// 与 task 域「队满立即背压」同语义（本路径无错误回通道，回 WS 即丢包）。
     fn send(&self, bytes: Vec<u8>) {
-        let _ = self.in_tx.send(bytes);
+        if let Err(e) = self.in_tx.try_send(bytes) {
+            if matches!(e, TrySendError::Full(_)) {
+                eprintln!("atlas: tui 入向队列满（{PTY_INPUT_QUEUE} 帧），丢弃一帧");
+            }
+        }
     }
 
     /// 改 PTY 尺寸（行列）。多窗口共享同一 PTY，后到的 resize 覆盖先到的。
@@ -709,7 +720,7 @@ fn open_desc(
     let child = or_pty_err!(pair.slave.spawn_command(task_cmd(desc)));
     let killer = child.clone_killer();
     let (outbox, closer, outbox_rx) = Outbox::channel();
-    let (in_tx, in_rx) = channel::<Vec<u8>>();
+    let (in_tx, in_rx) = sync_channel::<Vec<u8>>(PTY_INPUT_QUEUE);
     // 自此任何错误路径都经此守卫击杀子进程。
     let guard = TuiGuard {
         sid,
@@ -787,12 +798,14 @@ fn waiter_loop(
     mut child: Box<dyn Child + Send + Sync>,
     closer: OutboxCloser,
     _reader: Box<dyn Read + Send>,
-    in_tx: Sender<Vec<u8>>,
+    in_tx: SyncSender<Vec<u8>>,
 ) {
     let status = child.wait().ok();
     let code = status.map(|s| s.exit_code() as i32);
     eprintln!("atlas: tui sid={sid} pty 子进程退出 code={code:?}");
-    if in_tx.send(Vec::new()).is_ok() {
+    // 哨兵探测桥存续：Full 亦证 writer 活着（有界队列, audit perf F11），
+    // 唯 Disconnected = 会话已拆, 不再上报 Exit。
+    if !matches!(in_tx.try_send(Vec::new()), Err(TrySendError::Disconnected(_))) {
         Outbox(Arc::clone(&closer.0)).push(TuiEvent::Exit(code));
     }
     // `closer` 在此 drop：关闭队列，消费端收束。
@@ -987,7 +1000,7 @@ mod tests {
     /// 向册注入一条假会话（占槽，无 pump/无 PTY）：kill / prune 回收路径的夹具。
     fn inject_fake_session(task_id: &str) {
         let slot = try_acquire().expect("槽位预订");
-        let (tx, _rx) = channel::<Vec<u8>>();
+        let (tx, _rx) = sync_channel::<Vec<u8>>(PTY_INPUT_QUEUE);
         let sid = next_sid();
         let guard = TuiGuard {
             sid,
