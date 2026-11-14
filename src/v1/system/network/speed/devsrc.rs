@@ -5,8 +5,11 @@
 //! 桥已整体撤除——调试端口随网络切换/重启漂移、须人工重配对，UX 差；root
 //! 模式（Magisk su）无人值守即可用。su 计划固定 `su -c "cat /proc/net/dev"`，
 //! 每拍同步走、无端口文件（su 经 PATH 解析，Termux+Magisk 实测可用）。
-//! 无 root 设备 su 拉起 ENOENT 秒失败回 [`NetError::NoSu`]（1Hz 回路成本可
-//! 忽略）；Magisk 首授权可能弹框拖超时一拍，属预期。
+//! 无 root（封印）设备 su 拉起 ENOENT 秒失败回 [`NetError::NoSu`]；此类设备
+//! 不再每拍白付 fork+execve——连续 [`NOSU_BACKOFF_AFTER`] 拍 NoSu 终态后 su
+//! 腿进入 [`NOSU_BACKOFF_SECS`] 秒回退窗（窗内直接回 NoSu 同款终态、不改回退
+//! 状态，对调用侧连败计数是非事件；sysfs/netlink 兜底腿照旧每拍照跑），首个
+//! 成功即清零回 eager。Magisk 首授权可能弹框拖超时一拍，属预期。
 //!
 //! 链序：直读 →（PermissionDenied / NotFound 时）su 腿；其余 IO 错误 su
 //! 帮不上，直接 [`NetError::Denied`] 上报。su 腿失败后的 sysfs / netlink
@@ -19,11 +22,26 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// su 子进程等待上限：成功路径为百毫秒级（su 冷启动 + 一次 cat），留 1.5s 给
 /// Magisk 守护冷启；越界即 kill。1Hz 回路的最坏拖长由它钳位。
 const SU_BOUND: Duration = Duration::from_millis(1500);
+
+/// NoSu 回退触发阈值：连续多少拍 NoSu 终态后 su 腿进入回退窗
+const NOSU_BACKOFF_AFTER: u32 = 3;
+
+/// NoSu 回退窗长（秒）：窗内 su 腿一律不碰进程、直接回 NoSu 终态
+const NOSU_BACKOFF_SECS: i64 = 60;
+
+/// 连续 NoSu 连击计数（仅 su 腿真实尝试且回 NoSu 才进位；任何非 NoSu 结局
+/// ——成功或 SuFailed/Timeout——清零）。封印设备上封顶于秒级 u32，无溢出忧虑。
+static NOSU_STREAK: AtomicU32 = AtomicU32::new(0);
+
+/// 下一次允许 su 尝试的 Unix 秒级 epoch；0 = eager（无回退窗生效）
+static NOSU_RETRY_AT: AtomicI64 = AtomicI64::new(0);
+
 
 /// `try_wait` 轮询步长（notify 模块同款节奏）
 const POLL_STEP: Duration = Duration::from_millis(20);
@@ -82,10 +100,67 @@ fn read_dev_chain(
     }
 }
 
-/// su 腿 = 计划 + 取回
+/// su 腿 = 回退门 + 计划 + 取回
 fn su_leg() -> Result<String, NetError> {
-    let (prog, args) = su_plan();
-    su_fetch(&prog, &args, SU_BOUND)
+    su_gated(epoch_secs(), || {
+        let (prog, args) = su_plan();
+        su_fetch(&prog, &args, SU_BOUND)
+    })
+}
+
+/// NoSu 回退门（时钟注入缝，单测喂假 epoch 免真睡 60s）：回退窗内不调
+/// `attempt`、直接回 [`NetError::NoSu`] 同款终态且**不改任何回退状态**——
+/// 对上游（speed::snapshot_result → 操作器 net 回路连败计数）是非事件，
+/// 全链耗尽的 Err 形状与未回退时逐字节一致。窗外真实尝试后按结局记账：
+/// NoSu 进位、达阈值武装 [`NOSU_BACKOFF_SECS`] 回退窗；成功清零回 eager；
+/// SuFailed/Timeout 说明 su 存在（拒权/冷启），与「设备无 su」成因不同，
+/// 同样清零保持 eager（连击语义 = 连续 NoSu 才被中断）。
+fn su_gated(now: i64, attempt: impl FnOnce() -> Result<String, NetError>) -> Result<String, NetError> {
+    if !su_attempt_allowed(now) {
+        return Err(NetError::NoSu);
+    }
+    match attempt() {
+        Ok(text) => {
+            NOSU_STREAK.store(0, Ordering::Relaxed);
+            NOSU_RETRY_AT.store(0, Ordering::Relaxed);
+            Ok(text)
+        }
+        Err(NetError::NoSu) => {
+            let streak = NOSU_STREAK.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            if streak >= NOSU_BACKOFF_AFTER {
+                NOSU_RETRY_AT.store(now.saturating_add(NOSU_BACKOFF_SECS), Ordering::Relaxed);
+            }
+            Err(NetError::NoSu)
+        }
+        Err(other) => {
+            NOSU_STREAK.store(0, Ordering::Relaxed);
+            NOSU_RETRY_AT.store(0, Ordering::Relaxed);
+            Err(other)
+        }
+    }
+}
+
+/// 回退窗判据（公开测试缝）：无窗（0）或窗已到期即放行。到期不自动清零
+/// ——下一次真实尝试的结局负责重武装（NoSu）或解除（成功/其他），
+/// 故过期状态不会把 su 腿锁死在窗外（stale_state 对抗点）。
+fn su_attempt_allowed(now: i64) -> bool {
+    let retry_at = NOSU_RETRY_AT.load(Ordering::Relaxed);
+    retry_at == 0 || now >= retry_at
+}
+
+/// Unix 秒级 epoch（回退窗时钟）；1970 前脏钟回 0，判据自洽（0 < 任何窗）。
+fn epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
+/// 测试专用：回退状态清零（模块级原子被同文件多测试共享，测试须先复位）
+#[cfg(test)]
+pub fn reset_for_test() {
+    NOSU_STREAK.store(0, Ordering::Relaxed);
+    NOSU_RETRY_AT.store(0, Ordering::Relaxed);
 }
 
 /// 纯计划器（单一事实源，单测钉死）：`su -c "cat /proc/net/dev"`。环境原样
@@ -151,7 +226,10 @@ fn su_fetch(prog: &str, args: &[String], bound: Duration) -> Result<String, NetE
 
 #[cfg(test)]
 mod tests {
-    use super::{NetError, read_dev_chain, su_fetch, su_plan, SU_BOUND};
+    use super::{
+        NetError, NOSU_BACKOFF_SECS, read_dev_chain, reset_for_test, su_attempt_allowed,
+        su_fetch, su_gated, su_plan, SU_BOUND,
+    };
     use std::cell::Cell;
     use std::io::{Error, ErrorKind};
     use std::time::{Duration, Instant};
@@ -253,5 +331,99 @@ mod tests {
             "kill 未生效/等待失控: {:?}",
             t0.elapsed()
         );
+    }
+
+    // ---------------- NoSu 回退门（task 14） ----------------
+    //
+    // 时钟缝：su_gated 吃注入的 epoch 秒，测试全程零 sleep；尝试缝：假 attempt
+    // 计数器 = execve 代理（被跳过即不 +1）。模块级原子被并发测试共享，
+    // 全部回退测试经 BACKOFF_LOCK 串行。
+
+    static BACKOFF_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 假 Unix 秒基准（远离 0，避开「无窗 = 0」哨兵语义）
+    const T0: i64 = 1_700_000_000;
+
+    fn no_su_attempt(hits: &Cell<u32>) -> impl FnOnce() -> Result<String, NetError> + '_ {
+        move || {
+            hits.set(hits.get() + 1);
+            Err(NetError::NoSu)
+        }
+    }
+
+    /// 连续 3 拍 NoSu 武装回退后，60s 窗内后续拍（第 4/5/6 拍）不再触碰 su
+    /// 进程、原样回 NoSu 终态（封装机每分钟 execve 归零的根据）
+    #[test]
+    fn no_su_backoff_suppresses_su_leg_within_window_after_three_streak() {
+        let _g = BACKOFF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        let hits = Cell::new(0u32);
+        for _ in 0..3 {
+            assert!(matches!(su_gated(T0, no_su_attempt(&hits)), Err(NetError::NoSu)));
+        }
+        assert_eq!(hits.get(), 3, "武装修士前每拍都须真实尝试 su");
+        for k in 1..=3 {
+            assert!(
+                matches!(su_gated(T0 + k, no_su_attempt(&hits)), Err(NetError::NoSu)),
+                "回退拍 {k} 须原样回 NoSu 终态（调用侧全链耗尽形状不变）"
+            );
+        }
+        assert_eq!(hits.get(), 3, "回退窗内 su 进程不得被拉起（execve 计数须冻结）");
+    }
+
+    /// stale_state 对抗：回退窗到期即重新放行尝试（无新成功也不许把 su 腿
+    /// 锁死）；重探再 NoSu 即从新时刻重新武装 60s
+    #[test]
+    fn no_su_backoff_expires_at_window_end_and_rearms_on_next_no_su() {
+        let _g = BACKOFF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        let hits = Cell::new(0u32);
+        for _ in 0..3 {
+            let _ = su_gated(T0, no_su_attempt(&hits));
+        }
+        assert!(!su_attempt_allowed(T0 + NOSU_BACKOFF_SECS - 1), "窗内最后一秒仍须回退");
+        let _ = su_gated(T0 + NOSU_BACKOFF_SECS, no_su_attempt(&hits));
+        assert_eq!(hits.get(), 4, "窗到期那一拍须重新真实尝试");
+        let _ = su_gated(T0 + 2 * NOSU_BACKOFF_SECS - 1, no_su_attempt(&hits));
+        assert_eq!(hits.get(), 4, "重探 NoSu 须从 T0+60 再武装 60s");
+        let _ = su_gated(T0 + 2 * NOSU_BACKOFF_SECS, no_su_attempt(&hits));
+        assert_eq!(hits.get(), 5, "第二个窗到期亦须放行（回退不许过期锁死）");
+    }
+
+    /// 首个成功清零：回退窗边界重探成功 → 状态归零，原窗内时刻恢复 eager
+    #[test]
+    fn no_su_backoff_first_success_resets_to_eager() {
+        let _g = BACKOFF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        let hits = Cell::new(0u32);
+        for _ in 0..3 {
+            let _ = su_gated(T0, no_su_attempt(&hits));
+        }
+        assert!(!su_attempt_allowed(T0 + 1), "前置：回退窗须已武装");
+        let got = su_gated(T0 + NOSU_BACKOFF_SECS, || Ok(TEXT.to_string()));
+        assert_eq!(got.ok().as_deref(), Some(TEXT), "窗边界重探成功须透传正文");
+        assert!(su_attempt_allowed(T0 + 1), "成功须解除回退窗回 eager（即使时刻在旧窗内）");
+        let _ = su_gated(T0 + NOSU_BACKOFF_SECS + 1, no_su_attempt(&hits));
+        assert_eq!(hits.get(), 4, "成功后的下一拍须真实尝试");
+    }
+
+    /// 连击语义：SuFailed 中断 NoSu 连击（清零）；成功同时清零计数与窗
+    #[test]
+    fn non_no_su_terminal_breaks_streak_and_clears_backoff() {
+        let _g = BACKOFF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        let hits = Cell::new(0u32);
+        let _ = su_gated(T0, no_su_attempt(&hits));
+        let _ = su_gated(T0, no_su_attempt(&hits));
+        let _ = su_gated(T0, || Err(NetError::SuFailed("拒权".to_string())));
+        let _ = su_gated(T0, no_su_attempt(&hits));
+        let _ = su_gated(T0, no_su_attempt(&hits));
+        assert!(su_attempt_allowed(T0), "SuFailed 已断连击，5 拍后仅 2 连击不得武装");
+        // 第 3 连击武装后，窗边界成功 → 双清零
+        let _ = su_gated(T0, no_su_attempt(&hits));
+        assert!(!su_attempt_allowed(T0 + 1), "第 3 连击须武装回退窗");
+        let got = su_gated(T0 + NOSU_BACKOFF_SECS, || Ok(TEXT.to_string()));
+        assert!(got.is_ok());
+        assert!(su_attempt_allowed(T0), "成功须同时清零连击与窗");
     }
 }
