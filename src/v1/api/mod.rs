@@ -240,17 +240,43 @@ async fn h_disk() -> HttpResponse {
 /// 别名 `/system/cli/network`（CLI 风格命名，数据源现实为直读→su 桥链）挂
 /// **同一处理器**：payload 逐字节一致、`speed` 成员两处同供；同处理器即
 /// 同缓存槽（key=`/system/ip`）同限流档（normal 桶，不走 cli 1 req/s 档）。
+/// 编码为**单遍**：[`IpWithSpeed`] 直接把四桶 + speed 写进序列化器（无
+/// to_value→mutate→to_vec 双遍历），键序仍按字典序与旧路径逐字节一致。
 async fn h_network() -> HttpResponse {
     respond("/system/ip", false, || {
-        let mut v = serde_json::to_value(network::Ip::get())?;
-        let mut speed = serde_json::Map::new();
-        for (iface, rx, tx) in Operator::net_speeds() {
-            speed.insert(iface, serde_json::json!({ "rx_bps": rx, "tx_bps": tx }));
-        }
-        v["speed"] = serde_json::Value::Object(speed);
-        serde_json::to_vec(&v)
+        serde_json::to_vec(&IpWithSpeed {
+            ip: network::Ip::get(),
+            speed: Operator::net_speeds(),
+        })
     })
     .await
+}
+
+/// `/system/ip` 单遍响应壳：[`network::Ip`] 四桶与 `"speed"` 摊平进同一 map，
+/// 手写 Serialize 直写序列化器，免去旧路径的整树 to_value + 再 to_vec。
+/// 条目按**字典序**发射（lan, loopback, public_v4, public_v6, speed）——旧路径
+/// 经 Value::Object(BTreeMap) 亦按字典序出键，故 payload 逐字节不变；speed 组
+/// 对象经 serde_json::Map（BTreeMap）同样升序，rx_bps/tx_bps 内层键序不变。
+struct IpWithSpeed {
+    ip: network::Ip,
+    speed: Vec<(String, f64, f64)>,
+}
+
+impl serde::Serialize for IpWithSpeed {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut m = s.serialize_map(Some(5))?;
+        m.serialize_entry("lan", &self.ip.lan)?;
+        m.serialize_entry("loopback", &self.ip.loopback)?;
+        m.serialize_entry("public_v4", &self.ip.public_v4)?;
+        m.serialize_entry("public_v6", &self.ip.public_v6)?;
+        let mut speed = serde_json::Map::new();
+        for (iface, rx, tx) in &self.speed {
+            speed.insert(iface.clone(), serde_json::json!({ "rx_bps": rx, "tx_bps": tx }));
+        }
+        m.serialize_entry("speed", &speed)?;
+        m.end()
+    }
 }
 async fn h_cli_battery() -> HttpResponse {
     respond("/system/cli/battery", true, || {
@@ -616,6 +642,46 @@ mod tests {
 
     fn t(ms: u64) -> Instant {
         Instant::now() + Duration::from_millis(ms)
+    }
+
+    // ---- checkbox 29（后半）：h_network 单遍编码与旧双遍路径逐字节同一 ----
+
+    #[test]
+    fn ip_with_speed_bytes_identical_to_legacy_double_pass() {
+        // 参考实现 = 改造前的 to_value→mutate→to_vec 双遍路径原样
+        fn legacy(ip: network::Ip, speeds: Vec<(String, f64, f64)>) -> Vec<u8> {
+            let mut v = serde_json::to_value(ip).unwrap();
+            let mut speed = serde_json::Map::new();
+            for (iface, rx, tx) in speeds {
+                speed.insert(iface, serde_json::json!({ "rx_bps": rx, "tx_bps": tx }));
+            }
+            v["speed"] = serde_json::Value::Object(speed);
+            serde_json::to_vec(&v).unwrap()
+        }
+        let mk = || network::Ip {
+            loopback: vec![("lo".into(), "127.0.0.1".into()), ("lo".into(), "::1".into())],
+            lan: vec![("wlan0".into(), "192.168.1.7".into())],
+            public_v4: Some("203.0.113.9".into()),
+            public_v6: vec!["2001:db8::42".into()],
+        };
+        // 组名乱序喂入，钉死两侧都按 BTreeMap 字典序出键
+        let sp = || {
+            vec![
+                ("wlan0".to_string(), 1.5_f64, 2.25_f64),
+                ("wifi".to_string(), 12345.0, 67890.0),
+                ("cellular".to_string(), 0.0, 0.0),
+            ]
+        };
+        assert_eq!(
+            serde_json::to_vec(&IpWithSpeed { ip: mk(), speed: sp() }).unwrap(),
+            legacy(mk(), sp()),
+            "单遍编码 payload 必须与旧双遍路径逐字节一致"
+        );
+        // 边界形：全空 + public_v4=None（首轮 / 离线负缓存形态）
+        assert_eq!(
+            serde_json::to_vec(&IpWithSpeed { ip: network::Ip::default(), speed: vec![] }).unwrap(),
+            legacy(network::Ip::default(), vec![]),
+        );
     }
 
     // ---- checkbox 21：stdin 背压的 HTTP 语义必须钉死为 503（非肉眼判读）----
