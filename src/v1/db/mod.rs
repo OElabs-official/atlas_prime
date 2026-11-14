@@ -35,7 +35,8 @@
 //! 的窗口压没）。每批落库后按批内所含范围各发一条 DELETE（固定两条 prepared
 //! 语句路径；net tick 每轮删一行级，1Hz 下开销可忽略）。
 //!
-//! # schema 迁移（幂等，每次 open 执行；二次 open = no-op）
+//! # schema 迁移（幂等；生产路径仅常驻连接 init 时执行一次，测试缝 `open_at` 逐次
+//! 执行、二次 open = no-op）
 //! `pragma_table_info` 查 `records.ts` 声明类型：TEXT → 新 schema，什么都不做；
 //! `records` 缺失而旧 `samples`（ts=unix 秒 INTEGER）在 → 单事务内
 //! `records_new`(TEXT) ← `strftime('%Y-%m-%dT%H:%M:%SZ', ts, 'unixepoch')` 转写复制
@@ -58,15 +59,24 @@
 //!
 //! # 写入与并发模型
 //! 全库共用**一个**常驻 current-thread runtime（同步入口与操作器采样线程同驱动，
-//! 进程内只建一次）；每次操作开新连接，连上即执行
+//! 进程内只建一次）+ **一个**常驻连接（`static CONN`，audit GAP-2：消灭每操作
+//! open/close 的 openat/系统调用风暴）：首次读写经 `open_at` 建立，连上即执行
 //! `PRAGMA journal_mode=WAL; synchronous=NORMAL; busy_timeout=5000`
 //! ——Android F2FS fsync 昂贵，WAL+NORMAL 显著压降写盘抖动，busy_timeout 抗并发锁竞争。
+//! PRAGMA/迁移/建表/建索引**只在 init 执行这一次**（journal_mode/user_version 持久于
+//! 库文件头，重启天然免疫）。此后所有读写经 `tokio::sync::Mutex`（**必须** tokio 版：
+//! 单一驱动 runtime 上 std guard 跨 await 会阻塞同线程 sqlite driver 任务 = 自死锁）
+//! 独占复用。每批落库后至多每 [`CHECKPOINT_INTERVAL`]=120s 发一条
+//! `PRAGMA wal_checkpoint(TRUNCATE)`（db 模块内 Instant 守卫）：WAL 在两次截断之间
+//! 增长、截断处归零（对照旧基线的每操作 checkpoint 锯齿）；被外部读事务卡住返回
+//! BUSY 时**记 WARN 跳过、绝不令本轮失败**，下一轮重试。
 //! 一轮 = 单事务内若干条 **多值 INSERT**（每片 ≤200 行 = ≤800 绑定，低于
 //! SQLITE_MAX_VARIABLE_NUMBER=999），提交后整轮修剪。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
@@ -86,6 +96,11 @@ const SCOPE_OTHER: &str = "kind <> 'net'";
 
 /// 单条多值 INSERT 的最大行数（4 列 × 200 = 800 绑定 < SQLITE_MAX_VARIABLE_NUMBER=999）
 const INSERT_CHUNK: usize = 200;
+
+/// 手动 WAL 截断检查点的最小间隔（audit GAP-2）：常驻连接下 wal 在两截断之间增长，
+/// 每批落库后经 [`checkpoint_paced`] 至多每此间隔发一条 TRUNCATE；BUSY 记 WARN 跳过、
+/// 守卫不推进，下一轮重试。取代旧「每操作 open/close 各触发一次自动 checkpoint」的锯齿。
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(120);
 
 /// records 列定义（全新建表与迁移重建 records_new 共用同一事实源）
 const RECORDS_COLUMNS: &str =
@@ -125,9 +140,22 @@ impl std::error::Error for DbError {}
 pub struct Db;
 
 impl Db {
-    /// 写入一轮记录（单事务多值插入 + 滚动修剪）。唯一调用方 = 操作器。
+    /// 写入一轮记录（常驻连接：单事务多值插入 → 提交后滚动修剪 → 节流 WAL
+    /// 截断）。唯一调用方 = 操作器。
     pub(crate) async fn insert(records: &[Record]) -> Result<usize, DbError> {
-        insert_at(&db_path()?, records).await
+        let cell = shared_conn().await?;
+        let mut core = cell.lock().await;
+        let n = run_insert(&mut core.conn, records).await?;
+        // 按批内所含范围各自修剪：net 批只修剪 net，120s 批只修剪其余 kind
+        if records.iter().any(|r| r.kind == "net") {
+            trim_rounds(&mut core.conn, SCOPE_NET, NET_MAX_ROUNDS).await?;
+        }
+        if records.iter().any(|r| r.kind != "net") {
+            trim_rounds(&mut core.conn, SCOPE_OTHER, MAX_ROUNDS).await?;
+        }
+        // best-effort（锁定决策 iii）：checkpoint 失败只 WARN，绝不令本轮失败
+        checkpoint_paced(&mut core.conn).await;
+        Ok(n)
     }
 
     /// 最近历史（新→旧）。key=None 时聚合该 kind 全部键。
@@ -136,19 +164,26 @@ impl Db {
         let kind = kind.to_string();
         let key = key.map(|k| k.to_string());
         block_on(async move {
-            let Ok(path) = db_path() else {
-                return Vec::new();
-            };
-            history_at(&path, &kind, key.as_deref(), limit).await
+            match shared_conn().await {
+                Ok(cell) => {
+                    let mut core = cell.lock().await;
+                    history_on(&mut core.conn, &kind, key.as_deref(), limit).await
+                }
+                Err(e) => {
+                    report_history_err("conn", &e);
+                    Vec::new()
+                }
+            }
         })
     }
 
     /// 当前存量行数（观察分 kind 滚动上限用）
     pub fn rows() -> Result<i64, DbError> {
         block_on(async {
-            let mut conn = open().await?;
+            let cell = shared_conn().await?;
+            let mut core = cell.lock().await;
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM records")
-                .fetch_one(&mut conn)
+                .fetch_one(&mut core.conn)
                 .await
                 .map_err(|e| DbError::Sql(e.to_string()))
         })
@@ -157,7 +192,108 @@ impl Db {
 
 // ---------------- 黑箱内部 ----------------
 
-/// history 读取失败累计计数（audit bug F12：静默空 vec 的唯一新增可观测面）。
+/// 进程唯一常驻连接（audit GAP-2）：首次读写经 [`init_conn`] 用 `open_at` 建立
+/// （三 PRAGMA + 迁移 + 建表/建索引只随该次 init 执行），此后全进程经独占锁复用。
+/// `tokio::sync::Mutex` 而非 std（锁定决策 ii）：guard 跨 await，std 版会在单一驱动
+/// runtime 上阻塞驱动线程、饿死同线程的 sqlite driver 任务 = 自死锁。
+/// 锁内负载是 [`DbCore`]（当前仅连接本体），读写与修剪同锁串行、无跨锁竞态。
+static CONN: OnceLock<tokio::sync::Mutex<DbCore>> = OnceLock::new();
+
+/// 常驻锁内负载：唯一连接。测试经 [`DbCore::new`] 在自有连接上实例化，
+/// 不依赖全局 CONN；生产只有 [`init_conn`] 构造一次。
+struct DbCore {
+    conn: SqliteConnection,
+}
+
+impl DbCore {
+    fn new(conn: SqliteConnection) -> Self {
+        DbCore { conn }
+    }
+}
+
+/// init 路径执行计数（红先测试的观测面：常驻连接下多次读写必须恒 ==1）。
+#[cfg(test)]
+static INIT_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// 测试专用 CONN 复位（锁定决策 iv）：std `OnceLock` 无 `&self` 反初始化
+/// （`take` 要 `&mut`；对 static 手写 `addr_of_mut` 写入会与并发 `CONN.get()`——
+/// 操作器测试线程可 1Hz 驱动 `Db::insert`——竞争成 UB），故复位语义为
+/// 「异步锁排空在途读写 + TRUNCATE 截断收尾」：常驻连接留槽至进程退出，
+/// init-once 断言全部用相对增量、不依赖反初始化。仅在共享测试锁持有时调用。
+#[cfg(test)]
+fn reset_conn_for_test() {
+    if let Some(cell) = CONN.get() {
+        block_on(async {
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+                .execute(&mut cell.lock().await.conn)
+                .await;
+        });
+    }
+}
+
+/// 取常驻连接（懒 init 快路径）。始终在 db 共享 runtime 上被调用（Db::* 的
+/// block_on 之内），故 init 的 `open_at` 必在 current-thread runtime 内建立连接。
+async fn shared_conn() -> Result<&'static tokio::sync::Mutex<DbCore>, DbError> {
+    if let Some(cell) = CONN.get() {
+        return Ok(cell);
+    }
+    init_conn().await
+}
+
+/// 连接初始化（进程内至多成功一次）。并发竞态的处理：OnceLock::get_or_init 闭包
+/// 不可 await，故用 tokio Mutex 门 + 双检——并发 init 中只有执锁者真正跑 `open_at`，
+/// 晚到者拿锁后见 CONN 已置、直接走快路径。不用「双 open + set + 败者丢弃」：
+/// 那会让两个连接并发跑迁移，WAL 写锁竞争下一个 open 整体失败并无谓放大启动风险；
+/// 门将窗口清零且零额外成本（init 每进程至多一次）。`CONN.set` 仅在测试期
+/// [`reset_conn_for_test`] 竞态下可能失败：败者连接随 set 的 Err 返回值一并丢弃。
+async fn init_conn() -> Result<&'static tokio::sync::Mutex<DbCore>, DbError> {
+    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _gate = GATE.lock().await;
+    if let Some(cell) = CONN.get() {
+        return Ok(cell);
+    }
+    let conn = open_at(&db_path()?).await?;
+    #[cfg(test)]
+    INIT_RUNS.fetch_add(1, Ordering::SeqCst);
+    let _ = CONN.set(tokio::sync::Mutex::new(DbCore::new(conn)));
+    CONN.get().ok_or_else(|| DbError::Open("conn slot lost during init".into()))
+}
+
+/// WAL 截断检查点的 120s 节流守卫（`Some` = 上次成功时刻）。成功才推进守卫：
+/// 被占住时记 WARN 不推进，下一轮读写即重试——best-effort，永不向调用方传播
+/// 错误、绝不令本轮失败（锁定决策 iii）。
+static CKPT_GATE: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+
+async fn checkpoint_paced(conn: &mut SqliteConnection) {
+    let mut last_ok = CKPT_GATE.lock().await;
+    if let Some(t) = *last_ok {
+        if t.elapsed() < CHECKPOINT_INTERVAL {
+            return;
+        }
+    }
+    #[cfg(test)]
+    CKPT_RUNS.fetch_add(1, Ordering::SeqCst);
+    // `PRAGMA wal_checkpoint(TRUNCATE)` 被读事务占住时**不报错**：返回
+    // (busy=1, log, ckpt) 行、SQLITE_OK（SQLITE_BUSY 仅语句级硬错误路径）。
+    // 两种「未完成」都必须落进不推进守卫的跳过分支，否则空转截断被误记为成功。
+    match sqlx::query_as::<_, (i64, i64, i64)>("PRAGMA wal_checkpoint(TRUNCATE);")
+        .fetch_optional(&mut *conn)
+        .await
+    {
+        Ok(Some((0, _, _))) => *last_ok = Some(Instant::now()),
+        Ok(Some((busy, log, ckpt))) => eprintln!(
+            "WARN db wal_checkpoint(TRUNCATE) busy (best-effort, retry next round): busy={busy} log={log} ckpt={ckpt}"
+        ),
+        Ok(None) => eprintln!("WARN db wal_checkpoint(TRUNCATE) returned no row (skipped)"),
+        Err(e) => eprintln!("WARN db wal_checkpoint(TRUNCATE) skipped (best-effort): {e}"),
+    }
+}
+
+/// checkpoint 尝试计数（测试观测面：节流跳过与 BUSY 重试路径断言用）。
+#[cfg(test)]
+static CKPT_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// HISTORY_ERRS 读取失败累计计数（audit bug F12：静默空 vec 的唯一新增可观测面）。
 /// 读失败仍返回空 vec（响应形状不变），信号只有本计数 + 一条 WARN 行；
 /// 测试经计数断言，无需捕获 stderr。
 pub(crate) static HISTORY_ERRS: AtomicUsize = AtomicUsize::new(0);
@@ -184,8 +320,9 @@ where
     }
 }
 
-/// 读取最近历史。所有失败路径（open / 查询 / 行解码）经 [`report_history_err`]
-/// 上报（计数 + WARN）后仍返回空 vec / 默认字段——响应形状不变，不再静默。
+/// 读取最近历史（测试缝：自带 open，迁移语义逐次可测；生产路径走常驻连接 + [`history_on`]）。
+/// 所有失败路径（open / 查询 / 行解码）经 [`report_history_err`] 上报（计数 + WARN）后
+/// 仍返回空 vec / 默认字段——响应形状不变，不再静默。
 async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> Vec<Record> {
     let mut conn = match open_at(path).await {
         Ok(conn) => conn,
@@ -194,6 +331,17 @@ async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> V
             return Vec::new();
         }
     };
+    history_on(&mut conn, kind, key, limit).await
+}
+
+/// 历史查询主体（在调用方提供的连接上执行；生产 = 常驻连接独占锁内）。
+/// 查询/行解码失败经 [`report_history_err`] 上报后返回空 vec / 默认字段。
+async fn history_on(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    key: Option<&str>,
+    limit: u32,
+) -> Vec<Record> {
     let sql = match key {
         Some(_) => {
             "SELECT CAST(strftime('%s', ts) AS INTEGER),ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 ORDER BY rowid DESC LIMIT ?3"
@@ -207,7 +355,7 @@ async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> V
         q = q.bind(k);
     }
     q = q.bind(i64::from(limit));
-    let rows = match q.fetch_all(&mut conn).await {
+    let rows = match q.fetch_all(conn).await {
         Ok(rows) => rows,
         Err(e) => {
             report_history_err("query", &e);
@@ -225,8 +373,23 @@ async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> V
         .collect()
 }
 
+/// 写入一轮（测试缝：自带 open，完整轮语义——插入 + 提交后滚动修剪；生产路径
+/// 走常驻连接的同名编排）。
 async fn insert_at(path: &Path, records: &[Record]) -> Result<usize, DbError> {
-    let mut conn = open_at(path).await?;
+    let mut core = DbCore::new(open_at(path).await?);
+    let n = run_insert(&mut core.conn, records).await?;
+    if records.iter().any(|r| r.kind == "net") {
+        trim_rounds(&mut core.conn, SCOPE_NET, NET_MAX_ROUNDS).await?;
+    }
+    if records.iter().any(|r| r.kind != "net") {
+        trim_rounds(&mut core.conn, SCOPE_OTHER, MAX_ROUNDS).await?;
+    }
+    Ok(n)
+}
+
+/// 插入主体（在调用方提供的连接上执行；生产 = 常驻连接独占锁内）：
+/// 单事务多值插入，不含修剪——修剪由调用方编排（生产 [`Db::insert`]、测试 [`insert_at`]）。
+async fn run_insert(conn: &mut SqliteConnection, records: &[Record]) -> Result<usize, DbError> {
     let mut tx = conn
         .begin()
         .await
@@ -250,13 +413,6 @@ async fn insert_at(path: &Path, records: &[Record]) -> Result<usize, DbError> {
             .map_err(|e| DbError::Sql(e.to_string()))?;
     }
     tx.commit().await.map_err(|e| DbError::Sql(e.to_string()))?;
-    // 按批内所含范围各自修剪：net 批只修剪 net，120s 批只修剪其余 kind
-    if records.iter().any(|r| r.kind == "net") {
-        trim_rounds(&mut conn, SCOPE_NET, NET_MAX_ROUNDS).await?;
-    }
-    if records.iter().any(|r| r.kind != "net") {
-        trim_rounds(&mut conn, SCOPE_OTHER, MAX_ROUNDS).await?;
-    }
     Ok(records.len())
 }
 
@@ -287,11 +443,8 @@ fn db_path() -> Result<PathBuf, DbError> {
         .ok_or_else(|| DbError::Open("no project data dir".into()))
 }
 
-async fn open() -> Result<SqliteConnection, DbError> {
-    open_at(&db_path()?).await
-}
-
-/// 连接 + WAL 三 pragma + 幂等迁移 + 建表/建索引（每次操作开新连接）
+/// 连接 + WAL 三 pragma + 幂等迁移 + 建表/建索引。生产路径仅由 [`init_conn`] 调用
+/// 一次（常驻连接，GAP-2）；测试缝（`*_at`）仍逐次调用——迁移/建表幂等性逐次可测。
 async fn open_at(path: &Path) -> Result<SqliteConnection, DbError> {
     let opts = SqliteConnectOptions::new()
         .filename(path)
@@ -949,6 +1102,136 @@ mod tests {
                 before + 1,
                 "query 失败必须使 HISTORY_ERRS 恰好 +1"
             );
+        });
+        cleanup(&file);
+    }
+
+    // ---- todo 16：常驻连接一次性 init + 节流 WAL 截断 ----
+
+    /// 触碰全局 CONN/CKPT_GATE（及真实库文件）的测试串行化（cargo test 默认并行线程；
+    /// 操作器/api 测试的采样也可能经 Db::insert 抢先 init，故断言全部用相对增量）。
+    static SHARED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 红先（GAP-2 验收）：两次顺序写入只 init 一次（旧「每操作开新连接」下 init
+    /// 计数会 +2）；随后公开读入口必须复用同一连接（不再 init）且真实读回写入行。
+    #[test]
+    fn resident_conn_inits_once_and_history_reuses_it() {
+        let _guard = SHARED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = INIT_RUNS.load(Ordering::SeqCst);
+        let now = Utc::now();
+        let rec = Record {
+            ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+            ts_secs: now.timestamp(),
+            kind: "probe16".into(),
+            key: "k".into(),
+            value: 7.5,
+        };
+        block_on(async {
+            assert_eq!(Db::insert(&[rec.clone()]).await.unwrap(), 1);
+            assert_eq!(Db::insert(&[rec.clone()]).await.unwrap(), 1);
+            assert_eq!(
+                INIT_RUNS.load(Ordering::SeqCst),
+                before + 1,
+                "常驻连接下两次顺序写必须恰好 init 一次"
+            );
+        });
+        // stale-state 对抗：CONN 已活时第二次起的全部读写走快路径复用
+        let hist = Db::history("probe16", Some("k"), 10);
+        assert_eq!(hist.len(), 2, "写入行必须经同一常驻连接真实读回");
+        assert!(hist.iter().all(|r| r.value == 7.5), "读回值不得失真");
+        assert_eq!(
+            INIT_RUNS.load(Ordering::SeqCst),
+            before + 1,
+            "读路径必须复用常驻连接，不得重 init"
+        );
+        // 清场：探针行从真实库删除；常驻连接复位（决策 iv 的测试缝）
+        block_on(async {
+            let cell = shared_conn().await.unwrap();
+            sqlx::query("DELETE FROM records WHERE kind='probe16'")
+                .execute(&mut cell.lock().await.conn)
+                .await
+                .unwrap();
+        });
+        reset_conn_for_test();
+    }
+
+    /// 红先（GAP-2 节流 + 决策 iii）：外部读事务卡住 TRUNCATE → BUSY 只记 WARN
+    /// 跳过、守卫不推进（下一次调用即重试）；读事务释放后成功截断、守卫推进，
+    /// CHECKPOINT_INTERVAL 内立即再调被节流跳过。
+    #[test]
+    fn wal_checkpoint_paces_and_busy_retries_next_attempt() {
+        let _guard = SHARED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let file = temp_db("ckpt");
+        block_on(async {
+            *CKPT_GATE.lock().await = None;
+            let before = CKPT_RUNS.load(Ordering::SeqCst);
+            let now = Utc::now();
+            let rec = Record {
+                ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+                ts_secs: now.timestamp(),
+                kind: "mem".into(),
+                key: "used".into(),
+                value: 1.0,
+            };
+            let mut conn = open_at(&file).await.unwrap();
+            assert_eq!(
+                run_insert(&mut conn, &[rec]).await.unwrap(),
+                1,
+                "先经被测连接写一批撑大 WAL（run_insert 不触发截断，连接在持亦无 close 自动 checkpoint）"
+            );
+            // BUSY 路径不必等满生产 busy_timeout=5000
+            sqlx::query("PRAGMA busy_timeout=50;")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            // 模拟外部读者：开读事务占住 WAL 读快照 → TRUNCATE 无法截断（busy=1 行）
+            let reader_opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(false);
+            let mut reader = SqliteConnection::connect_with(&reader_opts).await.unwrap();
+            sqlx::query("BEGIN;").execute(&mut reader).await.unwrap();
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM records")
+                .fetch_one(&mut reader)
+                .await
+                .unwrap();
+            // 前置：-wal 已被写入撑大、读事务在持——否则 BUSY 断言是空转
+            let wal_pre = std::fs::metadata(format!("{}-wal", file.display())).unwrap();
+            assert!(
+                wal_pre.len() >= 1024,
+                "前置：-wal 必须非空（实际 {} 字节）",
+                wal_pre.len()
+            );
+
+            checkpoint_paced(&mut conn).await;
+            assert_eq!(
+                CKPT_RUNS.load(Ordering::SeqCst),
+                before + 1,
+                "到期必须实际尝试一次"
+            );
+            checkpoint_paced(&mut conn).await;
+            assert_eq!(
+                CKPT_RUNS.load(Ordering::SeqCst),
+                before + 2,
+                "BUSY 不得推进守卫——下一轮必须重试"
+            );
+
+            sqlx::query("ROLLBACK;").execute(&mut reader).await.unwrap();
+            drop(reader);
+            checkpoint_paced(&mut conn).await;
+            assert_eq!(CKPT_RUNS.load(Ordering::SeqCst), before + 3);
+            checkpoint_paced(&mut conn).await;
+            assert_eq!(
+                CKPT_RUNS.load(Ordering::SeqCst),
+                before + 3,
+                "CHECKPOINT_INTERVAL 内必须节流跳过"
+            );
+            let wal = std::fs::metadata(format!("{}-wal", file.display())).unwrap();
+            assert!(
+                wal.len() < 1024,
+                "TRUNCATE 成功后 -wal 必须被截断，实际 {} 字节",
+                wal.len()
+            );
+            drop(conn);
         });
         cleanup(&file);
     }
