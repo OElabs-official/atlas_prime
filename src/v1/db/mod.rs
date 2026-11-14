@@ -89,7 +89,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -105,9 +105,37 @@ pub const MAX_ROUNDS: i64 = 20_000;
 /// `net`（网卡速度，1Hz）的滚动上限（轮数 = 秒数；28800 ≈ 8h 回溯）
 pub const NET_MAX_ROUNDS: i64 = 28_800;
 
-/// 修剪范围 SQL 片段：net 专属 / 其余全部（两条固定 prepared 语句路径）
-const SCOPE_NET: &str = "kind = 'net'";
-const SCOPE_OTHER: &str = "kind <> 'net'";
+/// kind 登记表：`records` 长行 `kind` 列的全部合法取值（audit GAP-6/GAP-7 task-23，
+/// 单一事实源）。写入侧（操作器 [`collect`](crate::v1::operator) / net 回路与本模块
+/// 的修剪谓词、迁移 SQL）**必须**引用这些常量，禁止裸 kind 字符串字面量；各常量
+/// 值等于既有入库词——改任何一条的值 = 静默改写与存量行及前端的存储契约，
+/// 由测试 `kind_consts_match_stored_contract` 钉死。
+pub mod kind {
+    /// CPU 各核频率（key=`cpu{i}`，GHz；120s 轮）
+    pub const CPU_FREQ: &str = "cpu_freq";
+    /// 温控（key=`{类别}.{i}`，℃；类别 = cpu_core/gpu/camera/pmic/battery；120s 轮）
+    pub const TEMP: &str = "temp";
+    /// GPU 负载/频率（key=load_pct/freq_mhz；源链可用才写，120s 轮）
+    pub const GPU: &str = "gpu";
+    /// 内存（key=total/used/avail，MB；120s 轮）
+    pub const MEM: &str = "mem";
+    /// Swap（key=total/used，MB；120s 轮）
+    pub const SWAP: &str = "swap";
+    /// 电池（key=pct/volt_mv/current_ua/temp_c/cycle/plugged/present；120s 轮）
+    pub const BATTERY: &str = "battery";
+    /// 磁盘（key=`{挂载点}|used` / `{挂载点}|total`，MB；120s 轮）
+    pub const DISK: &str = "disk";
+    /// 网卡速度（分组级 key=`<组>.rx_bps` / `<组>.tx_bps`；1Hz 轮，
+    /// 按 [`NET_MAX_ROUNDS`] 独立分档修剪）
+    pub const NET: &str = "net";
+}
+
+/// 修剪范围 SQL 片段：net 专属 / 其余全部（两条固定 prepared 语句路径）。
+/// 谓词词根由 [`kind::NET`] 派生（audit task-23：修剪谓词与 kind 登记表单一事实源，
+/// 杜绝裸 `'net'` 漂移）；`LazyLock` = 全进程一次成型，SQL 文本与旧 const 逐字节相同，
+/// prepared 语句缓存命中特性不变。
+static SCOPE_NET: LazyLock<String> = LazyLock::new(|| format!("kind = '{}'", kind::NET));
+static SCOPE_OTHER: LazyLock<String> = LazyLock::new(|| format!("kind <> '{}'", kind::NET));
 
 /// 单条多值 INSERT 的最大行数（4 列 × 200 = 800 绑定 < SQLITE_MAX_VARIABLE_NUMBER=999）
 const INSERT_CHUNK: usize = 200;
@@ -549,18 +577,18 @@ async fn run_insert(conn: &mut SqliteConnection, records: &[Record]) -> Result<u
 async fn post_insert(core: &mut DbCore, records: &[Record]) -> Result<(), DbError> {
     let (net_head, other_head) = round_heads(records);
     if let Some(ts) = net_head {
-        core.net.ensure_bootstrap(&mut core.conn, SCOPE_NET).await;
+        core.net.ensure_bootstrap(&mut core.conn, &SCOPE_NET).await;
         core.net.push(ts);
         core.net_ticks += 1;
         if core.net_ticks >= NET_TRIM_TICKS {
             core.net_ticks = 0;
-            core.net.trim_now(&mut core.conn, SCOPE_NET).await?;
+            core.net.trim_now(&mut core.conn, &SCOPE_NET).await?;
         }
     }
     if let Some(ts) = other_head {
-        core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+        core.other.ensure_bootstrap(&mut core.conn, &SCOPE_OTHER).await;
         core.other.push(ts);
-        core.other.trim_now(&mut core.conn, SCOPE_OTHER).await?;
+        core.other.trim_now(&mut core.conn, &SCOPE_OTHER).await?;
     }
     Ok(())
 }
@@ -570,7 +598,11 @@ async fn post_insert(core: &mut DbCore, records: &[Record]) -> Result<(), DbErro
 fn round_heads(records: &[Record]) -> (Option<i64>, Option<i64>) {
     let (mut net, mut other) = (None, None);
     for r in records {
-        let slot = if r.kind == "net" { &mut net } else { &mut other };
+        let slot = if r.kind == kind::NET {
+            &mut net
+        } else {
+            &mut other
+        };
         *slot = Some(slot.map_or(r.ts_secs, |m: i64| m.max(r.ts_secs)));
     }
     (net, other)
@@ -687,12 +719,19 @@ async fn migrate_battery_units(conn: &mut SqliteConnection) -> Result<(), DbErro
         .await
         .map_err(|e| DbError::Open(e.to_string()))?;
     if user_version(&mut tx).await? < 2 {
+        // kind 谓词由 kind::BATTERY 派生（audit task-23）；SQL 文本与旧字面量逐字节相同
         for stmt in [
-            "UPDATE records SET key='current_ua' WHERE kind='battery' AND key='current_ma'",
-            "UPDATE records SET value=value*10 WHERE kind='battery' AND key='temp_c'",
-            "PRAGMA user_version=2;",
+            format!(
+                "UPDATE records SET key='current_ua' WHERE kind='{}' AND key='current_ma'",
+                kind::BATTERY
+            ),
+            format!(
+                "UPDATE records SET value=value*10 WHERE kind='{}' AND key='temp_c'",
+                kind::BATTERY
+            ),
+            "PRAGMA user_version=2;".to_string(),
         ] {
-            sqlx::query(stmt)
+            sqlx::query(&stmt)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| DbError::Open(e.to_string()))?;
@@ -773,6 +812,32 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", file.display()));
         }
+    }
+
+    /// 测试观察谓词：定位某 kind 的 WHERE 子句——词根一律取 kind 登记表
+    /// （audit task-23：测试侧同样禁裸 kind 词，登记表演化时编译器即点名）。
+    fn where_kind(k: &str) -> String {
+        format!("WHERE kind='{k}'")
+    }
+
+    /// 结构锁（audit task-23 红先）：登记表各常量必须逐字节等于既有入库词。
+    /// kind 值是**存储契约**——库中存量行、`/db/history` 消费方与前端面板都按
+    /// 旧词匹配；改常量值 = 存量行静默脱钩（修剪谓词、history 查询双双失配）。
+    /// 红先在改造前的树上体现为本测试无法编译（`kind` 模块不存在）；此后任何人
+    /// 改动任一定值，本测试即红。
+    #[test]
+    fn kind_consts_match_stored_contract() {
+        assert_eq!(kind::CPU_FREQ, "cpu_freq");
+        assert_eq!(kind::TEMP, "temp");
+        assert_eq!(kind::GPU, "gpu");
+        assert_eq!(kind::MEM, "mem");
+        assert_eq!(kind::SWAP, "swap");
+        assert_eq!(kind::BATTERY, "battery");
+        assert_eq!(kind::DISK, "disk");
+        assert_eq!(kind::NET, "net");
+        // 修剪分档只认 net 一个专属范围：SCOPE 谓词必须与该定值逐字节一致
+        assert_eq!(&*SCOPE_NET, "kind = 'net'");
+        assert_eq!(&*SCOPE_OTHER, "kind <> 'net'");
     }
 
     // ---- todo 17：环形队列修剪（引导 / 节奏 / affinity / 重启 / 重试）----
@@ -861,17 +926,17 @@ mod tests {
             core.net = ScopeTrim::with_window(5);
             core.other = ScopeTrim::with_window(10);
             let seed: Vec<Record> = (0..12i64)
-                .flat_map(|i| [round_at("net", i, "k"), round_at("mem", i, "k")])
+                .flat_map(|i| [round_at(kind::NET, i, "k"), round_at(kind::MEM, i, "k")])
                 .collect();
             run_insert(&mut core.conn, &seed).await.unwrap();
             // net-only 批连打 61 tick（off=12..72）：第 60 个 tick（off=71）修剪一次，
             // 其余 tick 只入队；mem 行从未出现在批内 → other 连引导都不发生
             for i in 12..73i64 {
-                let batch = [round_at("net", i, "k")];
+                let batch = [round_at(kind::NET, i, "k")];
                 run_insert(&mut core.conn, &batch).await.unwrap();
                 post_insert(&mut core, &batch).await.unwrap();
                 let mem_rounds =
-                    distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+                    distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
                 assert_eq!(mem_rounds, 12, "net tick off={i} 不得动 mem 行");
                 let want_net = match i {
                     71 => 5,                            // 第 60 tick：修剪落地
@@ -879,21 +944,20 @@ mod tests {
                     _ => i + 1,                         // 未到期：只增不删
                 };
                 let net_rounds =
-                    distinct_rounds(&mut core.conn, "WHERE kind='net'").await;
+                    distinct_rounds(&mut core.conn, &where_kind(kind::NET)).await;
                 assert_eq!(net_rounds, want_net, "tick off={i}：修剪只该在第 60 轮发生");
             }
             // mem-only 批：other 此刻才引导（快照 11）+ 入队 → len 12 > 10 → 删 3 轮
-            let batch = [round_at("mem", 73, "k")];
+            let batch = [round_at(kind::MEM, 73, "k")];
             run_insert(&mut core.conn, &batch).await.unwrap();
             post_insert(&mut core, &batch).await.unwrap();
             // net = 第 60 tick 修剪后的 window=5 + 第 61 tick（off=72）重新积累的一轮
-            for (kind, want) in [("mem", 10), ("net", 6)] {
-                let left =
-                    distinct_rounds(&mut core.conn, &format!("WHERE kind='{kind}'")).await;
-                assert_eq!(left, want, "{kind} 应剩 {want} 轮（两范围互不越界）");
+            for (k, want) in [(kind::MEM, 10), (kind::NET, 6)] {
+                let left = distinct_rounds(&mut core.conn, &where_kind(k)).await;
+                assert_eq!(left, want, "{k} 应剩 {want} 轮（两范围互不越界）");
             }
             let mem_min: String =
-                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                sqlx::query_scalar(&format!("SELECT MIN(ts) FROM records {}", where_kind(kind::MEM)))
                     .fetch_one(&mut core.conn)
                     .await
                     .unwrap();
@@ -911,16 +975,16 @@ mod tests {
         block_on(async {
             let mut core = DbCore::new(open_at(&file).await.unwrap());
             let w = MAX_ROUNDS; // 真实窗 20000（非缩小复刻）
-            let seed = seed_rounds("mem", w + 2);
+            let seed = seed_rounds(kind::MEM, w + 2);
             assert_eq!(run_insert(&mut core.conn, &seed).await.unwrap(), (w + 2) as usize);
-            let before = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            let before = distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
             assert_eq!(before, w + 2, "前置：种子超限");
 
-            let batch = [round_at("mem", w + 2, "k")];
+            let batch = [round_at(kind::MEM, w + 2, "k")];
             run_insert(&mut core.conn, &batch).await.unwrap();
             post_insert(&mut core, &batch).await.unwrap();
 
-            let after = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            let after = distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
             assert_eq!(after, w, "修剪后恰剩 window 轮（整轮）");
             let min: String = sqlx::query_scalar("SELECT MIN(ts) FROM records")
                 .fetch_one(&mut core.conn)
@@ -942,14 +1006,14 @@ mod tests {
         block_on(async {
             let mut core = DbCore::new(open_at(&file).await.unwrap());
             let w = NET_MAX_ROUNDS; // 真实窗 28800
-            let seed = seed_rounds("net", w);
+            let seed = seed_rounds(kind::NET, w);
             assert_eq!(run_insert(&mut core.conn, &seed).await.unwrap(), w as usize);
 
             for k in 1..=60i64 {
-                let batch = [round_at("net", w + k, "k")];
+                let batch = [round_at(kind::NET, w + k, "k")];
                 run_insert(&mut core.conn, &batch).await.unwrap();
                 post_insert(&mut core, &batch).await.unwrap();
-                let rounds = distinct_rounds(&mut core.conn, "WHERE kind='net'").await;
+                let rounds = distinct_rounds(&mut core.conn, &where_kind(kind::NET)).await;
                 if k < 60 {
                     assert_eq!(rounds, w + k, "第 {k} 个 net tick（<60）不得修剪");
                 } else {
@@ -975,18 +1039,18 @@ mod tests {
         block_on(async {
             let mut st = ScopeTrim::with_window(10);
             let mut conn = open_at(&file).await.unwrap();
-            let seed = seed_rounds("mem", 12);
+            let seed = seed_rounds(kind::MEM, 12);
             run_insert(&mut conn, &seed).await.unwrap();
-            let batch = [round_at("mem", 12, "k")];
+            let batch = [round_at(kind::MEM, 12, "k")];
             run_insert(&mut conn, &batch).await.unwrap();
             let pre: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
                 .fetch_one(&mut conn)
                 .await
                 .unwrap();
 
-            st.ensure_bootstrap(&mut conn, SCOPE_OTHER).await;
+            st.ensure_bootstrap(&mut conn, &SCOPE_OTHER).await;
             st.push(T0 + 12);
-            let deleted = st.trim_now(&mut conn, SCOPE_OTHER).await.unwrap();
+            let deleted = st.trim_now(&mut conn, &SCOPE_OTHER).await.unwrap();
 
             assert_eq!(deleted, 3, "rows_affected 必须是真实删除数（3 轮 3 行）");
             let post: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
@@ -1012,9 +1076,9 @@ mod tests {
         block_on(async {
             let mut st = ScopeTrim::with_window(10);
             let mut conn = open_at(&file).await.unwrap();
-            run_insert(&mut conn, &seed_rounds("net", 25)).await.unwrap();
+            run_insert(&mut conn, &seed_rounds(kind::NET, 25)).await.unwrap();
 
-            st.ensure_bootstrap(&mut conn, SCOPE_NET).await;
+            st.ensure_bootstrap(&mut conn, &SCOPE_NET).await;
             assert!(matches!(st.phase, TrimPhase::Active));
             assert_eq!(st.ring.len(), 11, "全量引导 = window+1 条，不是 1 条边界");
             assert_eq!(st.ring.front(), Some(&(T0 + 24)), "队首 = 最新轮");
@@ -1036,20 +1100,20 @@ mod tests {
             let mut core = DbCore::new(open_at(&file).await.unwrap());
             core.other = ScopeTrim::with_window(10);
             for i in 0..10i64 {
-                let batch = [round_at("mem", i, "k")];
+                let batch = [round_at(kind::MEM, i, "k")];
                 run_insert(&mut core.conn, &batch).await.unwrap();
                 post_insert(&mut core, &batch).await.unwrap();
                 assert!(matches!(core.other.phase, TrimPhase::Active), "引导必须成功");
-                let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+                let rounds = distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
                 assert_eq!(rounds, i + 1, "未满窗只增不删（轮 {i}）");
             }
-            let batch = [round_at("mem", 10, "k")];
+            let batch = [round_at(kind::MEM, 10, "k")];
             run_insert(&mut core.conn, &batch).await.unwrap();
             post_insert(&mut core, &batch).await.unwrap();
-            let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            let rounds = distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
             assert_eq!(rounds, 10, "越满窗那轮激活，恰剩 window");
             let min: String =
-                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                sqlx::query_scalar(&format!("SELECT MIN(ts) FROM records {}", where_kind(kind::MEM)))
                     .fetch_one(&mut core.conn)
                     .await
                     .unwrap();
@@ -1071,14 +1135,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+            core.other.ensure_bootstrap(&mut core.conn, &SCOPE_OTHER).await;
             assert!(matches!(core.other.phase, TrimPhase::Disabled), "引导真错必须停用");
             assert_eq!(
-                core.other.trim_now(&mut core.conn, SCOPE_OTHER).await.unwrap(),
+                core.other.trim_now(&mut core.conn, &SCOPE_OTHER).await.unwrap(),
                 0,
                 "停用范围不得发 DELETE"
             );
-            core.other.ensure_bootstrap(&mut core.conn, SCOPE_OTHER).await;
+            core.other.ensure_bootstrap(&mut core.conn, &SCOPE_OTHER).await;
             assert!(matches!(core.other.phase, TrimPhase::Disabled), "停用后不反复重试引导");
         });
         cleanup(&file);
@@ -1093,24 +1157,24 @@ mod tests {
         block_on(async {
             let mut core = DbCore::new(open_at(&file).await.unwrap());
             core.other = ScopeTrim::with_window(10);
-            run_insert(&mut core.conn, &seed_rounds("mem", 13)).await.unwrap();
-            let batch = [round_at("mem", 13, "k")];
+            run_insert(&mut core.conn, &seed_rounds(kind::MEM, 13)).await.unwrap();
+            let batch = [round_at(kind::MEM, 13, "k")];
             run_insert(&mut core.conn, &batch).await.unwrap();
             post_insert(&mut core, &batch).await.unwrap();
-            assert_eq!(distinct_rounds(&mut core.conn, "WHERE kind='mem'").await, 10);
+            assert_eq!(distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await, 10);
 
             // 队列随 core 整体丢弃（重启）；连接重开、修剪状态全新
             drop(core);
             let mut core = DbCore::new(open_at(&file).await.unwrap());
             core.other = ScopeTrim::with_window(10);
-            let batch = [round_at("mem", 14, "k")];
+            let batch = [round_at(kind::MEM, 14, "k")];
             run_insert(&mut core.conn, &batch).await.unwrap();
             post_insert(&mut core, &batch).await.unwrap();
 
-            let rounds = distinct_rounds(&mut core.conn, "WHERE kind='mem'").await;
+            let rounds = distinct_rounds(&mut core.conn, &where_kind(kind::MEM)).await;
             assert_eq!(rounds, 10, "重启后修剪照常工作且零过删（恰剩 window）");
             let min: String =
-                sqlx::query_scalar("SELECT MIN(ts) FROM records WHERE kind='mem'")
+                sqlx::query_scalar(&format!("SELECT MIN(ts) FROM records {}", where_kind(kind::MEM)))
                     .fetch_one(&mut core.conn)
                     .await
                     .unwrap();
@@ -1127,9 +1191,9 @@ mod tests {
         block_on(async {
             let mut st = ScopeTrim::with_window(10);
             let mut conn = open_at(&file).await.unwrap();
-            run_insert(&mut conn, &seed_rounds("mem", 12)).await.unwrap();
-            run_insert(&mut conn, &[round_at("mem", 12, "k")]).await.unwrap();
-            st.ensure_bootstrap(&mut conn, SCOPE_OTHER).await;
+            run_insert(&mut conn, &seed_rounds(kind::MEM, 12)).await.unwrap();
+            run_insert(&mut conn, &[round_at(kind::MEM, 12, "k")]).await.unwrap();
+            st.ensure_bootstrap(&mut conn, &SCOPE_OTHER).await;
             st.push(T0 + 12);
             let ring_before = st.ring.len();
 
@@ -1138,7 +1202,7 @@ mod tests {
                 .execute(&mut conn)
                 .await
                 .unwrap();
-            assert!(st.trim_now(&mut conn, SCOPE_OTHER).await.is_err());
+            assert!(st.trim_now(&mut conn, &SCOPE_OTHER).await.is_err());
             assert_eq!(st.ring.len(), ring_before, "失败不得弹队");
             assert!(matches!(st.phase, TrimPhase::Active), "DELETE 失败不停用范围");
 
@@ -1147,7 +1211,7 @@ mod tests {
                 .execute(&mut conn)
                 .await
                 .unwrap();
-            let deleted = st.trim_now(&mut conn, SCOPE_OTHER).await.unwrap();
+            let deleted = st.trim_now(&mut conn, &SCOPE_OTHER).await.unwrap();
             assert_eq!(deleted, 3, "重试必须真实删掉滞后 3 轮");
             assert_eq!(st.ring.len(), 10, "删成才弹队，队列与库同步");
         });
@@ -1172,7 +1236,7 @@ mod tests {
             .await
             .unwrap();
             for (ts, v) in [(1_700_000_000i64, 1.0f64), (1_700_003_600, 2.0f64)] {
-                sqlx::query("INSERT INTO samples(ts,kind,key,value) VALUES(?1,'mem','used',?2)")
+                sqlx::query(&format!("INSERT INTO samples(ts,kind,key,value) VALUES(?1,'{}','used',?2)", kind::MEM))
                     .bind(ts)
                     .bind(v)
                     .execute(&mut conn)
@@ -1185,7 +1249,7 @@ mod tests {
             let mut conn = open_at(&file).await.unwrap();
 
             // Then：两行无损经 history 读出，投影/文本皆正确
-            let hist = history_at(&file, "mem", Some("used"), 10).await;
+            let hist = history_at(&file, kind::MEM, Some("used"), 10).await;
             assert_eq!(hist.len(), 2, "迁移必须无损");
             assert_eq!(hist[0].ts_secs, 1_700_003_600, "新→旧：最新行在前");
             assert_eq!(hist[0].ts, "2023-11-14T23:13:20Z");
@@ -1239,17 +1303,17 @@ mod tests {
                 .await
                 .unwrap();
             let seed: [(&str, &str, f64); 5] = [
-                ("battery", "current_ma", -500.0),
-                ("battery", "temp_c", 3.25), // 旧 ÷10 存储；3.25/32.5 二进制精确，×10 无舍入漂移
-                ("battery", "pct", 88.0),
-                ("net", "current_ma", -1.0), // kind 守卫：非 battery 同旧键不改名
-                ("net", "temp_c", 2.0),      // kind 守卫：非 battery 同键不 ×10
+                (kind::BATTERY, "current_ma", -500.0),
+                (kind::BATTERY, "temp_c", 3.25), // 旧 ÷10 存储；3.25/32.5 二进制精确，×10 无舍入漂移
+                (kind::BATTERY, "pct", 88.0),
+                (kind::NET, "current_ma", -1.0), // kind 守卫：非 battery 同旧键不改名
+                (kind::NET, "temp_c", 2.0),      // kind 守卫：非 battery 同键不 ×10
             ];
-            for (kind, key, v) in seed {
+            for (kd, key, v) in seed {
                 sqlx::query(
                     "INSERT INTO records(ts,kind,key,value) VALUES('2024-01-01T00:00:00Z',?1,?2,?3)",
                 )
-                .bind(kind)
+                .bind(kd)
                 .bind(key)
                 .bind(v)
                 .execute(&mut conn)
@@ -1262,13 +1326,13 @@ mod tests {
             drop(open_at(&file).await.expect("旧电池行库 open 必须成功"));
 
             // Then：断言值而非 Ok
-            let bat = history_at(&file, "battery", None, 10).await;
+            let bat = history_at(&file, kind::BATTERY, None, 10).await;
             let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want("current_ua"), Some(-500.0), "必须改名且 µA 原值不变");
             assert_eq!(want("current_ma"), None, "旧键不得残留");
             assert_eq!(want("temp_c"), Some(32.5), "旧 ÷10 温度必须 ×10 还原 ℃");
             assert_eq!(want("pct"), Some(88.0), "非迁移范围键值不动");
-            let net = history_at(&file, "net", None, 10).await;
+            let net = history_at(&file, kind::NET, None, 10).await;
             let nwant = |k: &str| net.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(nwant("current_ma"), Some(-1.0), "WHERE kind='battery' 守卫必须生效");
             assert_eq!(nwant("temp_c"), Some(2.0));
@@ -1276,7 +1340,7 @@ mod tests {
 
             // 二次 open = no-op：值稳定（不重复 ×10）、版本不再动作
             drop(open_at(&file).await.unwrap());
-            let bat2 = history_at(&file, "battery", None, 10).await;
+            let bat2 = history_at(&file, kind::BATTERY, None, 10).await;
             let want2 = |k: &str| bat2.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want2("temp_c"), Some(32.5), "二次 open 不得重复 ×10");
             assert_eq!(raw_user_version(&file).await, 2);
@@ -1329,18 +1393,20 @@ mod tests {
             .await
             .unwrap();
             for (key, v) in [("current_ma", -500.0f64), ("temp_c", 3.25f64)] {
-                sqlx::query(
-                    "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'battery',?1,?2)",
-                )
+                sqlx::query(&format!(
+                    "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'{}',?1,?2)",
+                    kind::BATTERY
+                ))
                 .bind(key)
                 .bind(v)
                 .execute(&mut conn)
                 .await
                 .unwrap();
             }
-            sqlx::query(
-                "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'mem','used',100)",
-            )
+            sqlx::query(&format!(
+                "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'{}','used',100)",
+                kind::MEM
+            ))
             .execute(&mut conn)
             .await
             .unwrap();
@@ -1348,7 +1414,7 @@ mod tests {
 
             drop(open_at(&file).await.expect("INTEGER 遗留库 open 必须成功"));
 
-            let bat = history_at(&file, "battery", None, 10).await;
+            let bat = history_at(&file, kind::BATTERY, None, 10).await;
             assert_eq!(bat.len(), 2, "重建必须无损");
             let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want("current_ua"), Some(-500.0), "rebuild 完成后电池迁移必须生效");
@@ -1377,9 +1443,10 @@ mod tests {
                 .execute(&mut conn)
                 .await
                 .unwrap();
-            sqlx::query(
-                "INSERT INTO records(ts,kind,key) VALUES('2024-01-01T00:00:00Z','battery','current_ma')",
-            )
+            sqlx::query(&format!(
+                "INSERT INTO records(ts,kind,key) VALUES('2024-01-01T00:00:00Z','{}','current_ma')",
+                kind::BATTERY
+            ))
             .execute(&mut conn)
             .await
             .unwrap();
@@ -1418,14 +1485,15 @@ mod tests {
                 .execute(&mut conn)
                 .await
                 .unwrap();
-            sqlx::query(
-                "INSERT INTO records(ts,kind,key,value) VALUES('2024-01-01T00:00:00Z','battery','temp_c',3.25)",
-            )
+            sqlx::query(&format!(
+                "INSERT INTO records(ts,kind,key,value) VALUES('2024-01-01T00:00:00Z','{}','temp_c',3.25)",
+                kind::BATTERY
+            ))
             .execute(&mut conn)
             .await
             .unwrap();
             let mut tx = conn.begin().await.unwrap();
-            sqlx::query("UPDATE records SET value=value*10 WHERE kind='battery' AND key='temp_c'")
+            sqlx::query(&format!("UPDATE records SET value=value*10 WHERE kind='{}' AND key='temp_c'", kind::BATTERY))
                 .execute(&mut *tx)
                 .await
                 .unwrap();
@@ -1460,13 +1528,13 @@ mod tests {
             let rec = Record {
                 ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
                 ts_secs: now.timestamp(),
-                kind: "mem".into(),
+                kind: kind::MEM.into(),
                 key: "used".into(),
                 value: 123.0,
             };
             assert_eq!(insert_at(&file, &[rec.clone()]).await.unwrap(), 1);
 
-            let hist = history_at(&file, "mem", Some("used"), 5).await;
+            let hist = history_at(&file, kind::MEM, Some("used"), 5).await;
             assert_eq!(hist.len(), 1);
             let parsed = DateTime::parse_from_rfc3339(&hist[0].ts).expect("入库 ts 必须是 RFC3339");
             assert_eq!(parsed.timestamp(), rec.ts_secs);
@@ -1491,7 +1559,7 @@ mod tests {
         std::fs::write(&file, b"not a sqlite database, just garbage bytes").unwrap();
 
         let before = HISTORY_ERRS.load(Ordering::Relaxed);
-        let hist = block_on(history_at(&file, "mem", None, 10));
+        let hist = block_on(history_at(&file, kind::MEM, None, 10));
 
         assert!(hist.is_empty(), "读失败仍返回空 vec（响应形状不变）");
         assert_eq!(
@@ -1528,7 +1596,7 @@ mod tests {
 
             let before = HISTORY_ERRS.load(Ordering::Relaxed);
             // When：查询取 key/value 列 → no-such-column
-            let hist = history_at(&file, "mem", None, 10).await;
+            let hist = history_at(&file, kind::MEM, None, 10).await;
 
             assert!(hist.is_empty(), "查询失败仍返回空 vec（响应形状不变）");
             assert_eq!(
@@ -1603,7 +1671,7 @@ mod tests {
             let rec = Record {
                 ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
                 ts_secs: now.timestamp(),
-                kind: "mem".into(),
+                kind: kind::MEM.into(),
                 key: "used".into(),
                 value: 1.0,
             };
