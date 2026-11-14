@@ -840,6 +840,60 @@ mod tests {
         assert_eq!(&*SCOPE_OTHER, "kind <> 'net'");
     }
 
+    /// kind 登记表全集（audit task-24）：`kind` 模块每个 `pub const` 必须在此点名，
+    /// 新增 kind 忘记登记 = 本数组与 `kind_consts_match_stored_contract` 双双失配，
+    /// 编译器/断言即刻点名。
+    const REGISTERED_KINDS: &[&str] = &[
+        kind::CPU_FREQ,
+        kind::TEMP,
+        kind::GPU,
+        kind::MEM,
+        kind::SWAP,
+        kind::BATTERY,
+        kind::DISK,
+        kind::NET,
+    ];
+
+    /// 面板豁免白名单（audit task-24，决策 Q2）：`net` 不参与 dashboard 历史播种——
+    /// `/db/history` 默认对象形态是**稳定外部契约**、`kind=net` 的消费方是外部程序
+    /// （dashboard 的 NET 环只走实时端点取数，不拉历史种子）。豁免必须显式登记于此
+    /// 并附决策出处；除此之外任何已登记 kind 都必须出现在内嵌面板里。
+    const NON_DASHBOARD_KINDS: &[&str] = &[kind::NET];
+
+    /// 跨语言钉（audit task-24，GAP-6）：登记表每个 kind 字符串必须出现在内嵌面板
+    /// [`DASHBOARD_HTML`](crate::v1::api::DASHBOARD_HTML)（`include_str!`
+    /// `resources/dashboard.html`，与 `contains("<!-- rev ")` 先例同一字节源）。
+    /// 前端是 kind 列的主要消费方：登记了新 kind 而面板不认 = 数据静默沉底，
+    /// 本测试把这次跨语言耦合变成可跑的断言。测试期单向只读 api 常量，
+    /// 不构成运行期域间依赖（六域数据流不变）。
+    #[test]
+    fn every_registered_kind_is_dashboard_visible() {
+        use crate::v1::api::DASHBOARD_HTML;
+        // 白名单只可能豁免真 kind：防白名单自身漂移
+        for k in NON_DASHBOARD_KINDS {
+            assert!(
+                REGISTERED_KINDS.contains(k),
+                "NON_DASHBOARD_KINDS 豁免了未登记的 kind '{k}'"
+            );
+        }
+        let mut visible = 0;
+        for k in REGISTERED_KINDS {
+            if NON_DASHBOARD_KINDS.contains(k) {
+                continue;
+            }
+            assert!(
+                DASHBOARD_HTML.contains(k),
+                "kind '{k}' 已登记进 db::kind，却未在内嵌 dashboard 出现（前端契约缺口）"
+            );
+            visible += 1;
+        }
+        // 登记表条数护栏：与 kind_consts_match_stored_contract 的逐条断言同点，
+        // 登记表增删时两测试同点，杜绝「加了常量没人钉」的窗口（当前 8）。
+        assert_eq!(REGISTERED_KINDS.len(), 8);
+        // 8 登记 - 1 豁免（net，Q2 外部契约）= 7 个必须可见
+        assert_eq!(visible, 7);
+    }
+
     // ---- todo 17：环形队列修剪（引导 / 节奏 / affinity / 重启 / 重试）----
 
     /// 测试时刻基准（1700000000 = 2023-11-14T22:13:20Z）；off 秒偏移 → RFC3339 文本
