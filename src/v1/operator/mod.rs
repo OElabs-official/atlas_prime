@@ -67,7 +67,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 
-use crate::v1::db::{self, Db, DbError, Record};
+use crate::v1::db::{self, Db, DbError, Record, kind};
 use crate::v1::notify;
 use crate::v1::system::{battery, cpu, disk, gpu, mem, network, proc, thermal};
 
@@ -561,14 +561,14 @@ fn net_records(rates: &[(String, f64, f64)]) -> Vec<Record> {
                 Record {
                     ts: ts.clone(),
                     ts_secs,
-                    kind: "net".into(),
+                    kind: kind::NET.into(),
                     key: format!("{group}.rx_bps"),
                     value: *rx,
                 },
                 Record {
                     ts: ts.clone(),
                     ts_secs,
-                    kind: "net".into(),
+                    kind: kind::NET.into(),
                     key: format!("{group}.tx_bps"),
                     value: *tx,
                 },
@@ -626,30 +626,34 @@ fn collect() -> Vec<Record> {
     let ts_secs = now.timestamp();
     let mut out = Vec::new();
     {
-        let mut push = |kind: &str, key: String, value: f64| {
+        // 参数名 `k` 而非 `kind`：让出名字空间给 kind 登记表（audit task-23），
+        // 调用点 `kind::XXX` 恒为模块路径，无歧义。
+        let mut push = |k: &str, key: String, value: f64| {
             out.push(Record {
                 ts: ts.clone(),
                 ts_secs,
-                kind: kind.to_string(),
+                kind: k.to_string(),
                 key,
                 value,
             })
         };
 
         for (i, ghz) in cpu::freq_ghz().iter().enumerate() {
-            push("cpu_freq", format!("cpu{i}"), *ghz as f64);
+            push(kind::CPU_FREQ, format!("cpu{i}"), *ghz as f64);
         }
 
         let t = thermal::Temp::get();
+        // temp 行类别名与域名同词（temp key = `<类别>.{i}`，前端契约）：同名两类
+        // 复用 kind 常量防漂移；cpu_core/camera/pmic 非 kind 词，保持字面量。
         for (cat, group) in [
             ("cpu_core", &t.cpu_core),
-            ("gpu", &t.gpu),
+            (kind::GPU, &t.gpu),
             ("camera", &t.camera),
             ("pmic", &t.pmic),
-            ("battery", &t.battery),
+            (kind::BATTERY, &t.battery),
         ] {
             for (i, (v, _name)) in group.iter().enumerate() {
-                push("temp", format!("{cat}.{i}"), *v as f64);
+                push(kind::TEMP, format!("{cat}.{i}"), *v as f64);
             }
         }
 
@@ -658,42 +662,42 @@ fn collect() -> Vec<Record> {
         let g = gpu::Gpu::get();
         if g.available {
             if let Some(p) = g.load_pct {
-                push("gpu", "load_pct".into(), p);
+                push(kind::GPU, "load_pct".into(), p);
             }
             if let Some(f) = g.freq_mhz {
-                push("gpu", "freq_mhz".into(), f);
+                push(kind::GPU, "freq_mhz".into(), f);
             }
         }
 
         let m = mem::Mem::get();
-        push("mem", "total".into(), m.total_mem_mb as f64);
-        push("mem", "used".into(), m.used_mem_mb as f64);
-        push("mem", "avail".into(), m.avail_mem_mb as f64);
-        push("swap", "total".into(), m.total_swap_mb as f64);
-        push("swap", "used".into(), m.used_swap_mb as f64);
+        push(kind::MEM, "total".into(), m.total_mem_mb as f64);
+        push(kind::MEM, "used".into(), m.used_mem_mb as f64);
+        push(kind::MEM, "avail".into(), m.avail_mem_mb as f64);
+        push(kind::SWAP, "total".into(), m.total_swap_mb as f64);
+        push(kind::SWAP, "used".into(), m.used_swap_mb as f64);
 
         let b = battery::Battery::get();
-        push("battery", "pct".into(), b.percentage as f64);
-        push("battery", "volt_mv".into(), b.voltage as f64);
-        push("battery", "current_ua".into(), b.current as f64); // CLI 值为 µA（负=放电）
+        push(kind::BATTERY, "pct".into(), b.percentage as f64);
+        push(kind::BATTERY, "volt_mv".into(), b.voltage as f64);
+        push(kind::BATTERY, "current_ua".into(), b.current as f64); // CLI 值为 µA（负=放电）
         // 沿用 CLI 温度源；迁移 thermal::Temp.battery 属 system 侧改造，不在操作器内进行
         #[expect(
             deprecated,
             reason = "Battery::temperature 已弃用但迁移属 system 侧范围"
         )]
-        push("battery", "temp_c".into(), b.temperature); // CLI 值已是 °C，原样入库
-        push("battery", "cycle".into(), b.cycle as f64);
+        push(kind::BATTERY, "temp_c".into(), b.temperature); // CLI 值已是 °C，原样入库
+        push(kind::BATTERY, "cycle".into(), b.cycle as f64);
         push(
-            "battery",
+            kind::BATTERY,
             "plugged".into(),
             (!b.plugged.is_empty() && b.plugged != "None") as u8 as f64,
         );
-        push("battery", "present".into(), b.present as u8 as f64);
+        push(kind::BATTERY, "present".into(), b.present as u8 as f64);
 
         for d in disk::Disk::get() {
-            push("disk", format!("{}|used", d.mount_point), d.used_mb as f64);
+            push(kind::DISK, format!("{}|used", d.mount_point), d.used_mb as f64);
             push(
-                "disk",
+                kind::DISK,
                 format!("{}|total", d.mount_point),
                 d.total_mb as f64,
             );
@@ -713,8 +717,34 @@ mod tests {
     #[test]
     fn collect_covers_every_domain() {
         let v = collect();
-        for kind in ["cpu_freq", "temp", "mem", "swap", "battery", "disk"] {
-            assert!(v.iter().any(|r| r.kind == kind), "缺 {kind} 采样");
+        for k in [
+            kind::CPU_FREQ,
+            kind::TEMP,
+            kind::MEM,
+            kind::SWAP,
+            kind::BATTERY,
+            kind::DISK,
+        ] {
+            assert!(v.iter().any(|r| r.kind == k), "缺 {k} 采样");
+        }
+        // 登记表穷尽（audit task-23 结构锁）：collect 产出的每个 kind 必须是
+        // kind 登记表在册值（gpu 允许缺席——无 root 静默；但不允许在册之外的 kind）。
+        const REGISTERED: [&str; 8] = [
+            kind::CPU_FREQ,
+            kind::TEMP,
+            kind::GPU,
+            kind::MEM,
+            kind::SWAP,
+            kind::BATTERY,
+            kind::DISK,
+            kind::NET,
+        ];
+        for r in &v {
+            assert!(
+                REGISTERED.contains(&r.kind.as_str()),
+                "collect 产出了未注册 kind: {:?}",
+                r.kind
+            );
         }
         // 全轮同一采集时刻：ts 必须是可解析 RFC3339 且与 ts_secs 投影自洽
         assert!(v.iter().all(|r| r.ts_secs > 0));
@@ -756,7 +786,7 @@ mod tests {
         assert_eq!(v.len(), 4);
         assert!(
             v.iter()
-                .all(|r| r.kind == "net" && r.ts == v[0].ts && r.ts_secs > 0)
+                .all(|r| r.kind == kind::NET && r.ts == v[0].ts && r.ts_secs > 0)
         );
         assert_eq!(v[0].key, "wifi.rx_bps");
         assert_eq!(v[1].key, "wifi.tx_bps");
@@ -830,13 +860,13 @@ mod tests {
         let rec = Record {
             ts: "2026-01-01T00:00:00+00:00".into(),
             ts_secs: 1,
-            kind: "mem".into(),
+            kind: kind::MEM.into(),
             key: "used".into(),
             value: 1.0,
         };
         let next = spawn_collect(|| vec![rec]).await;
         assert!(
-            matches!(&next, Some(v) if v.len() == 1 && v[0].kind == "mem"),
+            matches!(&next, Some(v) if v.len() == 1 && v[0].kind == kind::MEM),
             "故障轮之后的正常轮必须照常产出"
         );
     }
@@ -897,7 +927,7 @@ mod tests {
         assert!(n > 10, "单轮应写 >10 行，实际 {n}");
         let total = Db::rows().unwrap();
         assert!(total >= n as i64);
-        let hist = Db::history("mem", Some("used"), 5);
+        let hist = Db::history(kind::MEM, Some("used"), 5);
         assert!(!hist.is_empty() && hist[0].value > 0.0);
         assert!(DateTime::parse_from_rfc3339(&hist[0].ts).is_ok());
     }
