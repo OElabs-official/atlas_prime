@@ -48,7 +48,7 @@
 //! - `POST /tui/session` 发一次性令牌（body `{"id"}`，令牌绑定任务 id 与 kind；无
 //!   PIN；404 unknown_task；**已有活会话 → `mode:"attach"` 免容量**；无会话满员 503
 //!   busy；无会话 → `mode:"spawn"`）/ `GET /tui/ws?token=&cols=&rows=`
-//!   PTY↔WS 桥（任务绑定**常驻** PTY 会话册，≤8 并发，镜像多窗口，attach 回放
+//!   PTY↔WS 桥（任务绑定**常驻** PTY 会话册，≤64 并发（`MAX_SESSIONS`），镜像多窗口，attach 回放
 //!   ≤512KB 环形缓冲；令牌一次性 + 5min TTL，二进制帧 = 裸 PTY
 //!   字节双向，文本帧 = resize/ping JSON 控制）/ `POST /tui/kill`（body `{"id"}`，
 //!   幂等 `{"killed":bool}`）/ `GET /tui/sessions`（`{"sessions":[{"id","attached"}]}`）
