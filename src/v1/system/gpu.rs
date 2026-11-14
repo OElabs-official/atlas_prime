@@ -7,6 +7,9 @@
 //! `@@@<路径>` 分段），与直读表**并集合并（su 非空段胜出）**。无 root
 //! （su 拉起 ENOENT / 桩件非零退出）= `available:false` 持久终态，日志零噪音。
 //!
+//! 审计 perf F5：[`Gpu::get`] 外套 10s TTL 缓存——“每拍一次 fork”仅指 TTL 过期的
+//! 真采集轮，新鲜窗内 [`Gpu::get`] 直接回放快照、零 fork 零 sysfs（见下方缓存段）。
+//!
 //! 源序：kgsl 主源（`/sys/class/kgsl/kgsl-3d0`：busy%、clock_mhz、max_gpuclk、
 //! gpubusy 差分备选）→ devfreq 兜底（`/sys/class/devfreq/{*gpu*,*kgsl*}` 的
 //! cur/max_freq；实测 `load` 文件为空 → 空/缺席一律按“无使用率”，永不算错）。
@@ -20,8 +23,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// su 子进程等待上限（devsrc 同钳：容 Magisk 守护冷启，越界 kill+wait）
 const SU_BOUND: Duration = Duration::from_millis(1500);
@@ -44,7 +50,7 @@ type ParsedFiles = BTreeMap<String, String>;
 type PrevBusy = (String, (u64, u64));
 
 /// GPU 频率/使用率快照（web `/system/gpu` 原样序列化；不可用时卡片隐藏）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Gpu {
     /// 频率锚是否拿到（false = 本域缺席，reason 必随）
     pub available: bool,
@@ -61,27 +67,10 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// 【公开入口】一轮采集：直读建表 → 频率锚已可析即直装（permissive 域零 fork）；
-    /// 锚缺且锚类文件遭权限拒/缺档才走 su 腿，抓体与直读表并集合并（su 非空段胜出）；
-    /// su 腿本身失败（NoSu/拒权/超时）以 SuFail 成因为由缺席。
+    /// 【公开入口】带 10s TTL 缓存的采集面（审计 perf F5）：新鲜窗内直接回放快照、
+    /// 零 fork 零 sysfs；过期才真采一轮（[`collect`]），并发迟到者经单飞锁并入同轮。
     pub fn get() -> Gpu {
-        let d = direct_read();
-        let files = if freq_anchor(&d.files).is_some() {
-            d.files
-        } else if d.freq_denied {
-            match su_leg() {
-                Ok(text) => merge_files(d.files, parse_proc_grab(&text)),
-                Err(su) => return Gpu::absent(su.reason()),
-            }
-        } else if let Some(msg) = d.bad {
-            return Gpu::absent(msg);
-        } else {
-            return Gpu::absent("sysfs 未见 GPU 频率源（kgsl/devfreq 俱缺）".to_string());
-        };
-        let prev = prev_busy().lock().unwrap_or_else(|e| e.into_inner()).take();
-        let (gpu, next) = assemble(&files, prev);
-        *prev_busy().lock().unwrap_or_else(|e| e.into_inner()) = next;
-        gpu
+        snapshot(Instant::now())
     }
 
     fn absent(reason: String) -> Gpu {
@@ -94,6 +83,76 @@ impl Gpu {
             reason: Some(reason),
         }
     }
+}
+
+// ---------------- 10s TTL 缓存（审计 perf F5：请求侧 fork 风暴收敛） ----------------
+
+/// 新鲜窗：窗内回放缓存不再采集；age 恰等于 TTL 即过期（TTL 到期必重采）。
+const CACHE_TTL: Duration = Duration::from_secs(10);
+
+/// 进程级快照格（计划钉死形态 `OnceLock<Mutex<Option<(Instant, Snapshot)>>>`）。
+/// 单飞（single-flight）：锁跨 [`collect`] 持有——并发迟到者阻塞至在途采集完成，
+/// 随即并入其新鲜缓存，绝不二次 fork；collect 中途 panic 只毒锁不损缓存本体
+/// （写回是整体赋值、发生在 collect 返回后），`into_inner` 回收即用旧缓存，过期再采。
+static CACHE: OnceLock<Mutex<Option<(Instant, Gpu)>>> = OnceLock::new();
+
+/// 采集计数（测试缝，生产构建不挂载）：冷启动区域必恰好 +1；TTL 到期再 +1。
+#[cfg(test)]
+static COLLECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// 生产绑定：进程级格 + 真采集体 + 墙钟。
+fn snapshot(now: Instant) -> Gpu {
+    snapshot_in(&CACHE, now, collect)
+}
+
+/// 时钟与格位可注入的缓存骨架（测试缝：局部格 + 注入 Instant + 计数闭包，
+/// 免睡 10s、免与并行测试串扰）。新鲜判据 age < TTL，age 恰等于 TTL 即过期；
+/// 时钟倒走/并发先写者的微超前列（checked 取 None）按新鲜消化：回放旧缓存
+/// 等窗口自然到期，宁供稍陈数据也不 panic、不重复 fork。
+fn snapshot_in(
+    cell: &OnceLock<Mutex<Option<(Instant, Gpu)>>>,
+    now: Instant,
+    collect: impl FnOnce() -> Gpu,
+) -> Gpu {
+    let cell = cell.get_or_init(Mutex::default);
+    let mut cache = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, snap)) = cache.as_ref() {
+        let fresh = match now.checked_duration_since(*at) {
+            Some(age) => age < CACHE_TTL,
+            None => true,
+        };
+        if fresh {
+            return snap.clone();
+        }
+    }
+    let snap = collect();
+    *cache = Some((now, snap.clone()));
+    snap
+}
+
+/// 真采集体（原 `Gpu::get` 正文）：直读建表 → 频率锚已可析即直装（permissive 域零
+/// fork）；锚缺且锚类文件遭权限拒/缺档才走 su 腿，抓体与直读表并集合并（su 非空段
+/// 胜出）；su 腿本身失败（NoSu/拒权/超时）以 SuFail 成因为由缺席。
+fn collect() -> Gpu {
+    #[cfg(test)]
+    COLLECTS.fetch_add(1, Ordering::Relaxed);
+    let d = direct_read();
+    let files = if freq_anchor(&d.files).is_some() {
+        d.files
+    } else if d.freq_denied {
+        match su_leg() {
+            Ok(text) => merge_files(d.files, parse_proc_grab(&text)),
+            Err(su) => return Gpu::absent(su.reason()),
+        }
+    } else if let Some(msg) = d.bad {
+        return Gpu::absent(msg);
+    } else {
+        return Gpu::absent("sysfs 未见 GPU 频率源（kgsl/devfreq 俱缺）".to_string());
+    };
+    let prev = prev_busy().lock().unwrap_or_else(|e| e.into_inner()).take();
+    let (gpu, next) = assemble(&files, prev);
+    *prev_busy().lock().unwrap_or_else(|e| e.into_inner()) = next;
+    gpu
 }
 
 // ---------------- 直读腿 ----------------
@@ -434,6 +493,74 @@ fn prev_busy() -> &'static Mutex<Option<PrevBusy>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    /// 触碰进程级 TTL 格/全局采集计数的测试共锁：测试线程并行，全局格不能被
+    /// 他方在断言中途回填（hermetic 的 ttl_cache_* 用局部格，不占此锁）。
+    fn cache_guard() -> MutexGuard<'static, ()> {
+        static L: Mutex<()> = Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn fake_gpu(mark: f64) -> Gpu {
+        Gpu {
+            available: true,
+            load_pct: Some(mark),
+            freq_mhz: Some(441.0),
+            max_mhz: Some(587.0),
+            source: Some("kgsl".to_string()),
+            reason: None,
+        }
+    }
+
+    /// TTL 缓存契约（计数精确钉死；红-先：改动前无缓存，两次调用 counter==2）：
+    /// 冷启动恰采一次；TTL 窗内 4 连呼零新增且逐字回放；age==TTL 边界即过期重采
+    /// 并顶替旧快照；重采后的新窗继续回放。注入时钟驱动过期，零墙钟等待。
+    #[test]
+    fn ttl_cache_fresh_hit_and_expiry_recollect_exact_counts() {
+        let cell: OnceLock<Mutex<Option<(Instant, Gpu)>>> = OnceLock::new();
+        let n = AtomicUsize::new(0);
+        let t0 = Instant::now();
+        let bump = || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_gpu(1.0)
+        };
+        let first = snapshot_in(&cell, t0, bump);
+        assert_eq!(n.load(Ordering::Relaxed), 1, "冷启动必恰采一次");
+        let want = format!("{first:?}");
+        for k in 1..=4u32 {
+            let hit = snapshot_in(&cell, t0 + Duration::from_millis(250 * u64::from(k)), || {
+                n.fetch_add(1, Ordering::Relaxed);
+                fake_gpu(2.0)
+            });
+            assert_eq!(format!("{hit:?}"), want, "窗内命中须逐字回放缓存");
+        }
+        assert_eq!(n.load(Ordering::Relaxed), 1, "窗内 4 连呼零新增采集（counter==1 红线）");
+        let after = snapshot_in(&cell, t0 + CACHE_TTL, || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_gpu(3.0)
+        });
+        assert_eq!(n.load(Ordering::Relaxed), 2, "TTL 到期（age==TTL）必重采");
+        assert_eq!(after.load_pct, Some(3.0), "过期后必须是新采快照顶格");
+        let replay = snapshot_in(&cell, t0 + CACHE_TTL + Duration::from_millis(1), || {
+            n.fetch_add(1, Ordering::Relaxed);
+            fake_gpu(4.0)
+        });
+        assert_eq!(replay.load_pct, Some(3.0), "重采写回即成新窗，回放新值");
+        assert_eq!(n.load(Ordering::Relaxed), 2, "全程累计仅两次真采集");
+    }
+
+    /// 生产接线钉：Gpu::get() 必走全局 TTL 格。首呼后格必新鲜（10s 窗 ≫ 测试
+    /// 微秒窗，并发他方只可能命中），第二呼必零采集且逐字回放——对并发回填免疫。
+    #[test]
+    fn production_get_serves_next_call_from_ttl_cache() {
+        let _g = cache_guard();
+        let first = Gpu::get();
+        let base = COLLECTS.load(Ordering::Relaxed);
+        let again = Gpu::get();
+        assert_eq!(COLLECTS.load(Ordering::Relaxed), base, "新鲜窗内第二呼零采集");
+        assert_eq!(format!("{again:?}"), format!("{first:?}"), "回放内容逐字一致");
+    }
 
     fn grab(pairs: &[(&str, &str)]) -> ParsedFiles {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
