@@ -127,8 +127,16 @@ impl Operator {
     /// 网卡速度回路（每 [`NET_SAMPLE_INTERVAL`]）+ 进程快照回路（每
     /// [`PROC_SAMPLE_INTERVAL`]）并行跑在同一共享 runtime 上。
     /// 幂等：重复调用返回 [`OperatorError::Started`]。
+    ///
+    /// 启动成功支路顺带踢一次公网 IP 缓存预热（task-29 / perf F12：
+    /// [`network::prewarm`] spawn 不 await、Once 至多一次、探测失败静默负缓存
+    /// ——本行不等探测，采样启动墙钟零增量；预热因此绝不在采样轮/请求路径上）。
     pub fn start() -> Result<(), OperatorError> {
-        Self::start_with(Cadence::default())
+        let r = Self::start_with(Cadence::default());
+        if r.is_ok() {
+            network::prewarm();
+        }
+        r
     }
 
     /// [`Operator::start`] 的节奏/轮工作体参数化版（测试缝）：三回路改用注入

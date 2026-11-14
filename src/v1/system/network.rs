@@ -25,6 +25,9 @@
 //!
 //! // 惯用判网：有任一非回环地址 = 有网
 //! let online = !net.lan.is_empty() || net.public_v4.is_some();
+//!
+//! // 启动预热（唯一消费方 = Operator::start 成功支路，task-29）：
+//! // crate::v1::system::network::prewarm();  // spawn 不 await、至多一次、失败静默
 //! ```
 //!
 //! 内部策略：
@@ -46,6 +49,9 @@
 //!   刷新线程（`REFRESH` 原子标志保证任意时刻至多一个在飞，刷新线程探完写缓存
 //!   后释放标志）；从未探过（缓存为空）时在专用 `PROBE_LOCK` 下内联探测并
 //!   双重检查——首个调用必回真实答案，并发首探只出网一次；
+//! - 守护启动时由 [`crate::v1::operator::Operator::start`] 经 [`prewarm`] 踢一次
+//!   后台预热（task-29 / perf F12：spawn 不 await、至多一次、失败静默负缓存），
+//!   首个 `/system/ip` 因此永不内联探测；
 //! - `public_v6` = 本机枚举出的非 ULA/链路本地 v6（隐私扩展临时地址同样
 //!   公网可达，一并列入）；纯 v4 NAT 环境下为空。
 
@@ -172,16 +178,43 @@ fn public_v4_cached() -> Option<String> {
 /// 单飞后台刷新：抢 `REFRESH` 标志 → spawn 探测线程 → 写缓存 → 释放标志。
 /// `probe_public_v4` 吞尽 IO 错误不会 panic；若线程 spawn 本身失败则标志滞留，
 /// 影响仅为「本次不再后台刷新」（读侧仍回旧值）。
+/// 后台探测失败留**单行 debug**（task-29）：负缓存照常落位、读侧 SWR 仍回
+/// 旧值/空，不升格 WARN——离线是本文件开篇就承认的常态，不是事故。
 fn kick_refresh() {
     if REFRESH.swap(true, Ordering::AcqRel) {
         return; // 已有刷新在飞
     }
     std::thread::spawn(|| {
         let val = probe_public_v4();
+        if val.is_none() {
+            eprintln!("[net] public_v4 refresh failed - negative-cached, readers still served");
+        }
         let lock = PUB4.get_or_init(|| Mutex::new(None));
         *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), val));
         REFRESH.store(false, Ordering::Release);
     });
+}
+
+/// 启动预热（audit task-29 / perf F12，GAP-8）：把既有的 SWR 单飞刷新路径
+/// （[`kick_refresh`]）在守护启动时踢一次，让**首个** `/system/ip` 请求永远走
+/// 缓存读、不再内联探测（暖成公网 IP 或负缓存，两者都算命中缓存）。
+///
+/// 调用点（计划给出 main 启动 / operator 启动二选一，此处取后者并在此注明）：
+/// [`crate::v1::operator::Operator::start`] 成功支路——语义即「采样器启动，
+/// 预热随之启动」，且 api 绑定失败即 exit 的路径不会白白出网探测。
+///
+/// 契约（三条，均有测试钉死）：
+/// - **spawn 不 await**：只投递线程即返回（微秒级），启动路径绝不等待探测——
+///   探测最坏成本（逐站 1.5s 超时链）全在后台线程消化；
+/// - **至多一次**：`Once` 门，重复调用零成本；单飞标志再把同刻并发的后台刷新
+///   去重成至多一发探测；
+/// - **探测足迹零变化**：复用 [`probe_public_v4`] 原链——task-22 的 8KiB+1
+///   读取封顶、1.5s 超时、站表、负缓存语义原样继承，预热不新增任何出网面。
+/// 预热失败静默（debug 单行 + 负缓存，见 [`kick_refresh`]），首个请求最多
+/// 多等一个 TTL 周期，绝不回退成内联探测。
+pub fn prewarm() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(kick_refresh);
 }
 
 /// 探测出口公网 IPv4：明文 HTTP 回显（TCP 视角）优先，
@@ -571,6 +604,136 @@ mod tests {
             got.as_deref(),
             Some("203.0.113.7"),
             "膨胀站不得拖死探测链，下一站必须接手"
+        );
+    }
+
+    // ---- task-29（audit perf F12）：启动预热永不站请求路径 ----
+
+    /// 验收原文（task-29）：「after boot (no /system/ip call yet), cache populated
+    /// within ≤10s」——sqlite-free check：直读 PUB4 槽，正缓存（有网）与负缓存
+    /// （离线全灭）都算「已填充」，两种设备状态同一断言。
+    /// 归因说明：api 冒烟等并发用例也可能先到这里把槽填上——那恰好证明同一
+    /// 结论（首个请求前槽已热），断言对先后次序免疫；本用例保证「窗口内必热」。
+    #[test]
+    fn prewarm_populates_public_v4_cache_within_10s() {
+        let lock = super::PUB4.get_or_init(|| std::sync::Mutex::new(None));
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let t0 = Instant::now();
+        super::prewarm();
+        let dt = t0.elapsed();
+        // spawn-not-await 绊线：内联探测即便全源秒死，首站也要交 connect/DNS 的
+        // 超时学费（1.5s 档）；spawn 路径只做线程交接，微秒级。任何「预热被
+        // await 化」的回归都会在这里爆炸。
+        assert!(
+            dt < Duration::from_millis(100),
+            "prewarm 必须 spawn 不 await（探测绝不站在调用者头上），实际 {dt:?}"
+        );
+
+        // Once 门令重复 prewarm 恒为 no-op，本用例的「暖」动作由 kick_refresh
+        // 同路径直补一发（与 prewarm 同一个单飞入口，自动去重）。循环内周期性
+        // 补踢：并发窗口里 REFRESH 若恰被无主的在飞刷新占住，在飞者写完必清
+        // 标志，下一拍补踢必能上道——两条分支都在 10s 预算内等到落笔。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if lock.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "暖后 ≤10s 缓存必被填充（正缓存或负缓存），超时未落笔"
+            );
+            super::kick_refresh();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 结构锁（task-29 对抗项）：预热的挂点与 detach 形态由源码钉死——
+    /// 「采样轮永不被预热拖住」双保险 = ① 挂点根本不在轮工作体里 +
+    /// ② 即使在（启动线上）也是 spawn 不 await。防未来「顺手 await」回归。
+    #[test]
+    fn warmup_is_detached_and_off_round_and_off_request_paths() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let net =
+            std::fs::read_to_string(format!("{manifest}/src/v1/system/network.rs")).unwrap();
+        let oper =
+            std::fs::read_to_string(format!("{manifest}/src/v1/operator/mod.rs")).unwrap();
+
+        // ① kick_refresh detach 形态：std::thread::spawn 交接句柄即弃，无 join/await。
+        let k = &net[net.find("fn kick_refresh").unwrap()..net.find("pub fn prewarm").unwrap()];
+        assert!(
+            k.contains("std::thread::spawn("),
+            "kick_refresh 必须 std::thread::spawn（detach 语义的载体）"
+        );
+        assert!(
+            !k.contains(".join(") && !k.contains(".await"),
+            "kick_refresh 函数体不得 join/await 探测线程——句柄必须弃投（永不阻塞调用方）"
+        );
+
+        // ② 挂点唯一性：全 operator 域只允许一次调用，且就在 Operator::start
+        //    的成功支路（启动线）；启动支路本体不得含 .await（暖谁都不等）。
+        assert_eq!(
+            oper.matches("network::prewarm()").count(),
+            1,
+            "预热钩子必须恰一处（启动线），不得散进采样轮体/政策/请求路径"
+        );
+        let s = &oper[oper.find("pub fn start(").unwrap()..oper.find("fn start_with").unwrap()];
+        assert!(
+            s.contains("network::prewarm()"),
+            "唯一钩子必须位于 Operator::start 成功支路"
+        );
+        assert!(!s.contains(".await"), "start 成功支路不得 await（启动墙钟零增量）");
+
+        // ③ 采样轮工作体干净：sample_round 体内无 prewarm——轮次对预热无义务，
+        //    启动暖一次即恒暖；即使未来 prewarm 被 await 化，波及面也只有启动线。
+        let sr = &oper[oper.find("async fn sample_round").unwrap()..];
+        let sr = &sr[..sr.find("\n}").unwrap()];
+        assert!(
+            !sr.contains("prewarm"),
+            "采样轮工作体不得调用 prewarm（warmup 不得进每轮路径）"
+        );
+    }
+
+    /// checkbox 22 的 cap 不因预热回归（对抗项）：预热复用原探测链，源形——
+    /// 8KiB+1 封顶常量、3+3 站表、http_echo_ip/dns_txt 走位——原样；task-22
+    /// 的四枚行为针（read_echo 边界/200KB 话痨/顺延）在本文件照常全绿。
+    #[test]
+    fn warm_reuses_task22_bounded_probe_chain_verbatim() {
+        assert_eq!(
+            super::ECHO_READ_CAP,
+            8192,
+            "8KiB+1 读取封顶（task-22）不得被预热改动"
+        );
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let net =
+            std::fs::read_to_string(format!("{manifest}/src/v1/system/network.rs")).unwrap();
+        let p = &net[net.find("fn probe_public_v4").unwrap()..net.find("const ECHO_READ_CAP").unwrap()];
+        for needle in [
+            "myip.ipip.net",
+            "ifconfig.me",
+            "api.ip.sb",
+            "8.8.8.8:53",
+            "8.8.4.4:53",
+            "1.1.1.1:53",
+            "o-o.myaddr.l.google.com",
+            "whoami.cloudflare",
+        ] {
+            assert!(p.contains(needle), "探测站表元素缺失（预热不得扩站/换站）: {needle}");
+        }
+        assert_eq!(
+            p.matches("http_echo_ip(").count(),
+            1,
+            "HTTP 回显链单一调用位（3 站循环原样，预热不新增出网面）"
+        );
+        assert_eq!(
+            p.matches("dns_txt(").count(),
+            1,
+            "DNS 兜底链单一调用位（3 站循环原样，预热不新增出网面）"
+        );
+        assert_eq!(
+            p.matches("if let Some(ip) =").count(),
+            2,
+            "顺延循环形状原样（两链各一处 Some 判定，链数不扩）"
         );
     }
 
