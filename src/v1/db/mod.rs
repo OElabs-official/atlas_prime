@@ -43,6 +43,15 @@
 //! 事务失败整体回滚 = 未迁移，旧行必不丢。两表皆缺 → 全新库就地建新。
 //! 旧 `idx_samples_*` 随 DROP 消失，等价的 `idx_records_*` 随后重建。
 //!
+//! # 一次性电池行迁移（`PRAGMA user_version` 守卫，幂等）
+//! `user_version < 2` 时**单事务**内：`battery/current_ma`（值本就是 µA）改名
+//! `current_ua`；`battery/temp_c`（旧写入侧 ÷10 存储）×10 还原真实 ℃；随后置
+//! `user_version = 2`（版本只升不降）。标记在库头部页而非数据行——滚动修剪吃不掉、
+//! 重启不重放。仅当 `records` 表确保存在后执行：新 schema 直接执行；遗留路径在
+//! 重建/改名完成后执行；全新库直接盖章（建表交给 `open_at`）——冷启动空库绝不
+//! 触发 `no such table`。三条语句与版本盖章同一提交/回滚单元（PRAGMA 写头部页随
+//! 事务回滚），崩溃后重开重跑恒安全。
+//!
 //! # 读取契约
 //! `/db/history` 只经 [`Db::history`] 暴露 unix 秒投影：SELECT 内
 //! `CAST(strftime('%s', ts) AS INTEGER)`（迁移后全行均为 RFC3339 TEXT，strftime 统一可析）。
@@ -320,28 +329,83 @@ async fn open_at(path: &Path) -> Result<SqliteConnection, DbError> {
     Ok(conn)
 }
 
-/// 就地 schema 迁移（幂等；判定树见模块文档「schema 迁移」）
+/// 就地 schema 迁移（幂等；判定树见模块文档「schema 迁移」）。
+/// 电池行一次性迁移（`migrate_battery_units`）挂在 records 确保存在的各分支尾后；
+/// 全新库走 `stamp_battery_migration` 直接盖章（建表在 open_at，UPDATE 不得先行）。
 async fn migrate(conn: &mut SqliteConnection) -> Result<(), DbError> {
     match ts_decl_type(conn, "records").await? {
-        // 新 schema（含全新库首次建表后的每一次 open）：no-op
-        Some(t) if t.eq_ignore_ascii_case("TEXT") => Ok(()),
-        // records 在而 ts 非 TEXT（异常遗留）：就地重建
-        Some(_) => rebuild(conn, "records").await,
+        // 新 schema（含全新库首次建表后的每一次 open）：仅走电池行一次性迁移
+        Some(t) if t.eq_ignore_ascii_case("TEXT") => migrate_battery_units(conn).await,
+        // records 在而 ts 非 TEXT（异常遗留）：就地重建，完成后迁移电池行
+        Some(_) => {
+            rebuild(conn, "records").await?;
+            migrate_battery_units(conn).await
+        }
         None => match ts_decl_type(conn, "samples").await? {
-            // 两表皆缺：全新库，建表交给 open_at
-            None => Ok(()),
-            // 旧表但 ts 已是 TEXT（历史手工迁移的理论遗留）：纯改名
+            // 两表皆缺：全新库，无旧行可迁移——直接盖章（建表交给 open_at）
+            None => stamp_battery_migration(conn).await,
+            // 旧表但 ts 已是 TEXT（历史手工迁移的理论遗留）：纯改名后迁移电池行
             Some(t) if t.eq_ignore_ascii_case("TEXT") => {
                 sqlx::query("ALTER TABLE samples RENAME TO records")
                     .execute(&mut *conn)
                     .await
                     .map(|_| ())
-                    .map_err(|e| DbError::Open(e.to_string()))
+                    .map_err(|e| DbError::Open(e.to_string()))?;
+                migrate_battery_units(conn).await
             }
-            // 主迁移路径：unix 秒 INTEGER → RFC3339 TEXT
-            Some(_) => rebuild(conn, "samples").await,
+            // 主迁移路径：unix 秒 INTEGER → RFC3339 TEXT，重建完成后迁移电池行
+            Some(_) => {
+                rebuild(conn, "samples").await?;
+                migrate_battery_units(conn).await
+            }
         },
     }
+}
+
+/// 库级 schema 版本（`PRAGMA user_version`，存库头部页，随事务提交/回滚）
+async fn user_version(conn: &mut SqliteConnection) -> Result<i64, DbError> {
+    sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+        .fetch_one(conn)
+        .await
+        .map_err(|e| DbError::Open(e.to_string()))
+}
+
+/// 全新库快速路径：无旧行可迁移，仅盖章 user_version=2（版本只升不降）。
+/// 单条 PRAGMA 自提交，无原子性面。
+async fn stamp_battery_migration(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    if user_version(conn).await? < 2 {
+        sqlx::query("PRAGMA user_version=2;")
+            .execute(conn)
+            .await
+            .map_err(|e| DbError::Open(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// 一次性电池历史行迁移（GAP-1 存量清洗，配套写入侧 current_ua/temp_c 契约）：
+/// `user_version < 2` 时单事务内改名 `battery/current_ma` → `current_ua`（值本就
+/// 是 µA）、`battery/temp_c` ×10（旧写入侧 ÷10 存储还原真实 ℃）、置版本 2。
+/// 三条语句同一提交/回滚单元：崩溃 = 整体未迁移（版本未盖），重开重跑恒安全，
+/// 绝不半迁移或重复 ×10。版本 ≥2 时本事务只剩一次版本读（no-op）。
+/// 前置条件：records 表确保存在（migrate 判定树各分支保证）。
+async fn migrate_battery_units(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    let mut tx = conn
+        .begin()
+        .await
+        .map_err(|e| DbError::Open(e.to_string()))?;
+    if user_version(&mut tx).await? < 2 {
+        for stmt in [
+            "UPDATE records SET key='current_ua' WHERE kind='battery' AND key='current_ma'",
+            "UPDATE records SET value=value*10 WHERE kind='battery' AND key='temp_c'",
+            "PRAGMA user_version=2;",
+        ] {
+            sqlx::query(stmt)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DbError::Open(e.to_string()))?;
+        }
+    }
+    tx.commit().await.map_err(|e| DbError::Open(e.to_string()))
 }
 
 /// 转写重建：单事务，任何失败整体回滚 = 未迁移，旧表旧行必不丢。
@@ -554,6 +618,247 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(n, 2);
+        });
+        cleanup(&file);
+    }
+
+    // ---- todo 4：一次性电池行迁移（PRAGMA user_version 守卫）----
+
+    /// 裸连接读 user_version（测试断言用，绕开生产 open_at 的幂等迁移）
+    async fn raw_user_version(file: &Path) -> i64 {
+        let opts = SqliteConnectOptions::new()
+            .filename(file)
+            .create_if_missing(false);
+        let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+    }
+
+    /// red-first（GAP-1 存量清洗）：旧契约电池行（current_ma 值本为 µA、temp_c 按
+    /// ÷10 存储）经生产 open 改名 + ×10，user_version 置 2，二次 open no-op
+    /// （值稳定、不重复 ×10）；对照行（同键非 battery kind）证明 WHERE kind 守卫。
+    #[test]
+    fn legacy_battery_rows_migrate_once_on_open() {
+        let file = temp_db("battery_units");
+        block_on(async {
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT, key TEXT, value REAL)")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            let seed: [(&str, &str, f64); 5] = [
+                ("battery", "current_ma", -500.0),
+                ("battery", "temp_c", 3.25), // 旧 ÷10 存储；3.25/32.5 二进制精确，×10 无舍入漂移
+                ("battery", "pct", 88.0),
+                ("net", "current_ma", -1.0), // kind 守卫：非 battery 同旧键不改名
+                ("net", "temp_c", 2.0),      // kind 守卫：非 battery 同键不 ×10
+            ];
+            for (kind, key, v) in seed {
+                sqlx::query(
+                    "INSERT INTO records(ts,kind,key,value) VALUES('2024-01-01T00:00:00Z',?1,?2,?3)",
+                )
+                .bind(kind)
+                .bind(key)
+                .bind(v)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            }
+            drop(conn);
+
+            // When：生产路径 open（open_at 内嵌迁移）
+            drop(open_at(&file).await.expect("旧电池行库 open 必须成功"));
+
+            // Then：断言值而非 Ok
+            let bat = history_at(&file, "battery", None, 10).await;
+            let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
+            assert_eq!(want("current_ua"), Some(-500.0), "必须改名且 µA 原值不变");
+            assert_eq!(want("current_ma"), None, "旧键不得残留");
+            assert_eq!(want("temp_c"), Some(32.5), "旧 ÷10 温度必须 ×10 还原 ℃");
+            assert_eq!(want("pct"), Some(88.0), "非迁移范围键值不动");
+            let net = history_at(&file, "net", None, 10).await;
+            let nwant = |k: &str| net.iter().find(|r| r.key == k).map(|r| r.value);
+            assert_eq!(nwant("current_ma"), Some(-1.0), "WHERE kind='battery' 守卫必须生效");
+            assert_eq!(nwant("temp_c"), Some(2.0));
+            assert_eq!(raw_user_version(&file).await, 2);
+
+            // 二次 open = no-op：值稳定（不重复 ×10）、版本不再动作
+            drop(open_at(&file).await.unwrap());
+            let bat2 = history_at(&file, "battery", None, 10).await;
+            let want2 = |k: &str| bat2.iter().find(|r| r.key == k).map(|r| r.value);
+            assert_eq!(want2("temp_c"), Some(32.5), "二次 open 不得重复 ×10");
+            assert_eq!(raw_user_version(&file).await, 2);
+        });
+        cleanup(&file);
+    }
+
+    /// red-first（B1 边界）：冷启动空库（文件不存在）走生产 open——必须 Ok
+    /// （迁移 UPDATE 不得先于 CREATE TABLE 撞上 `no such table`）且一步盖到
+    /// user_version=2、records 表为空。
+    #[test]
+    fn cold_empty_db_open_stamps_version_without_error() {
+        let file = temp_db("cold_empty");
+        block_on(async {
+            assert!(!file.exists(), "前置：库文件不存在");
+            drop(open_at(&file).await.expect("冷空库 open 不得报 no such table"));
+            assert_eq!(
+                raw_user_version(&file).await,
+                2,
+                "全新库首次 open 即盖章 2（无旧行可迁移）"
+            );
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(false);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM records")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(n, 0);
+        });
+        cleanup(&file);
+    }
+
+    /// 与 INTEGER-ts 遗留重建分支共存（stale-state 对抗）：最古 schema（samples）
+    /// 里就带旧契约电池行——rebuild 先转写重建、电池迁移在 rebuild 完成后执行，
+    /// 两个 pass 同一次 open 同时生效。
+    #[test]
+    fn integer_ts_legacy_battery_rows_migrate_after_rebuild() {
+        let file = temp_db("legacy_int_battery");
+        block_on(async {
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query(
+                "CREATE TABLE samples(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, value REAL NOT NULL)",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            for (key, v) in [("current_ma", -500.0f64), ("temp_c", 3.25f64)] {
+                sqlx::query(
+                    "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'battery',?1,?2)",
+                )
+                .bind(key)
+                .bind(v)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO samples(ts,kind,key,value) VALUES(1700000000,'mem','used',100)",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            drop(conn);
+
+            drop(open_at(&file).await.expect("INTEGER 遗留库 open 必须成功"));
+
+            let bat = history_at(&file, "battery", None, 10).await;
+            assert_eq!(bat.len(), 2, "重建必须无损");
+            let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
+            assert_eq!(want("current_ua"), Some(-500.0), "rebuild 完成后电池迁移必须生效");
+            assert_eq!(want("temp_c"), Some(32.5));
+            assert!(
+                bat.iter().all(|r| r.ts == "2023-11-14T22:13:20Z"),
+                "ts 必须已被重建 pass 转写为 RFC3339"
+            );
+            assert_eq!(raw_user_version(&file).await, 2);
+        });
+        cleanup(&file);
+    }
+
+    /// 事务原子性（= 崩溃中途等价）：迁移事务内 UPDATE#1（改名）已成功、
+    /// UPDATE#2（×10）在缺 value 列的库上报错 → 整体回滚——改名同样未生效、
+    /// 版本保持 0 → 崩溃后重开可安全重放，绝无半迁移状态。
+    #[test]
+    fn failed_battery_migration_rolls_back_rename_and_version() {
+        let file = temp_db("battery_txn_rollback");
+        block_on(async {
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT, key TEXT)")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO records(ts,kind,key) VALUES('2024-01-01T00:00:00Z','battery','current_ma')",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            drop(conn);
+
+            let res = open_at(&file).await;
+            assert!(res.is_err(), "迁移失败必须让 open 显式失败（由调用方上报）");
+
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(false);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            let key: String = sqlx::query_scalar("SELECT key FROM records")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(key, "current_ma", "回滚必须连 UPDATE#1 一起撤销");
+            drop(conn);
+            assert_eq!(raw_user_version(&file).await, 0, "失败迁移不得盖章版本");
+        });
+        cleanup(&file);
+    }
+
+    /// 迁移原子性的前提钉桩：PRAGMA user_version 写库头部页，与 UPDATE 同事务
+    /// 回滚——提交前崩溃 = 全部未生效，绝不出现「版本已盖章但行未迁移」（丢迁移）
+    /// 或「行已迁移但版本未盖」（重放双重 ×10）。
+    #[test]
+    fn pragma_user_version_participates_in_transaction() {
+        let file = temp_db("pragma_txn");
+        block_on(async {
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query("CREATE TABLE records(ts TEXT, kind TEXT, key TEXT, value REAL)")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO records(ts,kind,key,value) VALUES('2024-01-01T00:00:00Z','battery','temp_c',3.25)",
+            )
+            .execute(&mut conn)
+            .await
+            .unwrap();
+            let mut tx = conn.begin().await.unwrap();
+            sqlx::query("UPDATE records SET value=value*10 WHERE kind='battery' AND key='temp_c'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA user_version=2;")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.rollback().await.unwrap();
+            drop(conn);
+
+            assert_eq!(raw_user_version(&file).await, 0, "PRAGMA 必须随事务回滚");
+            let opts = SqliteConnectOptions::new()
+                .filename(&file)
+                .create_if_missing(false);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            let v: f64 = sqlx::query_scalar("SELECT value FROM records")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(v, 3.25, "UPDATE 必须随事务回滚");
         });
         cleanup(&file);
     }
