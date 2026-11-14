@@ -586,7 +586,11 @@ fn supervise(
                 Err(RecvTimeoutError::Timeout) => match child.try_wait() {
                     Ok(Some(st)) => break Some(st),
                     Ok(None) => {}
-                    Err(_) => break None,
+                    // try_wait 报错（如 ECHILD）时子进程可能已死：先收尸再退出，避免僵尸
+                    Err(_) => {
+                        let _ = child.wait();
+                        break None;
+                    }
                 },
             }
         };
