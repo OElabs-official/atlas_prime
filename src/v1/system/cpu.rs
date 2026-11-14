@@ -32,6 +32,7 @@ static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
 
 /// CPU 拓扑（内部黑箱：在线核编号列表 + 各自 scaling_cur_freq 路径，一次构建）
 struct Topology {
+    #[allow(dead_code)] // 预留: 核数观察面，经 cpu_count() 读取（现仅单测消费）；生产路径 freq_ghz 只读 paths
     cores: Vec<u32>,
     paths: Vec<std::path::PathBuf>,
 }
@@ -53,6 +54,7 @@ fn topology() -> &'static Topology {
 }
 
 /// 在线 CPU 核心数（首次调用触发探测，之后 O(1)）
+#[allow(dead_code)] // 预留: 核数探测面，现仅单测消费（tests::）；接入采集面时删除本标注
 #[inline]
 fn cpu_count() -> usize {
     topology().cores.len()

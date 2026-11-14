@@ -206,7 +206,8 @@ impl Operator {
     /// 立即采一轮并落库（含 db 侧滚动修剪与内存告警策略），返回写入行数。
     /// 同步入口：驱动 db 共享 runtime（[`db::block_on`]），可在任意
     /// （非该 runtime 内部的）线程上下文调用。
-    pub fn sample_now() -> Result<usize, OperatorError> {
+    #[allow(dead_code)] // 预留（26 号决议：不加 HTTP 路由）: 手动补采入口，现仅 cfg(test)（operator 自测 / api 路由冒烟）消费
+    pub(crate) fn sample_now() -> Result<usize, OperatorError> {
         db::block_on(sample_round())
     }
 
