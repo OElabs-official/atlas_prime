@@ -7,9 +7,10 @@
 //! SOCK_DIAG/GENERIC 连创建都不行。即本域内三级数据源全部封死，快照为空是
 //! **正确行为**。root（su / Magisk）/ 自定制 ROM 等放行域下，本路径即出数。
 //!
-//! IFLA_STATS 载荷为内核序列化的 legacy `rtnl_link_stats`（arm64 内核字长 8B：
-//! `rx_bytes@0`、`tx_bytes@80`；32 位内核的载荷仅 72B，被长度闸挡下 = 不出数
-//! 而非出错）。零新增依赖：std + 既有 libc。
+//! IFLA_STATS 载荷为内核序列化的 legacy `rtnl_link_stats`（arm64/64 位内核字段
+//! 为 8B，字段序 rx_packets@0、tx_packets@8、rx_bytes@16、tx_bytes@24；本读取
+//! 路径按 64 位内核 ABI 钉死，仅面向 arm64 目标——32 位内核字段为 4B，偏移不
+//! 适用）。零新增依赖：std + 既有 libc。
 
 use super::speed::Counters;
 
@@ -19,10 +20,13 @@ const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_STATS: u16 = 7;
-/// legacy rtnl_link_stats 中 tx_bytes 的偏移（arm64 内核：第 11 个 8B 字段）
-const TX_BYTES_OFF: usize = 80;
-/// rx_bytes@0 + tx_bytes@80 可读的最小载荷长度
-const STATS_MIN_LEN: usize = TX_BYTES_OFF + 8;
+/// legacy rtnl_link_stats 中 rx_bytes 的偏移（arm64 内核：第 3 个 8B 字段；
+/// 字段序 rx_packets@0、tx_packets@8、rx_bytes@16、tx_bytes@24）
+const RX_BYTES_OFF: usize = 16;
+/// legacy rtnl_link_stats 中 tx_bytes 的偏移（arm64 内核：第 4 个 8B 字段）
+const TX_BYTES_OFF: usize = 24;
+/// rx_bytes@16 + tx_bytes@24 可读的最小载荷长度（过短的载荷跳过不读）
+const STATS_MIN_LEN: usize = 32;
 
 /// 全部网卡的累计计数器 `(iface, rx_bytes, tx_bytes)`（不做数据面过滤，交给调用侧）。
 /// socket/bind/send/recv 任一环节失败即空表——本函数是安全黑箱，unsafe 不外溢。
@@ -42,6 +46,19 @@ pub(super) fn link_stats() -> Counters {
         return Counters::new();
     }
     let _guard = NlFd(fd);
+    // recv 200ms 超时：dump 不收尾/ack 异常时不永挂；recv 返回 -1（EAGAIN）走
+    // 下方 n <= 0 break，拿已收部分 = 部分结果。best-effort：设置失败照常无超时运行
+    let tv = libc::timeval { tv_sec: 0, tv_usec: 200_000 };
+    // SAFETY: fd 有效且存活期覆盖本 syscall；timeval 是 plain-data C 结构体，指针+长度配对正确
+    let _ = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&tv as *const libc::timeval).cast::<libc::c_void>(),
+            core::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
     // SAFETY: sockaddr_nl 是 plain-data C 结构体，全零 + 覆写 family 即合法
     // （nl_pad 在 libc 中是不透明的 Padding 类型，只能 zeroed 构造）
     let mut dest: libc::sockaddr_nl = unsafe { core::mem::zeroed() };
@@ -135,7 +152,7 @@ fn parse_one_link(msg: &[u8], out: &mut Counters) {
             }
             IFLA_STATS => {
                 if data.len() >= STATS_MIN_LEN {
-                    stats = Some((rd_u64(data, 0), rd_u64(data, TX_BYTES_OFF)));
+                    stats = Some((rd_u64(data, RX_BYTES_OFF), rd_u64(data, TX_BYTES_OFF)));
                 }
             }
             _ => {}
@@ -186,15 +203,60 @@ mod tests {
         a
     }
 
-    /// 单链路消息体：全零 ifinfomsg + 名称 + 144B legacy stats（rx@0, tx@80）
+    /// 单链路消息体：全零 ifinfomsg + 名称 + 144B legacy stats
+    ///（内核 rtnl_link_stats 真实布局：rx_bytes@16、tx_bytes@24）
     fn link(name: &str, rx: u64, tx: u64) -> Vec<u8> {
         let mut p = vec![0u8; 16];
         p.extend_from_slice(&rtattr(IFLA_IFNAME, name.as_bytes())); // NUL 由对齐填充提供
         let mut st = vec![0u8; 144];
-        st[0..8].copy_from_slice(&rx.to_ne_bytes());
-        st[80..88].copy_from_slice(&tx.to_ne_bytes());
+        st[16..24].copy_from_slice(&rx.to_ne_bytes());
+        st[24..32].copy_from_slice(&tx.to_ne_bytes());
         p.extend_from_slice(&rtattr(IFLA_STATS, &st));
         nlmsg(16, &p)
+    }
+
+    /// ABI 字段序钉死：rx/tx 必须读自 rtnl_link_stats 的 rx_bytes@16 / tx_bytes@24；
+    /// rx_packets@0、tx_packets@8 与旧代码误读的 80 处（rx_length_errors）皆填诱饵值，
+    /// 任一偏移读错都会反映为解析数值不符。
+    #[test]
+    fn reads_rtnl_offsets() {
+        let mut st = vec![0u8; 144];
+        st[0..8].copy_from_slice(&0xA0A0_A0A0_u64.to_ne_bytes()); // rx_packets 诱饵
+        st[8..16].copy_from_slice(&0xB0B0_B0B0_u64.to_ne_bytes()); // tx_packets 诱饵
+        st[16..24].copy_from_slice(&4_000_000_001_u64.to_ne_bytes()); // rx_bytes 真值
+        st[24..32].copy_from_slice(&5_000_000_002_u64.to_ne_bytes()); // tx_bytes 真值
+        st[80..88].copy_from_slice(&0xC0C0_C0C0_u64.to_ne_bytes()); // 旧 tx 误读点诱饵
+        let mut body = vec![0u8; 16];
+        body.extend_from_slice(&rtattr(IFLA_IFNAME, b"eth0"));
+        body.extend_from_slice(&rtattr(IFLA_STATS, &st));
+        let mut got: Counters = Counters::new();
+        assert!(collect_newlinks(&nlmsg(16, &body), &mut got));
+        assert_eq!(got, vec![("eth0".to_string(), 4_000_000_001, 5_000_000_002)]);
+    }
+
+    /// 畸形输入：IFLA_STATS 载荷短于 STATS_MIN_LEN（32B）→ 整条链路跳过，不读取。
+    #[test]
+    fn stats_payload_below_min_len_is_skipped() {
+        let mut body = vec![0u8; 16];
+        body.extend_from_slice(&rtattr(IFLA_IFNAME, b"ifb0"));
+        body.extend_from_slice(&rtattr(IFLA_STATS, &[0u8; 24])); // 24B < 32B
+        let mut got: Counters = Counters::new();
+        assert!(collect_newlinks(&nlmsg(16, &body), &mut got));
+        assert!(got.is_empty(), "stats 载荷 <32B 必须跳过: {got:?}");
+    }
+
+    /// 属性乱序健壮性：IFLA_STATS 先于 IFLA_IFNAME 出现也须正确解析出真实数值。
+    #[test]
+    fn parses_when_stats_attr_precedes_ifname() {
+        let mut st = vec![0u8; 144];
+        st[16..24].copy_from_slice(&777_u64.to_ne_bytes());
+        st[24..32].copy_from_slice(&888_u64.to_ne_bytes());
+        let mut body = vec![0u8; 16];
+        body.extend_from_slice(&rtattr(IFLA_STATS, &st));
+        body.extend_from_slice(&rtattr(IFLA_IFNAME, b"wlan1"));
+        let mut got: Counters = Counters::new();
+        assert!(collect_newlinks(&nlmsg(16, &body), &mut got));
+        assert_eq!(got, vec![("wlan1".to_string(), 777, 888)]);
     }
 
     #[test]
