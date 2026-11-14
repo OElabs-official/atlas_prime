@@ -388,6 +388,16 @@ fn net_cache() -> &'static Mutex<Vec<(String, f64, f64)>> {
     S.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// 测试缝（audit task-31）：网速缓存整体清零。凡断言缓存形态的用例（空缓存
+/// 读出、回路未走完计量轮）开头显式复位，与测试调度顺序解耦；生产构建无本缝。
+#[cfg(test)]
+fn reset_net_cache_for_test() {
+    net_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 /// 1Hz 网卡速度回路主体（与 [`run_sampler`] 同一 runtime、同一停止唤醒，互不掺和）：
 /// 首拍只喂 [`network::speed::Grouper`] 立组级基线不 emit；此后每拍 快照 →
 /// 组和差分（成员增减整组重建基线 emit 0、倒退钳 0，dt 实测）→ 整体刷新缓存
@@ -446,6 +456,8 @@ async fn run_net_meter(tick: Duration) {
 /// 计数 +1，恰在计满 `threshold` 那一拍返回**一次** `true`（每条连败串至多
 /// 一次，超阈续败静默）；成功拍 [`reset`](Self::reset) 清零、重武装下一串。
 /// 阈值只管声张、不管数据面：连败不改变任何回路的采样节奏。
+/// task-31 对账：持有者 = 两回路函数的栈上实例（每次起动新建），无进程级
+/// 静态态 ⇒ 无复位缝可加，用例自构局部实例即天然调度无关。
 #[derive(Debug)]
 struct FailStreak {
     threshold: u32,
@@ -792,21 +804,25 @@ mod tests {
     }
 
     /// 触碰操作器全局槽位/缓存的测试共锁：真实回路的 start/stop 测试会喂
-    /// net_cache，必须与本文件的缓存断言串行（否则并行窗口误报"非空"）
+    /// net_cache，须与本文件的缓存断言串行（并行窗口可在他方断言中途回填
+    /// 缓存）。task-31 起本文件的缓存断言另经 [`reset_net_cache_for_test`]
+    /// 显式立起点，串行锁只防中途回填、不再承担先后次序。
     fn operator_test_lock() -> &'static std::sync::Mutex<()> {
         static S: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         S.get_or_init(|| std::sync::Mutex::new(()))
     }
 
-    /// 缓存契约：1Hz 回路未启动 → 读到空（web 冷启动回 "{}" 的依据）
+    /// 缓存契约：清空缓存（task-31：复位驱动，与测试调度顺序无关）后读到空
+    /// （web 冷启动回 "{}" 的依据——1Hz 回路未启动/首个 emit 前即此形态）
     #[test]
     fn net_speeds_empty_before_first_emit() {
         let _g = operator_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        reset_net_cache_for_test();
         assert!(
             Operator::net_speeds().is_empty(),
-            "首个 emit 前必须是空缓存，实际 {:?}",
+            "清空后的缓存读出必须为空，实际 {:?}",
             Operator::net_speeds()
         );
     }
@@ -1026,6 +1042,9 @@ mod tests {
         let _g = operator_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // task-31：缓存形态断言复位驱动——先立空起点，末尾"net 回路未走完
+        // 计量轮"的读出才与调度先后无关（共锁只防中途回填）
+        reset_net_cache_for_test();
         let warns: Arc<std::sync::Mutex<Vec<String>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let w = Arc::clone(&warns);
