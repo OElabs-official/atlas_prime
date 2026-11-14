@@ -15,13 +15,16 @@
 //! let n = Operator::sample_now().ok(); // 手动补一轮全域采样（返回写入行数）
 //! let v = Operator::net_speeds();      // 网速缓存读（分组）(组名, rx_bps, tx_bps)，
 //!                                      // 序 [wifi, cellular, 其余升序]，不碰 /proc
-//! Operator::stop();                    // 置标志 + Notify 即时唤醒，三条回路当前轮收尾即停
+ //! Operator::stop();                    // 置标志 + Notify 即时唤醒，三条回路当前轮收尾即停；
+ //!                                      // 随后硬上限 10s 等待线程 'settled'（关停完成
+ //!                                      // 契约），超时 WARN 一行后放手，卡死不拖关停
 //! ```
 //!
 //! # 职责
 //! - [`Operator::start`]：拉起采样线程。等待阶段 = sleep 与停止唤醒（`Notify`）的
 //!   select 竞争；[`Operator::stop`] 置标志并 `notify_waiters`，采样线程微秒级退出，
-//!   在途轮次完整落库后收尾；
+//!   在途轮次完整落库后收尾；随后以 10s 硬上限等待线程 'settled'（关停完成契约，
+//!   见 [`Operator::stop`] 文档），超时单行 WARN 后放手；
 //! - [`collect`]：全域快照——system 各黑箱（cpu/thermal/gpu/mem/swap/battery/disk）展开
 //!   为存储行；**采集时刻即打戳**：`ts` = RFC3339（秒精度、UTC），同一轮全部行同一时刻；
 //!   每轮经 [`spawn_collect`] 上阻塞池执行（采集链延迟不定，不占驱动线程，任务
@@ -58,7 +61,7 @@
 //! 共享 runtime、连接与 WAL 并发模型见 [`crate::v1::db`] 模块文档；采样线程即跑在其上。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -125,28 +128,79 @@ impl Operator {
     /// [`PROC_SAMPLE_INTERVAL`]）并行跑在同一共享 runtime 上。
     /// 幂等：重复调用返回 [`OperatorError::Started`]。
     pub fn start() -> Result<(), OperatorError> {
-        static HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
+        Self::start_with(Cadence::default())
+    }
+
+    /// [`Operator::start`] 的节奏/轮工作体参数化版（测试缝）：三回路改用注入
+    /// 节奏、全域轮改用注入工作体，其余完全同构。start() 恒以
+    /// [`Cadence::default`]（生产三常量 + 真 [`real_round`]）调用，生产语义不变。
+    fn start_with(cadence: Cadence) -> Result<(), OperatorError> {
         if RUNNING.swap(true, Ordering::SeqCst) {
             return Err(OperatorError::Started);
         }
         stop_flag().store(false, Ordering::SeqCst);
-        let h = std::thread::spawn(|| {
+        // 'settled' 通道：操作器线程 block_on 返回（= 三回路全部返回、RUNNING
+        // 已由 run_sampler 清零）后发一枪；stop_with 据此硬上限等待关停完成。
+        // 线程异常终止（sender 先 drop = Disconnected）同计 settled——已无可再等。
+        let (tx, rx) = mpsc::channel::<()>();
+        let h = std::thread::spawn(move || {
             let _ = db::rt().block_on(async {
-                tokio::join!(run_sampler(), run_net_meter(), run_proc_meter())
+                tokio::join!(
+                    run_sampler(cadence.sample, cadence.round),
+                    run_net_meter(cadence.net),
+                    run_proc_meter(cadence.proc)
+                )
             });
+            let _ = tx.send(());
         });
-        HANDLE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map(|mut g| *g = Some(h))
-            .ok();
+        // handle 与 rx 双槽在 RUNNING=true 可见后即刻落位；极端早到的 stop()
+        // 取到空槽计 Idle，回路仍会因 stop_flag 在轮次收尾处自退出。
+        *handle_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
+        *settle_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
         Ok(())
     }
 
-    /// 请求停止：置标志并即时唤醒睡眠中的采样线程（微秒级退出；在途轮次完整收尾）。
+    /// 请求停止 + 关停完成契约：置标志即时唤醒（微秒级回路退出、在途轮次完整
+    /// 收尾）后，以 [`SHUTDOWN_JOIN_CAP`] 硬上限等待操作器线程 'settled'：
+    /// - settle（或线程终止）= 关停完成，RUNNING 已清，返回即安全走后续关停步骤；
+    /// - 超 cap = 单行 WARN 后放手（线程 detach，随 stop_flag 于轮次收尾自退出；
+    ///   在途轮次被撕裂 = WAL 回滚安全）——卡死的回路不得把关停拖死（IS-3：
+    ///   无外部 SIGKILL 计时兜底，这 10s 预算是关停的唯一界）。
+    ///
+    /// RUNNING 位语义不变；双次/并发 stop 只有一个 join 者，后来者走 Idle。
+    /// settle 成功路径留单行 'operator settled' 确认（关停日志的 happy 侧凭证），
+    /// Idle 静默（关停幂等，不为无谓轮次出声）。
     pub fn stop() {
+        let t0 = Instant::now();
+        match Self::stop_with(SHUTDOWN_JOIN_CAP, &warn_stderr) {
+            Shutdown::Settled => {
+                eprintln!(
+                    "atlas: operator settled ({}ms)",
+                    t0.elapsed().as_millis()
+                );
+            }
+            Shutdown::TimedOut | Shutdown::Idle => {}
+        }
+    }
+
+    /// [`Operator::stop`] 的 cap/warn 参数化版（测试缝：warn 闭包即 stderr 注入口）。
+    fn stop_with(cap: Duration, warn: &dyn Fn(&str)) -> Shutdown {
         stop_flag().store(true, Ordering::SeqCst);
         stop_notify().notify_waiters();
+        // 先取双槽再等待：JoinHandle 就此认领（settle 时线程已毕，超时则 detach，
+        // 两段都不允许无界 join()，否则硬上限形同虚设）；rx 只此一个 join 者。
+        let _handle = handle_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let rx = settle_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match rx {
+            Some(rx) => join_settled(rx, cap, warn),
+            None => Shutdown::Idle,
+        }
     }
 
     /// 立即采一轮并落库（含 db 侧滚动修剪与内存告警策略），返回写入行数。
@@ -184,15 +238,98 @@ fn stop_notify() -> &'static tokio::sync::Notify {
     S.get_or_init(tokio::sync::Notify::new)
 }
 
-/// 采样线程主体（跑在 db 共享 runtime 上）：首轮立即，此后每 [`SAMPLE_INTERVAL`] 一轮。
-/// 每轮经 [`sampler_tick`] 执行（成功轮落库+INFO；失败轮喂 [`FailStreak`]，
-/// 连败满 [`SAMPLER_FAIL_STREAK`] 轮单行示警一次）。
+/// 全域轮工作体本体（async 结果装箱；fn 指针即注入缝）
+type RoundBody = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<usize, OperatorError>> + Send>,
+>;
+
+/// 全域轮工厂（测试注轻量 stub，生产 = [`real_round`]）
+type RoundFn = fn() -> RoundBody;
+
+/// 生产轮：真 sample_round（collect → db 落库 → 双政策）
+fn real_round() -> RoundBody {
+    Box::pin(sample_round())
+}
+
+/// 三回路采样节奏 + 轮工作体（start 恒用 [`Cadence::default`]；测试注压缩拍
+/// 与轻量轮 stub——真轮在产线库上单轮 ~6s，测试必须对 db 体量免疫且信号驱动）。
+struct Cadence {
+    sample: Duration,
+    net: Duration,
+    proc: Duration,
+    round: RoundFn,
+}
+
+impl Default for Cadence {
+    fn default() -> Self {
+        Self {
+            sample: SAMPLE_INTERVAL,
+            net: NET_SAMPLE_INTERVAL,
+            proc: PROC_SAMPLE_INTERVAL,
+            round: real_round,
+        }
+    }
+}
+
+/// 关停 bounded join 的硬上限：关停唯一的界（无外部 SIGKILL 计时兜底）。
+/// 置标志+唤醒后三回路于轮次收尾处退出（全域轮 ~3s 量级），10s 覆盖最坏轮次；
+/// 到点放手 + WARN，卡死回路不得拖死关停。
+const SHUTDOWN_JOIN_CAP: Duration = Duration::from_secs(10);
+
+/// [`Operator::stop_with`] 的 bounded join 结果（私有观测面）
+#[derive(Debug)]
+enum Shutdown {
+    /// 操作器线程已 settle（或已终止）：三回路全部返回，RUNNING 已清
+    Settled,
+    /// 硬上限到点未 settle：WARN 已发，线程已 detach（随标志于轮次收尾自退出）
+    TimedOut,
+    /// 无可 join 对象：未 start 过，或前次 stop 已认领槽位
+    Idle,
+}
+
+/// WARN 默认出站：与网卡测速示警同系的 stderr 单行
+fn warn_stderr(msg: &str) {
+    eprintln!("atlas: WARN {msg}");
+}
+
+/// 操作器线程句柄槽（每次 start 重落位，stop 认领取走）
+fn handle_slot() -> &'static Mutex<Option<JoinHandle<()>>> {
+    static S: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// 'settled' 信号接收端槽（随 start 新建，stop 取走——双 stop 只有一个 join 者）
+fn settle_slot() -> &'static Mutex<Option<mpsc::Receiver<()>>> {
+    static S: OnceLock<Mutex<Option<mpsc::Receiver<()>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// 硬上限等待操作器线程 'settled'（纯通道逻辑，可脱离全局态直测）：
+/// Ok = 正常 settle；Disconnected = 线程终止未及发枪（panic unwind 路径），
+/// 同计 settled；Timeout = 发 WARN（含 cap 秒数与固定措辞）后由调用方放手。
+fn join_settled(rx: mpsc::Receiver<()>, cap: Duration, warn: &dyn Fn(&str)) -> Shutdown {
+    match rx.recv_timeout(cap) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => Shutdown::Settled,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            warn(&format!(
+                "operator did not settle within {}s - proceeding",
+                cap.as_secs_f64()
+            ));
+            Shutdown::TimedOut
+        }
+    }
+}
+
+/// 采样线程主体（跑在 db 共享 runtime 上）：首轮立即，此后每 `interval` 一轮、
+/// 每轮经 [`sampler_tick`] 执行 `round` 工作体（生产 = [`SAMPLE_INTERVAL`] +
+/// [`real_round`]，经 [`Operator::start_with`] 注入；成功轮落库+INFO；失败轮喂
+/// [`FailStreak`]，连败满 [`SAMPLER_FAIL_STREAK`] 轮单行示警一次）。
 /// 等待阶段 = sleep 与停止唤醒的 select 竞争；重进 select 前先在 loop 顶复查停止
 /// 标志（堵工作段落地的丢唤醒，bug F8），置位即退出——stop() 后微秒级返回睡眠，
 /// 在途轮次完整收尾。
-async fn run_sampler() {
+async fn run_sampler(interval: Duration, round: RoundFn) {
     let mut streak = FailStreak::new(SAMPLER_FAIL_STREAK);
-    sampler_tick(&mut streak).await;
+    sampler_tick(&mut streak, round).await;
     loop {
         // bug F8：stop 若落在工作段（select 未注册），notify_waiters 无人可唤——
         // 重进 select 前必须先在 loop 顶复查停止标志，否则丢唤醒、睡满整拍
@@ -204,24 +341,25 @@ async fn run_sampler() {
         let _ = notified.as_mut().enable();
         tokio::select! {
             _ = notified.as_mut() => { if stop_flag().load(Ordering::SeqCst) { break; } }
-            _ = tokio::time::sleep(SAMPLE_INTERVAL) => {}
+            _ = tokio::time::sleep(interval) => {}
         }
         if stop_flag().load(Ordering::SeqCst) {
             break;
         }
-        sampler_tick(&mut streak).await;
+        sampler_tick(&mut streak, round).await;
     }
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// 全域采样单轮执行 + 失败声张（task-15 / F11）：成功轮（落库 >0 行）清零
+/// 全域采样单轮执行 + 失败声张（task-15 / F11）：经注入的 `round` 工作体跑一轮
+/// （生产 = [`real_round`] → [`sample_round`]）。成功轮（落库 >0 行）清零
 /// [`FailStreak`]；采集任务失败跳轮（`Ok(0)`，[`spawn_collect`] 已逐轮示警）与
 /// 落库失败（`Err(DbError)`）都喂连败 +1——恰满 [`SAMPLER_FAIL_STREAK`] 那一轮
 /// stderr 单行示警（每条连败串一次、非每败一拍），随后照常采样，永不停摆。
 /// 分类口径：`Ok(n>0)` = 成功；`Ok(0)` = 采集跳轮（真实失败，非静默非事件）；
 /// `Err` = 存储失败（连败计数与两失败共喂，同 [`net_fail_tick`] 之于网卡回路）。
-async fn sampler_tick(streak: &mut FailStreak) {
-    let why = match sample_round().await {
+async fn sampler_tick(streak: &mut FailStreak, round: RoundFn) {
+    let why = match round().await {
         Ok(n) if n > 0 => {
             streak.reset();
             return;
@@ -255,7 +393,7 @@ fn net_cache() -> &'static Mutex<Vec<(String, f64, f64)>> {
 /// 基线与 `prev_at` 不动（恢复后 dt 跨故障期摊薄），两类失败共喂 [`FailStreak`]
 /// 计数、单行 stderr 示警——连串计数只在计满 [`NET_FAIL_STREAK`] 那一拍发声
 /// （`note()` 天然 once-per-streak），成功一拍即重置。
-async fn run_net_meter() {
+async fn run_net_meter(tick: Duration) {
     let mut grouper = network::speed::Grouper::default();
     grouper.step(&network::speed::snapshot(), 0.0); // 首拍只立基线，产出不消费
     let mut prev_at = Instant::now();
@@ -268,7 +406,7 @@ async fn run_net_meter() {
         let _ = notified.as_mut().enable();
         tokio::select! {
             _ = notified.as_mut() => { if stop_flag().load(Ordering::SeqCst) { break; } }
-            _ = tokio::time::sleep(NET_SAMPLE_INTERVAL) => {}
+            _ = tokio::time::sleep(tick) => {}
         }
         if stop_flag().load(Ordering::SeqCst) {
             break;
@@ -343,8 +481,8 @@ fn net_fail_tick(fails: &mut FailStreak, why: impl core::fmt::Display) -> bool {
 /// **绝不碰 sqlite**（本域只观测不存储）；扫描任务失败（panic/cancel）
 /// 缓存冻结——warming 或旧拍照旧暴露，下拍照常再试。等待阶段同为 sleep
 /// 与停止 Notify 的 select 竞争（首拍 interval 即刻触发，预热窗 = 启动即扫）。
-async fn run_proc_meter() {
-    let mut tick = tokio::time::interval(proc_pause());
+async fn run_proc_meter(tick_every: Duration) {
+    let mut tick = tokio::time::interval(proc_pause(tick_every));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         if stop_flag().load(Ordering::SeqCst) {
@@ -368,9 +506,9 @@ async fn run_proc_meter() {
     }
 }
 
-/// 进程回路等待相位时长：恒为 [`PROC_SAMPLE_INTERVAL`]；测试缝（task-13）
-/// 允许把节拍压短以在秒级墙钟内证伪丢唤醒。
-fn proc_pause() -> Duration {
+/// 进程回路等待相位时长：生产恒为注入节拍（Cadence.proc → [`PROC_SAMPLE_INTERVAL`]）；
+/// 测试缝（task-13）允许把节拍压短以在秒级墙钟内证伪丢唤醒。
+fn proc_pause(default: Duration) -> Duration {
     #[cfg(test)]
     {
         let ms = TEST_PAUSE_MS.load(Ordering::SeqCst);
@@ -378,7 +516,7 @@ fn proc_pause() -> Duration {
             return Duration::from_millis(ms);
         }
     }
-    PROC_SAMPLE_INTERVAL
+    default
 }
 
 /// 测试专用节拍压缩（task-13）：>0 = 以该毫秒数覆盖进程回路等待相位，
@@ -587,9 +725,19 @@ mod tests {
         }));
     }
 
+    /// 触碰操作器全局槽位/缓存的测试共锁：真实回路的 start/stop 测试会喂
+    /// net_cache，必须与本文件的缓存断言串行（否则并行窗口误报"非空"）
+    fn operator_test_lock() -> &'static std::sync::Mutex<()> {
+        static S: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        S.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     /// 缓存契约：1Hz 回路未启动 → 读到空（web 冷启动回 "{}" 的依据）
     #[test]
     fn net_speeds_empty_before_first_emit() {
+        let _g = operator_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         assert!(
             Operator::net_speeds().is_empty(),
             "首个 emit 前必须是空缓存，实际 {:?}",
@@ -707,7 +855,7 @@ mod tests {
         let (entered_tx, mut entered_rx) = mpsc::channel::<()>(1);
         let (release_tx, release_rx) = oneshot::channel::<()>();
         *WORK_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some((entered_tx, release_rx));
-        let h = tokio::spawn(run_proc_meter());
+        let h = tokio::spawn(run_proc_meter(PROC_SAMPLE_INTERVAL));
         // When: drive the loop into its first work segment, stop mid-work
         entered_rx
             .recv()
@@ -772,5 +920,178 @@ mod tests {
             t_stop < Duration::from_millis(500),
             "stop() 不应阻塞，实际 {t_stop:?}"
         );
+    }
+
+    // ---- task 18: stop() 完成契约（bounded join，IS-3 硬预算）----
+
+    /// 轻量轮 stub：80ms 让出即"落库"（生产真轮在产线库上 ~6s，测试必须对
+    /// db 体量免疫——完成契约测的是关停协议，不是采集/存储性能）
+    fn stub_round_fast() -> RoundBody {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok(0)
+        })
+    }
+
+    /// 卡死轮 stub（超时路径注入件）：1.2s 工作段模拟"回环内不可打断的轮次"，
+    /// 远大于注入 cap——验证到点放手后，detached 线程仍会随标志自行收尾。
+    fn stub_round_wedge() -> RoundBody {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            Ok(0)
+        })
+    }
+
+    /// 完成契约（GREEN 核心）：压缩节奏 + 轻量轮 start → 首轮全域轮在途时 stop →
+    /// stop 直到操作器线程 'settled' 才返回；返回点 RUNNING 已清、WARN 静默。
+    /// 信号驱动无真 10s：settle 预算 = 轻量轮 + 一拍压缩节奏（本分支含 W2 环顶
+    /// 复查，丢唤醒兜底即节奏 300ms 上限，settle 只会更早），测试墙钟 < 3s。
+    #[test]
+    fn stop_joins_within_round() {
+        use std::sync::Arc;
+        let _g = operator_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let warns: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = Arc::clone(&warns);
+        let warn = |m: &str| w.lock().unwrap_or_else(|e| e.into_inner()).push(m.to_string());
+        let t0 = Instant::now();
+        Operator::start_with(Cadence {
+            sample: Duration::from_millis(300),
+            net: Duration::from_millis(300),
+            proc: Duration::from_millis(300),
+            round: stub_round_fast,
+        })
+        .expect("压缩节奏 start 应成功");
+        // stop 进入点：start 即跑的首轮全域轮正在途（work 段中 stop）
+        match Operator::stop_with(Duration::from_secs(5), &warn) {
+            Shutdown::Settled => {}
+            other => panic!("应在 cap 内 settle，实际 {other:?}"),
+        }
+        let el = t0.elapsed();
+        assert!(
+            warns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "settle 路径 WARN 缝必须静默"
+        );
+        assert!(
+            !RUNNING.load(Ordering::SeqCst),
+            "'settled' = 线程已退出，RUNNING 必须已清"
+        );
+        assert!(
+            el < Duration::from_secs(3),
+            "join 应在轮次收尾处完成，实际 {el:?}"
+        );
+        assert!(
+            Operator::net_speeds().is_empty(),
+            "压缩节奏窗口太短，net 回路不得完成首个计量轮（否则缓存断言会互污）"
+        );
+    }
+
+    /// 机件级超时路径（QA failure 场景）：注入 1.2s 卡死轮 + 250ms cap →
+    /// stop 到点返回 TimedOut、WARN 恰一行；随后 detached 线程仍随 stop_flag
+    /// 于轮次收尾自退出（RUNNING 于 3s 内清零）——卡死轮不拖死关停（IS-3）。
+    #[test]
+    fn stop_wedged_round_times_out_then_self_settles() {
+        use std::sync::Arc;
+        let _g = operator_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let warns: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = Arc::clone(&warns);
+        let warn = |m: &str| w.lock().unwrap_or_else(|e| e.into_inner()).push(m.to_string());
+        Operator::start_with(Cadence {
+            sample: Duration::from_millis(300),
+            net: Duration::from_millis(300),
+            proc: Duration::from_millis(300),
+            round: stub_round_wedge,
+        })
+        .expect("压缩节奏 start 应成功");
+        match Operator::stop_with(Duration::from_millis(250), &warn) {
+            Shutdown::TimedOut => {}
+            other => panic!("卡死轮 + 250ms cap 必须 TimedOut，实际 {other:?}"),
+        }
+        let g = warns.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(g.len(), 1, "超时 WARN 恰一行，实际 {g:?}");
+        assert!(
+            g[0].contains("operator did not settle") && g[0].contains(" - proceeding"),
+            "WARN 措辞不符合同: {}",
+            g[0]
+        );
+        drop(g);
+        // 放手不等于遗忘：detached 线程必须自行收尾（在途轮撕开后随标志退出）
+        let t0 = Instant::now();
+        while RUNNING.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !RUNNING.load(Ordering::SeqCst),
+            "detached 操作器线程必须于轮次收尾处自退出（3s 内）"
+        );
+    }
+
+    /// 超时路径（卡死轮次模拟：sender 永不发）：cap 到点返回 TimedOut，
+    /// WARN 恰一行、含合同措辞；墙钟 ≈ cap（信号驱动，无真 10s）。
+    #[test]
+    fn stop_timeout_warns_once_and_returns() {
+        use std::sync::{Arc, mpsc};
+        let (tx, rx) = mpsc::channel::<()>();
+        let warns: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = Arc::clone(&warns);
+        let warn = |m: &str| w.lock().unwrap_or_else(|e| e.into_inner()).push(m.to_string());
+        let t0 = Instant::now();
+        match join_settled(rx, Duration::from_millis(200), &warn) {
+            Shutdown::TimedOut => {}
+            other => panic!("无 'settled' 信号必须报 TimedOut，实际 {other:?}"),
+        }
+        let el = t0.elapsed();
+        assert!(
+            el < Duration::from_secs(1),
+            "超时 cap 必须生效，实际 {el:?}"
+        );
+        let g = warns.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(g.len(), 1, "WARN 恰一行，实际 {g:?}");
+        assert!(
+            g[0].contains("operator did not settle") && g[0].contains(" - proceeding"),
+            "WARN 措辞不符合同: {}",
+            g[0]
+        );
+        drop(tx); // 模拟卡死线程随测试退场
+    }
+
+    /// 无可 join 对象：从未 start（或前次 stop 已取走槽位）→ Idle、静默、即时返回；
+    /// 事后复位 stop 标志，不污染其余测试。
+    #[test]
+    fn stop_without_join_target_is_idle() {
+        use std::sync::Arc;
+        let _g = operator_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let warns: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = Arc::clone(&warns);
+        let warn = |m: &str| w.lock().unwrap_or_else(|e| e.into_inner()).push(m.to_string());
+        let t0 = Instant::now();
+        match Operator::stop_with(Duration::from_millis(200), &warn) {
+            Shutdown::Idle => {}
+            other => panic!("无可 join 对象必须 Idle，实际 {other:?}"),
+        }
+        assert!(
+            t0.elapsed() < Duration::from_millis(100),
+            "Idle 必须即时返回"
+        );
+        assert!(
+            warns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "Idle 路径不得 WARN"
+        );
+        stop_flag().store(false, Ordering::SeqCst);
     }
 }
