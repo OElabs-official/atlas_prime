@@ -203,11 +203,22 @@ mod tests {
         assert!(w.on_round(Some(1900.0)).is_none(), "None 不得悄悄解锁");
     }
 
+    /// 串行化锁：[`policy`] 驱动进程级静态状态机 [`mem_watch`]，所有政策级测试
+    /// 必须持锁串行执行，并在各自开头 [`reset_watch`] 取得干净的闭锁态
+    /// （audit task-31：与 batterywatch 同构的复位缝，取代"唯一驱动者"口头约定）。
+    static POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 测试复位：把进程级状态机恢复为未闭锁（仅测试用；生产无复位路径）。
+    fn reset_watch() {
+        *mem_watch().lock().unwrap_or_else(|e| e.into_inner()) = MemWatch::new();
+    }
+
     /// 端到端（注入发送器+震动器，不触真实 CLI）：假存储行驱动落库后的完整政策
     /// 路径——跌破只发一次警告（固定 id + 警告标题 + 含读数正文）且**伴震一次**
     /// [`VIBRATE_MS`]；低迷/无读数静默零震动；恢复发一次且**零震动**；坏发送器
-    /// 只损失一行 stderr，伴震照常、状态机不被打坏、轮次照常。
-    /// 本测试是 [`mem_watch`] 静态态的唯一驱动者，序列自洽与调度无关。
+    /// 只损失一行 stderr，伴震照常、状态机不被打坏、轮次照常。政策级测试经
+    /// [`POLICY_TEST_LOCK`] 串行驱动 [`mem_watch`] 静态态，开头复位状态机与
+    /// 记录簿（task-31：复位驱动起点，与调度顺序无关）。
     #[test]
     fn policy_sends_edges_via_injected_sender() {
         static SENT: OnceLock<Mutex<Vec<(String, String, String)>>> = OnceLock::new();
@@ -241,6 +252,18 @@ mod tests {
         fn boom(_: &str, _: &str, _: &str) -> Result<(), NotifyError> {
             Err(NotifyError::Exit(Some(1)))
         }
+        // task-31 复位驱动起点：持锁串行 → 状态机与记录簿双双归零，
+        // 本用例的绝对计数断言自此与调度先后无关
+        let _serial = POLICY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_watch();
+        SENT.get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        VIB.get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let round = |avail: f64| {
             vec![Record {
                 ts: "2026-01-01T00:00:00Z".into(),
