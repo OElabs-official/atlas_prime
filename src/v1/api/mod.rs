@@ -308,7 +308,8 @@ async fn h_task_input(
     )
 }
 
-/// TaskError → HTTP 语义映射（404 未知 id / 409 状态冲突 / 500 spawn 失败）
+/// TaskError → HTTP 语义映射（404 未知 id / 409 状态冲突 / 500 spawn 失败 /
+/// 503 stdin 背压——有界队列满，客户端可退避重试，契约见 task 域 checkbox 21）
 fn terr(r: Result<(), TaskError>, ok: impl FnOnce() -> serde_json::Value) -> HttpResponse {
     match r {
         Ok(()) => HttpResponse::Ok().json(&ok()),
