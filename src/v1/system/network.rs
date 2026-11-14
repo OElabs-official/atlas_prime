@@ -39,7 +39,8 @@
 //!   详见 [`probe_public_v4`] 的观测视角备忘；兜底走 UDP:53 DNS TXT（Google
 //!   `o-o.myaddr` 主、Cloudflare 备，扫描全部 TXT 记录取首个合法 IP——Google
 //!   会随机夹带 `edns0-client-subnet` 副记录）；
-//!   各请求 1.5s 超时，零新增依赖、不起 TLS 栈；结果含失败均缓存 60s（负缓存）；
+//!   各请求 1.5s 超时，响应读取封顶 8KiB+1（超限即该站判死、顺延下一源，
+//!   话痨回显不得撑爆内存），零新增依赖、不起 TLS 栈；结果含失败均缓存 60s（负缓存）；
 //! - `public_v4` 缓存读取 = **stale-while-revalidate + 单飞（single-flight）**：
 //!   TTL 内直接回缓存（含负缓存 None）；过期先**立即回旧值**，同时踢一个后台
 //!   刷新线程（`REFRESH` 原子标志保证任意时刻至多一个在飞，刷新线程探完写缓存
@@ -58,7 +59,8 @@ pub use speed::{NetError, read_dev_snapshot};
 mod netlink;
 
 use serde::Serialize;
-use std::net::{IpAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -219,10 +221,35 @@ fn probe_public_v4() -> Option<String> {
     None
 }
 
+/// 公网回显正文的读取硬顶（audit sec F-04 / GAP-5）：合法回显是几十字节的 IP，
+/// 实测读取 >8KiB 即视为该站失效——话痨回显（或被替换的话痨 termux-api 类服务）
+/// 不得把探测方内存撑到正文体积。
+const ECHO_READ_CAP: usize = 8192;
+
+/// 有界读取：`take(8KiB+1)` 把「正文膨胀防呆」从事后长度检查前移进读取本身，
+/// 流上灌 ≥8KiB+1 字节即定论（不再继续读、不等 EOF），内存占用封顶 8KiB+1；
+/// 超限 WARN + None（本站失败，调用方顺延下一源）。
+fn read_echo(src: &mut impl Read) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    src.take((ECHO_READ_CAP + 1) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() > ECHO_READ_CAP {
+        eprintln!("[net] WARN echo body over {ECHO_READ_CAP}B, treating site as failed");
+        return None;
+    }
+    Some(buf)
+}
+
 /// std 裸 TCP + 最小 HTTP/1.0 GET，从响应正文提取首个合法 IPv4（不复活 ureq）
 fn http_echo_ip(host: &str, path: &str) -> Option<String> {
-    use std::io::{Read, Write};
     let addr = (host, 80u16).to_socket_addrs().ok()?.next()?;
+    http_echo_ip_at(addr, host, path)
+}
+
+/// 已解析地址的直连薄封装：生产路径仍走 [`http_echo_ip`]（站内解析 + 固定站表），
+/// 单测以进程内 stub 监听地址注入，验证超限正文的本站判死语义。
+fn http_echo_ip_at(addr: SocketAddr, host: &str, path: &str) -> Option<String> {
     let mut sock = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
     sock.set_read_timeout(Some(Duration::from_millis(1500)))
         .ok()?;
@@ -231,11 +258,7 @@ fn http_echo_ip(host: &str, path: &str) -> Option<String> {
         "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: atlas-v1\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
-    let mut buf = Vec::new();
-    sock.read_to_end(&mut buf).ok()?;
-    if buf.len() > 8192 {
-        return None; // 回显服务不该有正文膨胀，防呆
-    }
+    let buf = read_echo(&mut sock)?;
     let text = String::from_utf8_lossy(&buf);
     let body = text.split_once("\r\n\r\n")?.1;
     body.split_whitespace()
@@ -345,7 +368,9 @@ fn read_txt_strings(rd: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{Bucket, classify, parse_txt_answer, read_txt_strings, skip_name};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn classifies_real_device_addresses() {
@@ -427,13 +452,135 @@ mod tests {
         );
     }
 
+    // ---- task-22（audit sec F-04 / GAP-5）：公网探测 8KiB 读取上界 ----
+
+    /// 计数字节消费量的包装读：实证「读侧实际吞了多少字节」，
+    /// 抗误导性成功——只断言 Ok/None 会被「读完 200KB 后才判超限」蒙混过关。
+    struct Counting<R: Read> {
+        inner: R,
+        consumed: usize,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.consumed += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn echo_read_passes_exactly_8kib_boundary() {
+        // 恰好 8KiB 是合法上界内：必须原样放行且长度可证
+        let data = vec![b'a'; 8192];
+        let mut cur = std::io::Cursor::new(&data[..]);
+        let buf = super::read_echo(&mut cur).expect("恰好 8KiB 属合法回显，不得判死");
+        assert_eq!(buf.len(), 8192, "必须按字节长度取证，不是只看返回变体");
+    }
+
+    #[test]
+    fn echo_read_rejects_8kib_plus_one_boundary() {
+        // 8KiB+1 是越界最小体积：必须判死（本站失败→调用方顺延）
+        let data = vec![b'a'; 8193];
+        let mut cur = std::io::Cursor::new(&data[..]);
+        assert_eq!(super::read_echo(&mut cur), None, "8KiB+1 即正文膨胀，应判死");
+    }
+
+    #[test]
+    fn echo_read_caps_200kb_babbler_at_8kib_plus_one() {
+        // 200KB 话痨替身：判死之外，读侧实际消费必须 ≤ 8KiB+1（内存封顶的真凭据）
+        let data = vec![b'y'; 200 * 1024];
+        let mut counter = Counting {
+            inner: std::io::Cursor::new(&data[..]),
+            consumed: 0,
+        };
+        let t0 = Instant::now();
+        assert_eq!(
+            super::read_echo(&mut counter),
+            None,
+            "200KB 正文必须判死（fallback），不得返回误导性成功"
+        );
+        assert!(
+            counter.consumed <= 8192 + 1,
+            "读侧至多消费 8KiB+1 即止损，实际消费 {}B",
+            counter.consumed
+        );
+        assert!(
+            t0.elapsed() < Duration::from_millis(1500),
+            "超限应就地止损，不拖满 1.5s 读超时：{}/{:?}",
+            counter.consumed,
+            t0.elapsed()
+        );
+    }
+
+    /// 进程内 stub 回显服务：每连接读走请求后把 `resp` 整段灌给对端，
+    /// 对端（探测方）提前挂断导致的写错误按环境噪音忽略。返回监听地址。
+    fn spawn_echo_stub(resp: Vec<u8>) -> SocketAddr {
+        let lst = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = lst.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in lst.incoming().flatten() {
+                let resp = resp.clone();
+                std::thread::spawn(move || {
+                    let mut s = stream;
+                    let mut req = [0u8; 1024];
+                    let _ = s.read(&mut req);
+                    let mut off = 0;
+                    while off < resp.len() {
+                        match s.write(&resp[off..]) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => off += n,
+                        }
+                    }
+                    let _ = s.shutdown(std::net::Shutdown::Write);
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn oversized_probe_response_fails_site_fast_and_falls_through() {
+        use super::http_echo_ip_at;
+        let mut resp = b"HTTP/1.0 200 OK\r\nServer: babbler\r\n\r\n".to_vec();
+        resp.extend_from_slice(&[b'x'; 200 * 1024]); // stub 站话痨：200KB 正文
+        let bad = spawn_echo_stub(resp);
+
+        let t0 = Instant::now();
+        assert_eq!(
+            http_echo_ip_at(bad, "stub.invalid", "/"),
+            None,
+            "200KB 正文的站必须判失败（fallback 语义）"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_millis(1500),
+            "超限站应被快速放弃而非拖满超时：{:?}",
+            t0.elapsed()
+        );
+
+        // 本站判死后调用方顺延下一源（与 probe_public_v4 的 `if let Some` 循环同形）
+        let good = spawn_echo_stub(b"HTTP/1.0 200 OK\r\n\r\n203.0.113.7\n".to_vec());
+        let mut got = None;
+        for addr in [bad, good] {
+            if let Some(ip) = http_echo_ip_at(addr, "stub.invalid", "/") {
+                got = Some(ip);
+                break;
+            }
+        }
+        assert_eq!(
+            got.as_deref(),
+            Some("203.0.113.7"),
+            "膨胀站不得拖死探测链，下一站必须接手"
+        );
+    }
+
     /// 真机出网探测（需外网），默认跳过：打印两个 DNS 探测器的原始返回
     #[test]
     #[ignore]
     fn live_public_probe_raw() {
         use super::{build_txt_query, parse_txt_answer};
         use std::net::UdpSocket;
-        use std::time::{Duration, SystemTime};
+        use std::time::SystemTime;
         for (server, qname) in [
             ("1.1.1.1:53", "whoami.cloudflare"),
             ("8.8.8.8:53", "o-o.myaddr.l.google.com"),
