@@ -91,10 +91,60 @@ mod tui;
 pub struct Web;
 
 impl Web {
-    /// 阻塞启动：内建 ntex System，可安全地从任意线程（含 tokio 主循环）调用。
-    pub fn serve(bind: &str) -> std::io::Result<()> {
+    /// 纯解析：bind 串 → 套接字地址列表；解析器错误以 Err 传播，
+    /// 解析空列表亦 Err(InvalidInput)（见 [`Self::nonempty_or_err`]）。
+    fn resolve_addrs(bind: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
         use std::net::ToSocketAddrs;
-        let addrs: Vec<std::net::SocketAddr> = bind.to_socket_addrs()?.collect();
+        Self::nonempty_or_err(bind.to_socket_addrs()?.collect(), bind)
+    }
+
+    /// 纯守卫：空地址列表 → Err。**DO NOT** 改回 expect/unwrap——此处原是
+    /// `srv.expect("no address resolved")` panic 点，panic=abort 下启动期崩溃
+    /// 无声无息（GAP-8），必须以可上报的 Err 呈现。
+    fn nonempty_or_err(
+        addrs: Vec<std::net::SocketAddr>,
+        bind: &str,
+    ) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        if addrs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("api bind '{bind}': 名称解析出空地址列表"),
+            ));
+        }
+        Ok(addrs)
+    }
+
+    /// 启动探针（GAP-8 上报 seam，main 专用）：serve 监听期 `run()` 永不返回，
+    /// web 线程只在解析/绑定失败（或服务器即刻退出）时提前结束——故在 `window`
+    /// 内轮询 `is_finished()`（25ms 步进），提前结束即 join 取回真实结果：
+    /// `Ok(handle)` = 仍在服务 = 监听成功（交回活句柄，调用方须保活至进程结束）；
+    /// `Err(e)` = 绑定失败（错误消息供 main 直接上报，谎报 'listening' 不可能，
+    /// 线程已 join 收殓）。线程 panic 亦归一化为 Err（不 panic 扩散）。
+    pub fn probe_bind(
+        handle: JoinHandle<std::io::Result<()>>,
+        window: std::time::Duration,
+    ) -> Result<JoinHandle<std::io::Result<()>>, std::io::Error> {
+        let deadline = Instant::now() + window;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        if !handle.is_finished() {
+            return Ok(handle);
+        }
+        match handle.join() {
+            Ok(Err(e)) => Err(e),
+            Ok(Ok(())) => Err(std::io::Error::other(
+                "api server 启动后即刻退出（run() 提前返回）",
+            )),
+            Err(_) => Err(std::io::Error::other("api web 线程启动期 panic")),
+        }
+    }
+
+    /// 阻塞启动：内建 ntex System，可安全地从任意线程（含 tokio 主循环）调用。
+    /// 解析/绑定失败一律 `Err`（全路径无 panic 点），经 [`Self::spawn`] 的
+    /// JoinHandle + [`Self::probe_bind`] 上报给 main。
+    pub fn serve(bind: &str) -> std::io::Result<()> {
+        let addrs = Self::resolve_addrs(bind)?;
         ntex::rt::System::new("atlas-web", ntex::rt::DefaultRuntime).block_on(async move {
             let srv = web::server(async |_| {
                 App::new()
@@ -123,16 +173,17 @@ impl Web {
                      .route("/tui/sessions", web::get().to(tui::h_sessions))
                      .route("/vendor/{name}", web::get().to(tui::h_vendor))
              });
-            let mut srv = Some(srv);
-            for a in addrs {
-                let s = srv.take().expect("loop once per addr");
-                srv = Some(s.bind(a, SharedCfg::default())?);
-            }
-            srv.expect("no address resolved").run().await
+            // 逐址绑定：任一地址失败即 `?` 上抛 Err（addrs 已由 resolve_addrs
+            // 保证非空，全路径无 expect/unwrap panic 点）
+            let srv = addrs
+                .into_iter()
+                .try_fold(srv, |s, a| s.bind(a, SharedCfg::default()))?;
+            srv.run().await
         })
     }
 
-    /// 后台线程启动（返回线程句柄；serve 仅正常绑定失败才返回 Err）
+    /// 后台线程启动（返回线程句柄；serve 解析/绑定失败以 Err 随句柄返回，
+    /// 由调用方经 [`Web::probe_bind`] 探取上报——main 必须探测，勿丢弃句柄）
     pub fn spawn(bind: String) -> JoinHandle<std::io::Result<()>> {
         std::thread::spawn(move || Self::serve(&bind))
     }
@@ -514,6 +565,63 @@ mod tests {
 
     fn t(ms: u64) -> Instant {
         Instant::now() + Duration::from_millis(ms)
+    }
+
+    // ---- checkbox 21：stdin 背压的 HTTP 语义必须钉死为 503（非肉眼判读）----
+
+    #[test]
+    fn terr_maps_backpressure_to_503() {
+        let r = terr(
+            Err(TaskError::Backpressure("t1".into())),
+            || serde_json::json!({ "ok": "t1", "action": "input" }),
+        );
+        assert_eq!(
+            r.status(),
+            ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+            "有界泵队列满必须以 503 回绝（客户端退避重试契约）"
+        );
+    }
+
+    // ---- GAP-8：bind 失败必须经探针 seam 上报，不得静默谎报 / panic-abort ----
+
+    /// 占位监听先占死端口 → `Web::spawn` + `Web::probe_bind` 必报
+    /// `Err(AddrInUse)`（main 据此打印 FAILED 并 exit 1；修复前此错误被
+    /// 丢弃，main 无条件打印 'listening' 谎报）。
+    #[test]
+    fn probe_bind_reports_addr_in_use() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("占位端口");
+        let addr = holder.local_addr().expect("占位地址").to_string();
+        let h = Web::spawn(addr.clone());
+        // Err 形即线程已被 probe join 收殓（成功句柄只在 Ok 形交回）——
+        // 线程 panic-abort 会直接带崩测试进程，能走到断言即证明非 panic 路径。
+        match Web::probe_bind(h, Duration::from_millis(500)) {
+            Ok(_) => panic!("端口被占：probe_bind 必报 Err，不得谎报 listening"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse, "实为: {e}"),
+        }
+    }
+
+    /// stale_state 反证：端口空出后第二次尝试照常监听 → probe 报 Ok 且线程存活。
+    #[test]
+    fn probe_bind_ok_and_server_alive_on_free_port() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("占位端口");
+        let addr = holder.local_addr().expect("占位地址").to_string();
+        drop(holder); // 空出端口再复用（loopback 瞬态端口重绑竞态可忽略）
+        let h = Web::spawn(addr.clone());
+        let live = Web::probe_bind(h, Duration::from_millis(500))
+            .unwrap_or_else(|e| panic!("空闲端口 {addr} 须报 Ok(listening): {e}"));
+        assert!(!live.is_finished(), "绑定成功后 run() 须常驻（线程不得提前退出）");
+    }
+
+    /// 纯部分（计划验收）：解析空列表 → Err 路径（原 `expect("no address resolved")`
+    /// panic 点，panic=abort 下为无声崩溃）；非法输入 → 解析器 Err 传播；合法字面地址 → 非空。
+    #[test]
+    fn resolver_empty_yields_err_not_panic() {
+        let e = Web::nonempty_or_err(vec![], "x:1")
+            .expect_err("空地址列表必走 Err（替代原 expect panic 点）");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "实为: {e}");
+        assert!(Web::resolve_addrs("!!not a host!!").is_err(), "缺端口须 Err");
+        assert!(Web::resolve_addrs("!!not a host!!:80").is_err(), "不可解析主机须 Err");
+        assert!(!Web::resolve_addrs("127.0.0.1:0").unwrap().is_empty(), "字面地址须非空");
     }
 
     #[test]
