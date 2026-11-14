@@ -268,6 +268,7 @@ fn terr(r: Result<(), TaskError>, ok: impl FnOnce() -> serde_json::Value) -> Htt
                     ntex::http::StatusCode::CONFLICT
                 }
                 TaskError::Spawn(_) => ntex::http::StatusCode::INTERNAL_SERVER_ERROR,
+                TaskError::Backpressure(_) => ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             };
             let mut b = HttpResponse::builder(code);
             b.json(&serde_json::json!({ "error": e.to_string() }))

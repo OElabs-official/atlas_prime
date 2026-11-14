@@ -20,11 +20,12 @@ use std::env;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Parser;
 
 use v1::operator::Operator;
-use v1::task::{Phase, Task};
+use v1::task::Task;
 use v1::api::Web;
 
 /// CLI 表面：守护模式（无旗标）+ runit 安装/卸载（互斥两旗标，一次性退出不取单例锁）
@@ -188,13 +189,11 @@ fn main() {
     });
     eprintln!("[atlas] shutting down");
 
-    // 5. 收尾：停操作器采样线程，向全部在跑任务发停止意图
+    // 5. 收尾：先停操作器采样线程，再带升级地停净全部受管任务——daemon 级宽限 5s
+    // （SIGTERM 整组 → 宽限 → SIGKILL，升级在进程返回前必然走完，不留孤儿/僵尸；
+    // 等待与摘除在 Task::shutdown_all 内，不重扫规格、autostart 不复活）
     Operator::stop();
-    for s in Task::status() {
-        if matches!(s.phase, Phase::Starting | Phase::Running | Phase::Stopping) {
-            let _ = Task::stop(&s.id);
-        }
-    }
+    Task::shutdown_all(Duration::from_secs(5));
 }
 
 // ---------------- 测试 ----------------

@@ -12,15 +12,21 @@
 //! Task::input("miniserve", "reload").ok();     // 写 stdin（环内记 Stdin 回声）
 //! let lines = Task::output("miniserve");       // Some(Vec<LogLine>)：流别 + 时间戳
 //! Task::stop("miniserve").ok();                // SIGTERM 整组 → 宽限 → SIGKILL
+//! Task::shutdown_all(Duration::from_secs(5));  // 守护收尾：全停升级 → 等终态 → 清册
 //! ```
 //!
 //! # 内部架构
-//! - 每任务一条 std::thread 监督线程 = 单一状态写者；控制走 std mpsc（无界，Stop 必达）；
+//! - 每任务一条 std::thread 监督线程 = 单一状态写者；控制走 std mpsc（无界，Stop 必达），
+//!   监督等待纯事件化（子进程死讯由专职 wait-reporter 线程以 `Control::Exited` 上报，
+//!   无轮询超时）；
 //! - 状态机 `Idle→Starting→Running→Stopping→Exited|Failed`；`Starting` 由 run() 在
 //!   线程启动前同步置位，封死双重 spawn 窗口；
 //! - 子进程独立进程组（process_group(0)），停止走 TERM→宽限→KILL 整组，不产孤儿；
+//!   宽限升级由单条睡眠线程兜底（已收尸则跳过 SIGKILL）；
 //! - 日志：stdout/stderr 各一条泵线程读至 EOF，入有界环（cap = desc.log_limit），
-//!   溢出计入 dropped；input() 同步写一条 Stdin 回声；
+//!   溢出计入 dropped；stdin 走专职泵线程 + `sync_channel(64)` 有界队列——
+//!   写阻塞只 stall 泵自身，input() 在队列满时立即报 [`TaskError::Backpressure`]
+//!   （api 映射 HTTP 503），控制面永不被管道写阻塞钉死；回声入环同由 input() 记账；
 //! - RestartPolicy::Always = 监督循环内重 spawn，指数退避 2s..60s，10s 内连崩 3 次
 //!   降级 Failed；Warn/Never 不重拉，区别仅在语义标注；
 //! - 配置源 = `<project_dir>/atlas_task.json` + `<project_dir>/script/*.ts`（Bun 生成项，
@@ -38,8 +44,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::process::{ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -148,6 +155,9 @@ pub enum TaskError {
     AlreadyRunning(String),
     /// 任务已登记但描述符命令无法启动（详情见 output/last_exit）
     Spawn(String),
+    /// stdin 有界泵队列（`STDIN_QUEUE` 深）已满：写入方必须显式感知背压
+    /// （api 将本变体映射为 HTTP 503，让客户端退避重试而非静默丢行）
+    Backpressure(String),
 }
 
 impl core::fmt::Display for TaskError {
@@ -157,6 +167,9 @@ impl core::fmt::Display for TaskError {
             TaskError::NotRunning(id) => write!(f, "task not running: {id}"),
             TaskError::AlreadyRunning(id) => write!(f, "task already running: {id}"),
             TaskError::Spawn(m) => write!(f, "spawn failed: {m}"),
+            TaskError::Backpressure(id) => {
+                write!(f, "stdin backpressure (queue full): {id}")
+            }
         }
     }
 }
@@ -316,20 +329,34 @@ impl Task {
     }
 
     /// 向任务 stdin 写一行（自动补 \n）；环形缓冲同步记录 Stdin 回声。
+    ///
+    /// 写入进的是**有界泵队列**（[`STDIN_QUEUE`] 深）：专职泵线程独自承担
+    /// 管道写阻塞，本函数从不阻塞。队列满立即报 [`TaskError::Backpressure`]
+    /// （api → HTTP 503），泵已拆（子进程 stdin 消亡）报 NotRunning。
     pub fn input(id: &str, line: &str) -> Result<(), TaskError> {
         let reg = reg().read().unwrap_or_else(|e| e.into_inner());
         let slot = reg
             .get(id)
             .ok_or_else(|| TaskError::UnknownId(id.to_string()))?;
-        if slot.phase() != Phase::Running {
-            return Err(TaskError::NotRunning(id.to_string()));
+        // 单次持锁同取 phase + 泵句柄：Running 发布与泵句柄挂载同锁原子
+        let tx = {
+            let s = slot.shared.lock().unwrap_or_else(|e| e.into_inner());
+            match (s.phase, s.pump_tx.clone()) {
+                (Phase::Running, Some(tx)) => tx,
+                _ => return Err(TaskError::NotRunning(id.to_string())),
+            }
+        };
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        match tx.try_send(bytes) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                return Err(TaskError::Backpressure(id.to_string()));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(TaskError::NotRunning(id.to_string()));
+            }
         }
-        let tx = slot
-            .ctl
-            .as_ref()
-            .ok_or_else(|| TaskError::NotRunning(id.to_string()))?;
-        tx.send(Control::Line(line.to_string()))
-            .map_err(|_| TaskError::NotRunning(id.to_string()))?;
         slot.push_log(Stream::Stdin, line.to_string());
         Ok(())
     }
@@ -340,6 +367,44 @@ impl Task {
         let slot = reg.get(id)?;
         let ring = slot.logs.lock().unwrap_or_else(|e| e.into_inner());
         Some(ring.lines.iter().cloned().collect())
+    }
+
+    /// 守护收尾专用：向**全部**在跑任务广播停止，复用 [`Task::update`] 同款三阶段
+    /// （写锁内只发 `Control::StopAt` 意图 → **放锁**逐项 [`wait_terminal`] 有界等待
+    /// 终态 → 回锁全量摘除），锁序与 update 阶段 2 一致。`grace` 为 daemon 级预算：
+    /// 监督线程按 min(grace, spec stop_grace_ms) 走 SIGTERM→宽限→SIGKILL 整组升级，
+    /// 故升级兜底必先于主线程返回；每项等待再留 2s 兜底窗收尸。返回摘除前的终态
+    /// 快照（`last_exit` 可供调用方核对致死方式）。
+    ///
+    /// 收尾语义（与 update 的差异即其存在理由）：**不重扫规格**——autostart 项不得
+    /// 被关停路径重注册复活；终态/垂死槽位一律摘除（join 句柄脱管；等不到终态的
+    /// 掉队者由监督线程升级完成后自行收尸退出，进程随即结束）。空册重复调用幂等。
+    pub fn shutdown_all(grace: Duration) -> Vec<Status> {
+        // 阶段 1（持写锁）：在跑槽位一律发 daemon 级停止意图，等待放锁外做
+        let mut pending: Vec<(Arc<Mutex<Shared>>, Instant)> = Vec::new();
+        {
+            let mut reg = reg().write().unwrap_or_else(|e| e.into_inner());
+            for slot in reg.values_mut() {
+                if matches!(slot.phase(), Phase::Starting | Phase::Running | Phase::Stopping) {
+                    if let Some(tx) = &slot.ctl {
+                        let _ = tx.send(Control::StopAt(grace));
+                    }
+                    pending.push((
+                        Arc::clone(&slot.shared),
+                        Instant::now() + grace + Duration::from_millis(2000),
+                    ));
+                }
+            }
+        }
+        // 阶段 2（写锁已释放）：有界等待各停止意图落地为终态（升级由监督线程兜底）
+        for (shared, deadline) in &pending {
+            wait_terminal(shared, *deadline);
+        }
+        // 阶段 3（重持写锁）：终态快照留档后整册摘除
+        let mut reg = reg().write().unwrap_or_else(|e| e.into_inner());
+        let finals = Self::snapshot_all(&reg);
+        reg.clear();
+        finals
     }
 
     // ---- 内部 ----
@@ -354,7 +419,7 @@ impl Task {
             return Err(TaskError::AlreadyRunning(slot.desc.id.clone()));
         }
         let (tx, rx) = channel::<Control>();
-        slot.ctl = Some(tx);
+        slot.ctl = Some(tx.clone());
         {
             let mut s = slot.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.phase = Phase::Starting;
@@ -365,7 +430,7 @@ impl Task {
             let desc = slot.desc.clone();
             let shared = Arc::clone(&slot.shared);
             let logs = Arc::clone(&slot.logs);
-            move || supervise(desc, shared, logs, rx)
+            move || supervise(desc, shared, logs, rx, tx)
         });
         slot._join = Some(h);
         Ok(())
@@ -376,13 +441,21 @@ impl Task {
 
 const DEFAULT_LOG_LINES: usize = 1000;
 const DEFAULT_GRACE_MS: u64 = 3000;
-const POLL: Duration = Duration::from_millis(20);
+/// stdin 有界泵队列深度（audit perf F11 / sec F-03）。行数上限 × 单行上限
+/// （ntex JSON body 32KiB / PTY 帧 64KiB）= 每任务个位数 MiB 的确定性内存界；
+/// 队满即背压报错，写者永不被无界排队拖爆。
+const STDIN_QUEUE: usize = 64;
 const CRASH_WINDOW: Duration = Duration::from_secs(10);
 const CRASH_LIMIT: u32 = 3;
 
 enum Control {
     Stop,
-    Line(String),
+    /// 守护关停（shutdown_all）：Stop 语义 + daemon 级升级宽限覆写
+    /// （监督侧以 spec stop_grace_ms 为上限取小，SIGKILL 必先于主进程返回）
+    StopAt(Duration),
+    /// 子进程死讯（wait-reporter 线程在 `Child::wait` 返回后上报）：
+    /// 监督循环的终态来源，取代旧 20ms 轮询（audit perf F11）
+    Exited(std::io::Result<ExitStatus>),
 }
 
 #[derive(Debug)]
@@ -392,6 +465,9 @@ struct Shared {
     started_at: Option<SystemTime>,
     restarts: u32,
     last_exit: Option<ExitMeta>,
+    /// 当前子进程的 stdin 泵入口（有界 sync_channel 发送端）。随 Running
+    /// 发布、随退出摘除；input() 在此持锁 try_send，队满回 Backpressure。
+    pump_tx: Option<SyncSender<Vec<u8>>>,
 }
 
 struct Ring {
@@ -427,6 +503,7 @@ impl Slot {
                 started_at: None,
                 restarts: 0,
                 last_exit: None,
+                pump_tx: None,
             })),
             logs: Arc::new(Mutex::new(Ring {
                 lines: VecDeque::new(),
@@ -476,6 +553,19 @@ impl Slot {
     }
 }
 
+/// 槽位被摘除（gone 清扫 / shutdown_all 清册 / 测试摘槽）即补发零宽限停止。
+/// 事件化改造后监督线程自持控制通道 Sender 种子、wait-reporter 另持克隆，
+/// mpsc 断连不再等价「注册表已摘」；显式 `StopAt(0)` 精确复刻旧
+/// 「Disconnected → escalate(0)（SIGTERM 后即 SIGKILL）」语义。监督线程
+/// 已终结时 send 静默失败，幂等。
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(tx) = &self.ctl {
+            let _ = tx.send(Control::StopAt(Duration::ZERO));
+        }
+    }
+}
+
 // status_locked 的真实实现（占位函数替换，BTreeMap 借用友好）
 
 fn reg() -> &'static RwLock<BTreeMap<String, Slot>> {
@@ -500,13 +590,17 @@ impl TaskDescriptor {
     }
 }
 
-/// 监督线程主体：spawn → 双泵 → 控制循环 → 退出分类 →（Always 策略）退避重拉。
+/// 监督线程主体：spawn → stdin 泵 + 双输出泵 + wait-reporter → 纯事件控制循环
+/// → 退出分类 →（Always 策略）退避重拉。
 /// 该线程是 Shared 状态的唯一写者（Starting 由 run() 预置除外）。
+/// `ctl_tx` 为控制通道种子 Sender：仅为每轮 wait-reporter 供给克隆；本体常驻
+/// 令 recv 永不 Disconnected（注册表摘除改由 [`Slot::drop`] 显式投递停止）。
 fn supervise(
     desc: TaskDescriptor,
     shared: Arc<Mutex<Shared>>,
     logs: Arc<Mutex<Ring>>,
     rx: Receiver<Control>,
+    ctl_tx: Sender<Control>,
 ) {
     let grace_ms = desc.stop_grace_ms.unwrap_or(DEFAULT_GRACE_MS);
     let mut fast_crashes: u32 = 0;
@@ -567,46 +661,86 @@ fn supervise(
             s.started_at = Some(SystemTime::now());
         });
 
-        // 双泵各自读到 EOF 才退出（旧版单侧 EOF 截尾修复）
+        // 双输出泵各自读到 EOF 才退出（旧版单侧 EOF 截尾修复）
         let out_h = pump(child.stdout.take(), Arc::clone(&logs), Stream::Stdout);
         let err_h = pump(child.stderr.take(), Arc::clone(&logs), Stream::Stderr);
-        let mut stdin: Option<ChildStdin> = child.stdin.take();
+
+        // stdin 移交专职泵线程（audit perf F11 / sec F-03）：有界队列
+        // STDIN_QUEUE 深，管道写阻塞只 stall 泵自身；句柄随 Running 在同一把锁
+        // 内发布进 Shared，input() 持锁 try_send、从不阻塞。
+        let (pump_tx, pump_rx) = sync_channel::<Vec<u8>>(STDIN_QUEUE);
+        let stdin_h = child
+            .stdin
+            .take()
+            .map(|si| std::thread::spawn(move || pump_stdin(si, pump_rx)));
+
+        // wait-reporter：阻塞在 Child::wait，死讯以 Control::Exited 上报唤醒
+        // 监督循环——终态感知纯事件化，20ms 轮询退役。reaped 旗先于上报置位，
+        // 给宽限升级线程「已收尸则免 SIGKILL」的判据。
+        let reaped = Arc::new(AtomicBool::new(false));
+        {
+            let reaped = Arc::clone(&reaped);
+            let tx = ctl_tx.clone();
+            let spawn_r = std::thread::Builder::new()
+                .name(format!("task-wait-{pid}"))
+                .spawn(move || {
+                    let st = child.wait();
+                    reaped.store(true, Ordering::SeqCst);
+                    let _ = tx.send(Control::Exited(st));
+                });
+            if spawn_r.is_err() {
+                // 线程创建失败（系统级资源耗尽，闭包连同 Child 已随 Err 弃置，
+                // 僵尸不可再收）：合成「死讯未知」事件保持事件面完备，
+                // 监督循环按未知退出分类，绝不静默挂死。
+                let _ = ctl_tx.send(Control::Exited(Err(std::io::Error::other(
+                    "wait-reporter spawn failed",
+                ))));
+            }
+        }
+
+        set_phase(&shared, |s| {
+            s.phase = Phase::Running;
+            s.pid = Some(pid);
+            s.started_at = Some(SystemTime::now());
+            s.pump_tx = Some(pump_tx);
+        });
 
         let mut manual = false;
         let status: Option<ExitStatus> = loop {
-            // 带超时阻塞接收：无消息时最多睡 POLL 即转去查子进程，无忙轮询
-            match rx.recv_timeout(POLL) {
-                Ok(Control::Line(text)) => {
-                    if let Some(si) = stdin.as_mut() {
-                        let _ = writeln!(si, "{text}");
-                        let _ = si.flush();
-                    }
-                }
+            match rx.recv() {
+                Ok(Control::Exited(res)) => break res.ok(),
                 Ok(Control::Stop) => {
-                    manual = true;
-                    set_phase(&shared, |s| s.phase = Phase::Stopping);
-                    escalate(&mut child, pid, grace_ms);
-                    break child.wait().ok();
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    // 槽位被摘除：视同停止请求，收尸后线程自然结束
-                    manual = true;
-                    escalate(&mut child, pid, 0);
-                    break child.wait().ok();
-                }
-                Err(RecvTimeoutError::Timeout) => match child.try_wait() {
-                    Ok(Some(st)) => break Some(st),
-                    Ok(None) => {}
-                    // try_wait 报错（如 ECHILD）时子进程可能已死：先收尸再退出，避免僵尸
-                    Err(_) => {
-                        let _ = child.wait();
-                        break None;
+                    if !manual {
+                        manual = true;
+                        set_phase(&shared, |s| s.phase = Phase::Stopping);
+                        escalate(pid, Duration::from_millis(grace_ms), &reaped);
                     }
-                },
+                }
+                Ok(Control::StopAt(grace)) => {
+                    // 守护关停：与 Stop 同径，仅升级宽限换为 min(daemon 级预算,
+                    // spec 宽限)——SIGKILL 兜底必先于主线程返回（wait_terminal
+                    // 正按该预算等待，见 Task::shutdown_all）
+                    if !manual {
+                        manual = true;
+                        set_phase(&shared, |s| s.phase = Phase::Stopping);
+                        let ms = grace.as_millis() as u64;
+                        escalate(pid, Duration::from_millis(ms.min(grace_ms)), &reaped);
+                    }
+                }
+                Err(_) => {
+                    // 监督线程自持 ctl_tx 种子，Disconnected 理论不可达；
+                    // 真到达按零宽限停止防御性兜底（reporter 仍会送达 Exited）。
+                    manual = true;
+                    escalate(pid, Duration::ZERO, &reaped);
+                }
             }
         };
 
-        drop(stdin);
+        // 退役泵句柄：通道关闭 → stdin 泵排空残行后退出并 drop ChildStdin
+        // （子进程见 EOF）。**不 join** 泵线程：管道若被逃逸出进程组的读端
+        // 堵满，其写阻塞会拖垮收尸路径——那正是本改造消灭的 wedge 形态。
+        set_phase(&shared, |s| s.pump_tx = None);
+        drop(stdin_h);
         if let Some(h) = out_h {
             let _ = h.join();
         }
@@ -693,21 +827,36 @@ fn wait_terminal(shared: &Arc<Mutex<Shared>>, deadline: Instant) {
     }
 }
 
-/// SIGTERM 整组 → 宽限轮询 → SIGKILL 整组
-fn escalate(child: &mut Child, pid: u32, grace_ms: u64) {
+/// SIGTERM 整组后挂**一条**睡眠线程：宽限走完时 wait-reporter 仍未收尸
+/// （reaped=false）才 SIGKILL 整组。事件驱动版升级路径——宽限语义与旧
+/// 「轮询 try_wait 至 deadline」完全同形，只是监督线程不再亲自盯表。
+fn escalate(pid: u32, grace: Duration, reaped: &Arc<AtomicBool>) {
     let pgid = -(pid as i32);
     unsafe {
         libc::kill(pgid, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_millis(grace_ms);
-    while Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return;
+    let reaped = Arc::clone(reaped);
+    let _ = std::thread::Builder::new()
+        .name(format!("task-escalate-{pid}"))
+        .spawn(move || {
+            std::thread::sleep(grace);
+            if !reaped.load(Ordering::SeqCst) {
+                unsafe {
+                    libc::kill(pgid, libc::SIGKILL);
+                }
+            }
+        });
+}
+
+/// stdin 专职泵：按序 write+flush 有界队列送来的行；管道死亡（子进程关了
+/// fd0 之类）即转入排水模式——丢弃剩余行直至通道关闭，泵永不让背压退化成
+/// 阻塞或误报。通道关闭 = 监督线程退役句柄 → drop ChildStdin → 子进程见 EOF。
+fn pump_stdin(mut si: ChildStdin, rx: Receiver<Vec<u8>>) {
+    let mut alive = true;
+    while let Ok(chunk) = rx.recv() {
+        if alive && si.write_all(&chunk).and_then(|_| si.flush()).is_err() {
+            alive = false;
         }
-        std::thread::sleep(POLL);
-    }
-    unsafe {
-        libc::kill(pgid, libc::SIGKILL);
     }
 }
 
@@ -1299,5 +1448,158 @@ mod tests {
         assert!(!ok && v.is_empty(), "坏损规格应为空集 + !ok");
         assert_eq!(corrupt_hits(), hits0 + 1, "坏损恰好计一次 WARN");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- 守护收尾（audit arch A-01：关停必须带升级地停净全部任务）----
+
+    /// checkbox 19 验收：忽略 TERM 的任务在 daemon 级 grace 内被 SIGTERM→SIGKILL
+    /// 升级放倒（wait status 断言 signal=SIGKILL）、注册表清空、子进程收尸无僵尸；
+    /// autostart 规格在册但**不得**被关停路径重注册复活（stale_state  adversary）；
+    /// 重复调用幂等（repeated interruptions adversary）。
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_all_escalates_and_empties_registry() {
+        let _g = spec_test_lock();
+        let _l = ledger_test_lock();
+        let sd = SpecDirGuard::new("shutdown");
+        // Given: 在册 autostart 规格（关停路径绝不重扫规格）+ 登记并在跑一个
+        // 忽略 TERM 的任务（trap "" 的忽略处置随 fork/exec 继承给 sleep）。
+        sd.write_spec(
+            r#"[{"id":"sd1","name":"sd","command":"sh","args":["-c","sleep 30"],
+            "autostart":true,"group":"test","stop_grace_ms":2000}]"#,
+        );
+        let d = TaskDescriptor {
+            stop_grace_ms: Some(2000),
+            ..desc("sd1", "sh", &["-c", "trap \"\" TERM; sleep 30"])
+        };
+        reg().write().unwrap().insert("sd1".into(), Slot::new(d));
+        Task::run("sd1").unwrap();
+        assert!(
+            poll_until(
+                || Task::status()
+                    .iter()
+                    .any(|s| s.id == "sd1" && s.phase == Phase::Running && s.pid.is_some()),
+                5000
+            ),
+            "sd1: 未进入 Running"
+        );
+        let pid = Task::status()
+            .iter()
+            .find(|s| s.id == "sd1")
+            .and_then(|s| s.pid)
+            .unwrap();
+
+        // When: daemon 级宽限 2s——TERM 被无视，只有 SIGKILL 兜底能放倒它
+        let t0 = Instant::now();
+        let finals = Task::shutdown_all(Duration::from_secs(2));
+        let cost = t0.elapsed();
+
+        // Then 1: 终态快照携 SIGKILL 死讯——升级真正走完，而非等待超时后弃走
+        let m = finals
+            .iter()
+            .find(|s| s.id == "sd1")
+            .and_then(|s| s.last_exit.clone())
+            .expect("终态快照必须含 sd1 的退出元数据（未在宽限内到终态）");
+        assert_eq!(m.signal, Some(9), "非 SIGKILL 路径致死: {m:?}");
+        assert!(m.manual, "关停路径致死按手动停记账");
+        // Then 2: 不拖过 grace + 兜底窗（SIGKILL 于 grace 内发出，收尸随后即达终态）
+        assert!(cost < Duration::from_secs(4), "shutdown_all 拖太久: {cost:?}");
+        // Then 3: 注册表清空——autostart 规格在册也不触发重注册/复活
+        assert!(Task::status().is_empty(), "shutdown_all 后注册表必须为空");
+        // Then 4: pid 彻底消亡——kill(pid, 0) 报 ESRCH（僵尸未收尸会返回 0）
+        let gone = unsafe { libc::kill(pid as i32, 0) } == -1;
+        assert!(gone, "子进程未收尸（僵尸或孤儿残留）");
+        // Then 5: 重复调用幂等——空册直回空快照，不 panic 不误杀
+        assert!(Task::shutdown_all(Duration::from_secs(2)).is_empty());
+    }
+
+    // ---- stdin 泵 + 有界队列 + 事件化监督（audit sec F-03 / perf F11）----
+
+    /// checkbox 21 验收（红先行）：从不读 stdin 的任务被灌超大行——监督/泵一侧
+    /// 必然有写者阻塞在管道上，64 深有界队列随之触顶。红线形态（改造前）：
+    /// 100 次 input() 全部静默入无界队列（0 错误），且监督线程卡死在
+    /// writeln! 上——stop() 之后任务永远到不了终态（wedge）。
+    /// 绿线形态：≤64+1 成功、≥34 次立即报背压错误；stop() 照旧在宽限窗内收尸。
+    #[cfg(unix)]
+    #[test]
+    fn stdin_flood_backpressures_and_never_wedges_stop() {
+        let _g = spec_test_lock();
+        // Given: 从不读 stdin 的挂起任务；行载荷 512KiB（大于任何默认管道
+        // 容量 64KiB/256KiB），首个写者必然半途阻塞；log 环压到最小，
+        // 免得 100 条回显本身吃掉几十 MB。
+        let mut d = desc("bp1", "sh", &["-c", "sleep 6"]);
+        d.log_limit = Some(16);
+        d.stop_grace_ms = Some(500);
+        reg().write().unwrap().insert("bp1".into(), Slot::new(d));
+        Task::run("bp1").unwrap();
+        assert!(
+            poll_until(
+                || Task::status()
+                    .iter()
+                    .any(|s| s.id == "bp1" && s.phase == Phase::Running && s.pid.is_some()),
+                5000
+            ),
+            "bp1: 未进入 Running"
+        );
+        let pid = Task::status()
+            .iter()
+            .find(|s| s.id == "bp1")
+            .and_then(|s| s.pid)
+            .unwrap();
+
+        // When: 灌 100 条大行
+        let big = "x".repeat(512 * 1024);
+        let (mut oks, mut errs) = (0usize, 0usize);
+        for _ in 0..100 {
+            if Task::input("bp1", &big).is_ok() {
+                oks += 1;
+            } else {
+                errs += 1;
+            }
+        }
+
+        // Then 2: 写者阻塞不拖垮控制面——stop() 后 grace(500ms)+1s 内收尸。
+        // 观测全部先取、清场先做，再落断言（红线上也不给并发用例留脏槽位）。
+        let t0 = Instant::now();
+        Task::stop("bp1").unwrap();
+        let reached = poll_until(
+            || Task::status()
+                .iter()
+                .any(|s| s.id == "bp1" && matches!(s.phase, Phase::Exited | Phase::Failed)),
+            2500,
+        );
+        let cost = t0.elapsed();
+        let reaped = unsafe { libc::kill(pid as i32, 0) } == -1;
+        reg().write().unwrap().remove("bp1");
+
+        // Then 1: 队列触顶——前 64 条必成功（队深 64），总数封顶 64 队列 +
+        // 至多 1 条在泵线程手里；其余全部立即报错（绝不静默堆积）
+        assert!(oks >= 64, "前 64 条不该被拒: ok={oks}");
+        assert!(oks <= 65, "有界队列被穿透: ok={oks} (上限 64+1)");
+        assert!(errs >= 34, "背压未触发: ok={oks} err={errs}");
+        assert!(reached, "stdin 阻塞把监督线程钉死（wedge）：stop 后未到终态");
+        assert!(cost < Duration::from_millis(3500), "停止拖太久: {cost:?}");
+        assert!(reaped, "背压场景下子进程未收尸");
+    }
+
+    /// checkbox 21 结构钉：监督侧等待必须事件化——本文件不得再有任何
+    /// 「带超时的 recv」轮询；stdin 必须走 std mpsc 的有界通道（零新依赖）。
+    /// 针脚串一律拆半，防本测试自述文本把断言喂成恒真/恒假。
+    #[test]
+    fn supervisor_wait_is_event_driven_structural_pin() {
+        let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/v1/task/mod.rs"));
+        // 针脚串全部拆半写：防止本测试自己的字面量把断言喂成恒真。
+        assert!(
+            !src.contains(concat!("recv_", "timeout")),
+            "监督等待仍是轮询（audit perf F11 未闭环）"
+        );
+        assert!(
+            src.contains(concat!("sync_", "channel")),
+            "stdin 队列必须走 std mpsc 的有界通道（零新依赖）"
+        );
+        assert!(
+            src.contains(concat!("STDIN", "_QUEUE")),
+            "有界深度 64 必须以具名常量落档"
+        );
     }
 }
