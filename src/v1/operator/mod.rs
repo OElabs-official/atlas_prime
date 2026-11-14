@@ -26,6 +26,9 @@
 //!   为存储行；**采集时刻即打戳**：`ts` = RFC3339（秒精度、UTC），同一轮全部行同一时刻；
 //!   每轮经 [`spawn_collect`] 上阻塞池执行（采集链延迟不定，不占驱动线程，任务
 //!   失败示警后本轮跳过）；成功轮单行 INFO：落库行数 + 全程耗时 ms；
+//!   失败轮（落库 `Err` 或采集跳轮）喂 [`FailStreak`] 连败计数，连续
+//!   [`SAMPLER_FAIL_STREAK`] 轮单行 stderr 示警一次（每条连败串至多一条，
+//!   成功轮即重置；连败不拦采样）；
 //!   全域轮覆盖 GPU 频率/使用率（kind=`gpu`，sysfs 直读→su 桥），无 root 静默缺席不告警；
 //! - 落库经 [`crate::v1::db`]（被动存储）：本模块决定何时采，db 决定怎么存/修剪；
 //! - 每轮落库后跑内存告警政策：[`memwatch::policy`] 滞回边沿求值（**政策在操作器内**），
@@ -81,6 +84,12 @@ pub const PROC_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 /// 一次（每条失败连串至多一条；成功一拍即清零）。缓存自失败首拍起就冻结，
 /// 阈值只管声张、不管数据面。
 const NET_FAIL_STREAK: u32 = 5;
+
+/// 全域采样回路连续**失败轮**多少轮后 stderr 单行示警一次（[`FailStreak`]，
+/// 每条连败串至多一条；成功轮一拍即清零）。失败轮 = 落库失败（`DbError`）
+/// 或采集任务失败跳轮（`Ok(0)`，task-15：跳轮对采样计数是真实失败）；
+/// 阈值只管声张、不管数据面——连败不拦采样，回路照常进下一轮。
+const SAMPLER_FAIL_STREAK: u32 = 3;
 
 /// 操作器失败原因
 #[derive(Debug)]
@@ -176,10 +185,14 @@ fn stop_notify() -> &'static tokio::sync::Notify {
 }
 
 /// 采样线程主体（跑在 db 共享 runtime 上）：首轮立即，此后每 [`SAMPLE_INTERVAL`] 一轮。
-/// 等待阶段 = sleep 与停止唤醒的 select 竞争；唤醒/轮次结束后复查停止标志，
-/// 置位即退出——stop() 后微秒级返回睡眠，在途轮次完整收尾。
+/// 每轮经 [`sampler_tick`] 执行（成功轮落库+INFO；失败轮喂 [`FailStreak`]，
+/// 连败满 [`SAMPLER_FAIL_STREAK`] 轮单行示警一次）。
+/// 等待阶段 = sleep 与停止唤醒的 select 竞争；重进 select 前先在 loop 顶复查停止
+/// 标志（堵工作段落地的丢唤醒，bug F8），置位即退出——stop() 后微秒级返回睡眠，
+/// 在途轮次完整收尾。
 async fn run_sampler() {
-    let _ = sample_round().await;
+    let mut streak = FailStreak::new(SAMPLER_FAIL_STREAK);
+    sampler_tick(&mut streak).await;
     loop {
         // bug F8：stop 若落在工作段（select 未注册），notify_waiters 无人可唤——
         // 重进 select 前必须先在 loop 顶复查停止标志，否则丢唤醒、睡满整拍
@@ -196,9 +209,29 @@ async fn run_sampler() {
         if stop_flag().load(Ordering::SeqCst) {
             break;
         }
-        let _ = sample_round().await;
+        sampler_tick(&mut streak).await;
     }
     RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// 全域采样单轮执行 + 失败声张（task-15 / F11）：成功轮（落库 >0 行）清零
+/// [`FailStreak`]；采集任务失败跳轮（`Ok(0)`，[`spawn_collect`] 已逐轮示警）与
+/// 落库失败（`Err(DbError)`）都喂连败 +1——恰满 [`SAMPLER_FAIL_STREAK`] 那一轮
+/// stderr 单行示警（每条连败串一次、非每败一拍），随后照常采样，永不停摆。
+/// 分类口径：`Ok(n>0)` = 成功；`Ok(0)` = 采集跳轮（真实失败，非静默非事件）；
+/// `Err` = 存储失败（连败计数与两失败共喂，同 [`net_fail_tick`] 之于网卡回路）。
+async fn sampler_tick(streak: &mut FailStreak) {
+    let why = match sample_round().await {
+        Ok(n) if n > 0 => {
+            streak.reset();
+            return;
+        }
+        Ok(_) => "采集任务失败，本轮跳过".to_string(),
+        Err(e) => e.to_string(),
+    };
+    if streak.note() {
+        eprintln!("atlas: 全域采样连败 {SAMPLER_FAIL_STREAK} 轮: {why}");
+    }
 }
 
 /// 网速缓存快照（分组级）`(组名, rx_bps, tx_bps)`，序 [wifi, cellular, 其余升序]：
@@ -214,18 +247,19 @@ fn net_cache() -> &'static Mutex<Vec<(String, f64, f64)>> {
 /// → 落库 kind=net。等待阶段同样是 sleep 与停止 Notify 的 select 竞争。
 /// 快照上 [`tokio::task::spawn_blocking`]（su 子进程/sysfs/netlink 读链延迟
 /// 不定，不占 1Hz 驱动线程，同 [`run_proc_meter`] 模式），每拍必 await 到底：
-/// JoinHandle 不被 select 丢弃、无泄漏。
-/// 源链（[`network::read_dev_snapshot`] 起头，全灭才回 Err）整拍失败时
-/// **缓存冻结**：stale 速率原样暴露、组级基线与 `prev_at` 不动（恢复后 dt 跨
-/// 故障期摊薄），连续 [`NET_FAIL_STREAK`] 拍单行 stderr 示警——连串计数只在
-/// 越过阈值那一拍发声（`==` 语义天然 once-per-streak），成功一拍即重置；
-/// 阻塞任务失败（`Err(JoinError)`，panic/取消）进**同一失败分支**：缓存冻结
-/// + 连败计数一概同格。
+/// JoinHandle 不被 select 丢弃、无泄漏；停止落在等待阶段由 select 即时接住，
+/// 落在工作段由 loop 顶复查在回到顶部那一拍接住（bug F8）。
+/// 整拍失败——源链（[`network::read_dev_snapshot`] 起头，全灭才回 Err）回
+/// `Err(NetError)`，或阻塞任务失败回 `Err(JoinError)`（panic/取消）——经
+/// [`net_fail_tick`] 走**同一降级**：**缓存冻结**，stale 速率原样暴露、组级
+/// 基线与 `prev_at` 不动（恢复后 dt 跨故障期摊薄），两类失败共喂 [`FailStreak`]
+/// 计数、单行 stderr 示警——连串计数只在计满 [`NET_FAIL_STREAK`] 那一拍发声
+/// （`note()` 天然 once-per-streak），成功一拍即重置。
 async fn run_net_meter() {
     let mut grouper = network::speed::Grouper::default();
     grouper.step(&network::speed::snapshot(), 0.0); // 首拍只立基线，产出不消费
     let mut prev_at = Instant::now();
-    let mut fails: u32 = 0;
+    let mut fails = FailStreak::new(NET_FAIL_STREAK);
     loop {
         if stop_flag().load(Ordering::SeqCst) {
             break; // 见 run_sampler：loop 顶复查停止标志，堵工作段落地的丢唤醒
@@ -241,7 +275,7 @@ async fn run_net_meter() {
         }
         match tokio::task::spawn_blocking(network::speed::snapshot_result).await {
             Ok(Ok(cur)) => {
-                fails = 0;
+                fails.reset();
                 let now = Instant::now();
                 let dt = now.saturating_duration_since(prev_at).as_secs_f64();
                 prev_at = now;
@@ -252,23 +286,54 @@ async fn run_net_meter() {
                 }
             }
             Ok(Err(e)) => {
-                fails += 1;
-                if fails == NET_FAIL_STREAK {
-                    eprintln!(
-                        "atlas: 网卡测速源链连败 {NET_FAIL_STREAK} 拍，速度示停于末次成功值: {e}"
-                    );
-                }
+                net_fail_tick(&mut fails, e);
             }
-            // 任务失败（panic/取消）与源链失败同一降级：缓存冻结 + 连败计数
             Err(e) => {
-                fails += 1;
-                if fails == NET_FAIL_STREAK {
-                    eprintln!(
-                        "atlas: 网卡测速源链连败 {NET_FAIL_STREAK} 拍，速度示停于末次成功值: {e}"
-                    );
-                }
+                net_fail_tick(&mut fails, format!("测速任务异常: {e}"));
             }
         }
+    }
+}
+
+/// 连败串计数器（两条采样回路各持一个实例、互不掺和）：失败拍/轮 `note()`
+/// 计数 +1，恰在计满 `threshold` 那一拍返回**一次** `true`（每条连败串至多
+/// 一次，超阈续败静默）；成功拍 [`reset`](Self::reset) 清零、重武装下一串。
+/// 阈值只管声张、不管数据面：连败不改变任何回路的采样节奏。
+#[derive(Debug)]
+struct FailStreak {
+    threshold: u32,
+    count: u32,
+}
+
+impl FailStreak {
+    const fn new(threshold: u32) -> Self {
+        Self { threshold, count: 0 }
+    }
+
+    /// 记一次失败；恰在连败计满阈值那一拍返回 `true`（once-per-streak）。
+    fn note(&mut self) -> bool {
+        self.count += 1;
+        self.count == self.threshold
+    }
+
+    /// 成功拍/轮：清零连败，重武装下一串的发声能力。
+    fn reset(&mut self) {
+        self.count = 0;
+    }
+}
+
+/// 网卡回路单拍失败降级：喂 [`FailStreak`] 计数加一，恰在计满
+/// [`NET_FAIL_STREAK`] 阈值那一拍单行 stderr 示警并回 `true`（每条连败串
+/// 至多一次，成功一拍由调用侧 [`reset`](FailStreak::reset) 清零）。
+/// 源链全灭 `Err(NetError)` 与 spawn_blocking 任务失败 `Err(JoinError)`
+/// （panic/取消）共用本分支——**缓存冻结**语义由调用侧既定：缓存、组级基线
+/// 与 `prev_at` 一概不动，stale 速率原样暴露。
+fn net_fail_tick(fails: &mut FailStreak, why: impl core::fmt::Display) -> bool {
+    if fails.note() {
+        eprintln!("atlas: 网卡测速源链连败 {NET_FAIL_STREAK} 拍，速度示停于末次成功值: {why}");
+        true
+    } else {
+        false
     }
 }
 
@@ -551,6 +616,56 @@ mod tests {
         assert_eq!(v[2].key, "cellular.rx_bps");
         assert_eq!(v[3].key, "cellular.tx_bps");
         assert!(DateTime::parse_from_rfc3339(&v[0].ts).is_ok());
+    }
+
+    /// 两类失败路共用同一计数器（misleading-success 反证）：源链 `NetError`
+    /// 拍与真实 `JoinError` 拍（spawn_blocking panic 子任务）混排仍逐拍 +1，
+    /// 连续到 [`NET_FAIL_STREAK`] 照示警——JoinError 不会把失败吞成静默。
+    /// task-11（快照上 spawn_blocking）的降级等价性锁。task-15 起连败计数由
+    /// [`FailStreak`] 持有，发声拍由返回值唯一定位（发声计数 = 恰好一次）。
+    #[tokio::test]
+    async fn net_fail_tick_counts_join_error_like_net_error() {
+        let mut fails = FailStreak::new(NET_FAIL_STREAK);
+        assert!(!net_fail_tick(&mut fails, network::speed::NetError::NoSu));
+        assert!(!net_fail_tick(&mut fails, network::speed::NetError::Timeout));
+        assert_eq!(fails.count, 2, "源链失败拍逐拍计数");
+        let join = tokio::task::spawn_blocking(|| panic!("强制慢源炸裂（task-11 故障注入）")).await;
+        let e = join.expect_err("panic 的阻塞任务必须回 Err(JoinError)");
+        assert!(!net_fail_tick(&mut fails, format!("测速任务异常: {e}")));
+        assert_eq!(fails.count, 3, "JoinError 拍与 NetError 拍喂同一计数器");
+        assert!(!net_fail_tick(&mut fails, "注入拍 4"));
+        assert!(net_fail_tick(&mut fails, "注入拍 5"), "恰在阈值拍发声一次");
+        assert_eq!(fails.count, NET_FAIL_STREAK, "混排连败应同样抵达示警阈值");
+    }
+
+    /// FailStreak 声张语义（task-15 / F11）：阈值 3——前两连败静默，第 3 连败
+    /// 恰发声**一次**，第 4~6 拍（持续性失败）继续静默：每条连败串一条示警、
+    /// 非每失败一拍一条；计数照常递增（发声与否不改计数）。
+    #[test]
+    fn failstreak_announces_once_per_streak() {
+        let mut s = FailStreak::new(3);
+        assert!(!s.note(), "连败第 1 拍静默");
+        assert!(!s.note(), "连败第 2 拍静默");
+        assert!(s.note(), "第 3 连败恰发声一次");
+        assert!(!s.note());
+        assert!(!s.note());
+        assert!(!s.note());
+        assert_eq!(s.count, 6, "6 连败仍只发声一次");
+    }
+
+    /// stale_state 锁：成功轮 `reset()` 清零重武装——fail2 + 成功 + fail2 全程
+    /// 静默（计数不跨成功串味）；新串第 3 败再次发声（发声能力随 reset 恢复，
+    /// 非一次性）。
+    #[test]
+    fn failstreak_reset_rearms_next_streak() {
+        let mut s = FailStreak::new(3);
+        assert!(!s.note());
+        assert!(!s.note());
+        s.reset();
+        assert_eq!(s.count, 0, "成功轮后计数必须清零");
+        assert!(!s.note());
+        assert!(!s.note(), "fail2+成功+fail2 全程静默");
+        assert!(s.note(), "重置后的新一轮第 3 败须再次发声（重武装）");
     }
 
     /// JoinError 臂反证（misleading-success 锁）：真 panic 的阻塞任务经
