@@ -24,6 +24,8 @@
 //!   在途轮次完整落库后收尾；
 //! - [`collect`]：全域快照——system 各黑箱（cpu/thermal/gpu/mem/swap/battery/disk）展开
 //!   为存储行；**采集时刻即打戳**：`ts` = RFC3339（秒精度、UTC），同一轮全部行同一时刻；
+//!   每轮经 [`spawn_collect`] 上阻塞池执行（采集链延迟不定，不占驱动线程，任务
+//!   失败示警后本轮跳过）；成功轮单行 INFO：落库行数 + 全程耗时 ms；
 //!   全域轮覆盖 GPU 频率/使用率（kind=`gpu`，sysfs 直读→su 桥），无 root 静默缺席不告警；
 //! - 落库经 [`crate::v1::db`]（被动存储）：本模块决定何时采，db 决定怎么存/修剪；
 //! - 每轮落库后跑内存告警政策：[`memwatch::policy`] 滞回边沿求值（**政策在操作器内**），
@@ -318,16 +320,43 @@ fn net_records(rates: &[(String, f64, f64)]) -> Vec<Record> {
         .collect()
 }
 
-/// 一轮采样流水：collect → db 落库（被动存储）→ 内存告警政策（政策本体在
-/// [`memwatch`]，出站走 [`notify::notify`] / [`notify::vibrate`] 默认通道）→
-/// 充电提醒政策（政策本体在 [`batterywatch`]，出站走 [`notify::notify`]，不震动）。
-/// 落库失败也早退——告警只对已成功落库的轮次负责。
+/// 一轮采样流水：collect（经 [`spawn_collect`] 上阻塞池，不占驱动线程）→
+/// db 落库（被动存储）→ 内存告警政策（政策本体在 [`memwatch`]，出站走
+/// [`notify::notify`] / [`notify::vibrate`] 默认通道）→ 充电提醒政策（政策本体在
+/// [`batterywatch`]，出站走 [`notify::notify`]，不震动）→ 单行 INFO（落库行数 +
+/// 全程耗时 ms）。落库失败也早退——告警只对已成功落库的轮次负责。
+/// 采集任务失败（panic/取消 → JoinError）示警后本轮跳过（Ok(0)）——与旧
+/// `let _ =` 容忍同格，回路照常进入下一轮。停止唤醒落在途轮次时不掐阻塞任务：
+/// 每轮必 await 到底（同 [`run_net_meter`]，在途轮次完整收尾）。
 async fn sample_round() -> Result<usize, OperatorError> {
-    let records = collect();
+    let t0 = Instant::now();
+    let Some(records) = spawn_collect(collect).await else {
+        return Ok(0); // 采集任务失败已示警，本轮跳过
+    };
     let n = Db::insert(&records).await?;
     memwatch::policy(&records, notify::notify, notify::vibrate);
     batterywatch::policy(&records, notify::notify);
+    eprintln!(
+        "atlas: 全域采样轮落库 {n} 行，耗时 {}ms",
+        t0.elapsed().as_millis()
+    );
     Ok(n)
+}
+
+/// 全域采集上 [`tokio::task::spawn_blocking`]：sync 采集链（sysfs/su 子进程/
+/// proc 读，延迟不定）不占 120s 驱动线程，await 期间 1Hz 网卡回路照常出拍。
+/// 任务失败（panic/取消 → JoinError）单行 stderr 示警并回 `None`（本轮跳过），
+/// 驱动回路不受污染、下一轮照常。
+async fn spawn_collect(
+    job: impl FnOnce() -> Vec<Record> + Send + 'static,
+) -> Option<Vec<Record>> {
+    match tokio::task::spawn_blocking(job).await {
+        Ok(records) => Some(records),
+        Err(e) => {
+            eprintln!("atlas: 全域采集任务失败，本轮跳过: {e}");
+            None
+        }
+    }
 }
 
 /// 一轮全量采集：system 各黑箱 → 窄长存储行。
@@ -468,6 +497,31 @@ mod tests {
         assert_eq!(v[2].key, "cellular.rx_bps");
         assert_eq!(v[3].key, "cellular.tx_bps");
         assert!(DateTime::parse_from_rfc3339(&v[0].ts).is_ok());
+    }
+
+    /// JoinError 臂反证（misleading-success 锁）：真 panic 的阻塞任务经
+    /// [`spawn_collect`]（[`sample_round`] 的采集步）回 `None` = 本轮跳过；
+    /// 紧接着的正常轮照常产出 `Some`——示警不污染回路，下一轮不受牵连。
+    /// task-12（采集上 spawn_blocking）的降级等价性锁。
+    #[tokio::test]
+    async fn spawn_collect_skips_round_on_join_error_and_recovers() {
+        let skipped = spawn_collect(|| panic!("强制采集炸裂（task-12 故障注入）")).await;
+        assert!(
+            skipped.is_none(),
+            "panic 的采集任务必须回 None（示警+本轮跳过）"
+        );
+        let rec = Record {
+            ts: "2026-01-01T00:00:00+00:00".into(),
+            ts_secs: 1,
+            kind: "mem".into(),
+            key: "used".into(),
+            value: 1.0,
+        };
+        let next = spawn_collect(|| vec![rec]).await;
+        assert!(
+            matches!(&next, Some(v) if v.len() == 1 && v[0].kind == "mem"),
+            "故障轮之后的正常轮必须照常产出"
+        );
     }
 
     /// 真机闭环：sample_now → rows → history（ts 已为 RFC3339）。
