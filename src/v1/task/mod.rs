@@ -37,7 +37,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -175,8 +175,12 @@ impl Task {
     /// 三阶段执行：写锁内只发 Stop 意图并登记待办 → **放锁**有界等待终态
     /// （等待期间不阻塞注册表读写）→ 回锁重拉/摘除。等不到终态也照常推进，
     /// SIGKILL 由监督线程在宽限期后自行兜底。
+    ///
+    /// 坏损保护：`atlas_task.json` 存在但解析失败/不可读时计 WARN 并**跳过**
+    /// gone 清扫与会话对账（空集不可信，运行中任务不误杀）；文件缺失仍按
+    /// "空集 = 全部消失"处理。
     pub fn update() -> Vec<Status> {
-        let descs = load_descs();
+        let (descs, json_ok) = load_descs();
         let live: Vec<String> = descs.iter().map(|d| d.id.clone()).collect();
 
         // 阶段 1（持写锁）：diff 应用；在跑项只发 Stop 意图，等待放锁外做。
@@ -224,27 +228,31 @@ impl Task {
                 }
             }
 
-            // 配置里没了的任务：在跑的发 Stop 意图（锁外等待），终态的直接摘除
-            let gone: Vec<String> = reg.keys().filter(|k| !live.contains(k)).cloned().collect();
-            for id in gone {
-                let mut stopping: Option<(Arc<Mutex<Shared>>, Instant)> = None;
-                if let Some(slot) = reg.get_mut(&id) {
-                    let phase = slot.phase();
-                    if matches!(phase, Phase::Starting | Phase::Running | Phase::Stopping) {
-                        if let Some(tx) = &slot.ctl {
-                            let _ = tx.send(Control::Stop);
+            // 配置里没了的任务：在跑的发 Stop 意图（锁外等待），终态的直接摘除。
+            // 规格存在但坏损（json_ok=false）时跳过——空集不可信，不得误杀运行中任务。
+            if json_ok {
+                let gone: Vec<String> =
+                    reg.keys().filter(|k| !live.contains(k)).cloned().collect();
+                for id in gone {
+                    let mut stopping: Option<(Arc<Mutex<Shared>>, Instant)> = None;
+                    if let Some(slot) = reg.get_mut(&id) {
+                        let phase = slot.phase();
+                        if matches!(phase, Phase::Starting | Phase::Running | Phase::Stopping) {
+                            if let Some(tx) = &slot.ctl {
+                                let _ = tx.send(Control::Stop);
+                            }
+                            let deadline = Instant::now()
+                                + Duration::from_millis(
+                                    slot.desc.stop_grace_ms.unwrap_or(DEFAULT_GRACE_MS) + 2000,
+                                );
+                            stopping = Some((Arc::clone(&slot.shared), deadline));
                         }
-                        let deadline = Instant::now()
-                            + Duration::from_millis(
-                                slot.desc.stop_grace_ms.unwrap_or(DEFAULT_GRACE_MS) + 2000,
-                            );
-                        stopping = Some((Arc::clone(&slot.shared), deadline));
                     }
+                    if let Some((shared, deadline)) = stopping {
+                        pending_stop.push((id.clone(), shared, deadline));
+                    }
+                    stale.push(id);
                 }
-                if let Some((shared, deadline)) = stopping {
-                    pending_stop.push((id.clone(), shared, deadline));
-                }
-                stale.push(id);
             }
         }
 
@@ -266,7 +274,10 @@ impl Task {
         }
 
         // 会话册对账：注册表已消失的任务，其常驻 PTY 会话即刻回收（guard drop 击杀）。
-        tui::prune_missing(&live);
+        // 坏损规格下 live 不可信，跳过对账（与 gone 清扫同规则）。
+        if json_ok {
+            tui::prune_missing(&live);
+        }
 
         Self::snapshot_all(&reg)
     }
@@ -752,21 +763,59 @@ fn pump<T: Read + Send + 'static>(
 // ---------------- 配置加载与 diff 辅助 ----------------
 
 fn project_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        // 测试接缝：test_spec_dir 置位时指向 tempdir，绝不触碰真实数据目录。
+        let g = test_spec_dir().lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_some() {
+            return (*g).clone();
+        }
+    }
     prelude::data_dir().map(PathBuf::from)
 }
 
+/// 测试专属数据目录覆写（None = 走真实路径）。仅 task 内测试在 reg 串行锁置位。
+#[cfg(test)]
+fn test_spec_dir() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    static D: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> = std::sync::OnceLock::new();
+    D.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 坏损规格计数（WARN 的无 stderr 捕获断言接缝，仿 db 的报错计数模式）。
+#[cfg(test)]
+static SPEC_CORRUPT_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 读 atlas_task.json + 扫描 script/*.ts 生成描述符全集；按 id 去重（JSON 优先）。
-fn load_descs() -> Vec<TaskDescriptor> {
-    let Some(dir) = project_dir() else {
-        return Vec::new();
-    };
-    let _ = fs::create_dir_all(&dir);
+/// 第二元素 json_ok：false = 规格文件存在但不可读/解析坏损（空集合不可信，
+/// Task::update 据此跳过 gone 清扫与会话对账，保住运行中任务）。
+fn load_descs() -> (Vec<TaskDescriptor>, bool) {
+    match project_dir() {
+        Some(dir) => load_descs_at(&dir),
+        None => (Vec::new(), true),
+    }
+}
+
+/// `load_descs` 的 path-taking 实现（测试接缝：直传 tempdir，仿 db 的 `*_at` 风格）。
+fn load_descs_at(dir: &Path) -> (Vec<TaskDescriptor>, bool) {
+    let _ = fs::create_dir_all(dir);
 
     let mut out: Vec<TaskDescriptor> = Vec::new();
     let list = dir.join("atlas_task.json");
-    if let Ok(text) = fs::read_to_string(&list) {
-        if let Ok(v) = serde_json::from_str::<Vec<TaskDescriptor>>(&text) {
-            out.extend(v);
+    let mut json_ok = true;
+    match fs::read_to_string(&list) {
+        Ok(text) => match serde_json::from_str::<Vec<TaskDescriptor>>(&text) {
+            Ok(v) => out.extend(v),
+            Err(e) => {
+                json_ok = false;
+                warn_corrupt_spec(&list, &e);
+            }
+        }
+        // 文件缺失 = read-miss：维持"空集 = 全部消失"的既有语义。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 存在但不可读（权限/IO）：同样按坏损处理，绝不当空集。
+        Err(e) => {
+            json_ok = false;
+            warn_corrupt_spec(&list, &e);
         }
     }
 
@@ -798,7 +847,14 @@ fn load_descs() -> Vec<TaskDescriptor> {
             }
         }
     }
-    out
+    (out, json_ok)
+}
+
+/// 坏损规格的一行 WARN（含路径 + 错误）+ 测试计数。守护进程内不做重试循环。
+fn warn_corrupt_spec(path: &Path, err: &dyn std::error::Error) {
+    #[cfg(test)]
+    SPEC_CORRUPT_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("[task] WARN corrupt task spec {}: {err}", path.display());
 }
 
 // ---------------- 测试 ----------------
@@ -842,6 +898,84 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    /// 串行化所有触碰全局注册表 / 测试规格目录的用例：Task::update 的 gone 清扫
+    /// 会把并发用例刚插入的槽位当"配置已消失"误杀，静态目录覆写也须互斥置位。
+    fn spec_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: Mutex<()> = Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// tempdir 规格目录夹具：置位 test_spec_dir 覆写，drop 时清除并删除目录。
+    /// 用例须持 spec_test_lock（全局覆写单槽）。绝不触碰 ~/.local/share 真实文件。
+    #[cfg(unix)]
+    struct SpecDirGuard {
+        dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl SpecDirGuard {
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "atlas_task_spec_{tag}_{}_{n}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            *test_spec_dir().lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
+            Self { dir }
+        }
+        fn write_spec(&self, body: &str) {
+            fs::write(self.spec_path(), body).unwrap();
+        }
+        fn spec_path(&self) -> PathBuf {
+            self.dir.join("atlas_task.json")
+        }
+        /// 写一份可解析的有效规格：注册表里的"外来槽位"（非本用例 owned）原样
+        /// 序列化进 live 集，使 update 的 gone 清扫与 tui 对账不误伤兄弟用例的
+        /// 任务（兄弟 tui 用例也向全局 reg 注入槽位）；无外来槽位时即字面 `[]`。
+        /// 快照→写文件→update 紧邻调用，插入竞态残余窗口为微秒级。
+        fn write_valid_spec_excluding(&self, owned: &[&str]) {
+            let foreign: Vec<TaskDescriptor> = reg()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(id, _)| !owned.iter().any(|o| *o == id.as_str()))
+                .map(|(_, slot)| slot.desc.clone())
+                .collect();
+            fs::write(self.spec_path(), serde_json::to_string(&foreign).unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SpecDirGuard {
+        fn drop(&mut self) {
+            *test_spec_dir().lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn corrupt_hits() -> usize {
+        SPEC_CORRUPT_HITS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 起一个挂起任务（sleep 60，须保持 Running 供清扫观察）。
+    #[cfg(unix)]
+    fn spawn_sleeper_slot(id: &str) {
+        let d = desc(id, "sh", &["-c", "sleep 60"]);
+        reg().write().unwrap().insert(id.to_string(), Slot::new(d));
+        Task::run(id).unwrap();
+        assert!(
+            poll_until(
+                || Task::status()
+                    .iter()
+                    .any(|s| s.id == id && s.phase == Phase::Running && s.pid.is_some()),
+                5000
+            ),
+            "{id}: 未进入 Running"
+        );
     }
 
     #[test]
@@ -894,6 +1028,7 @@ mod tests {
     #[test]
     fn full_lifecycle_run_input_output_stop() {
         // 隔离：直接向注册表注入槽位，不依赖真实配置文件
+        let _g = spec_test_lock();
         let d = desc("life1", "sh", &["-c", "echo ready; exec cat"]);
         reg().write().unwrap().insert("life1".into(), Slot::new(d));
 
@@ -962,6 +1097,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn crash_exit_lands_failed_with_meta() {
+        let _g = spec_test_lock();
         let d = desc("fail1", "sh", &["-c", "exit 3"]);
         reg().write().unwrap().insert("fail1".into(), Slot::new(d));
         Task::run("fail1").unwrap();
@@ -981,6 +1117,7 @@ mod tests {
     #[test]
     fn group_kill_sweeps_grandchildren() {
         // sh 起一个睡死的孙子；停止后整组必须消亡（孙子不能被 setsid 逃逸）
+        let _g = spec_test_lock();
         let d = desc("grp1", "sh", &["-c", "sleep 120 & echo ready; wait"]);
         reg().write().unwrap().insert("grp1".into(), Slot::new(d));
         Task::run("grp1").unwrap();
@@ -1012,5 +1149,155 @@ mod tests {
         let gone = unsafe { libc::kill(-(pid as i32), 0) } == -1;
         assert!(gone, "进程组仍有残留（孤儿）");
         reg().write().unwrap().remove("grp1");
+    }
+
+    // ---- 坏损规格保护（audit F5：坏配置不得当"空配置集"误杀运行中任务）----
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_spec_keeps_running_tasks_alive() {
+        // Given: 垃圾字节 / 截断 JSON / 空文件 三种畸形规格各驱一轮
+        let _g = spec_test_lock();
+        // 坏损轮的 update 跳过册对账（json_ok=false），本锁今日非必需；持它是为
+        // 锁死该不变量：日后若混入有效载荷，prune 侧击自动被互斥接管。
+        let _l = ledger_test_lock();
+        let sd = SpecDirGuard::new("corrupt");
+        let payloads: [(&str, &str); 3] = [
+            ("garbage", "\u{0}\u{1b}\u{7f}not-json\u{8}"),
+            ("truncated", "[{\"id\":\"cfg\",\"name\":\"C\",\"command\":\"sh\","),
+            ("empty", ""),
+        ];
+        for (tag, body) in payloads {
+            let id = format!("cfg_{tag}");
+            sd.write_spec(body);
+            spawn_sleeper_slot(&id);
+
+            // When: 重复中断下连续两次重扫
+            let hits0 = corrupt_hits();
+            let snap1 = Task::update();
+            let snap2 = Task::update();
+
+            // Then: 每次坏损都计 WARN；任务不被摘除、始终 Running；pid 不变（未重启）
+            assert!(
+                corrupt_hits() >= hits0 + 2,
+                "{tag}: corrupt WARN 计数未推进"
+            );
+            let s1 = snap1.iter().find(|s| s.id == id);
+            let s2 = snap2.iter().find(|s| s.id == id);
+            assert!(
+                s1.is_some_and(|s| s.phase == Phase::Running)
+                    && s2.is_some_and(|s| s.phase == Phase::Running),
+                "{tag}: corrupt spec 误停止/摘除了任务 {id}"
+            );
+            assert_eq!(
+                s1.and_then(|s| s.pid),
+                s2.and_then(|s| s.pid),
+                "{tag}: corrupt spec 不应重启任务"
+            );
+            // 清场：摘槽 → ctl 断连 → 监督线程 escalate 收尸子进程
+            reg().write().unwrap().remove(&id);
+        }
+    }
+
+    /// 等注册表只剩本用例槽位（兄弟 tui 用例的注入不可控时，缺失规格用例
+    /// 无法用规格保护外来槽——语义本就是"全部消失"，只能等静默窗口）。
+    #[cfg(unix)]
+    fn wait_reg_quiet(owned: &[&str]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let quiet = reg()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .all(|k| owned.iter().any(|o| *o == k.as_str()));
+            if quiet {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("注册表被并发用例长期占用，无法独验 gone 语义");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_empty_spec_still_sweeps_gone_tasks() {
+        // Given: 可解析的空规格 + 一个配置里的挂起任务。持册锁独占：兄弟 tui
+        // 用例此刻不得向册注入活会话（update 的会话对账会 SIGKILL 它们）；
+        // write_valid_spec_excluding 保留为第二道防线（快照→写文件仍紧邻调用）。
+        let _g = spec_test_lock();
+        let _l = ledger_test_lock();
+        let sd = SpecDirGuard::new("sweep");
+        spawn_sleeper_slot("gone1");
+        let pid = Task::status()
+            .iter()
+            .find(|s| s.id == "gone1")
+            .and_then(|s| s.pid)
+            .unwrap();
+        let hits0 = corrupt_hits();
+        sd.write_valid_spec_excluding(&["gone1"]);
+
+        // When
+        let snap = Task::update();
+
+        // Then: 真空集照旧 = 消失任务被摘（既有语义保留），且不计 corrupt；子进程随组消亡
+        assert!(
+            snap.iter().all(|s| s.id != "gone1"),
+            "可解析空规格必须仍摘除消失任务"
+        );
+        assert_eq!(corrupt_hits(), hits0, "可解析规格不是坏损");
+        let gone = unsafe { libc::kill(-(pid as i32), 0) } == -1;
+        assert!(gone, "被扫任务进程组仍有残留（孤儿）");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_spec_file_keeps_gone_semantics() {
+        // Given: tempdir 里没有 atlas_task.json（read-miss ≠ 坏损）。文件缺失时
+        // 任何在册任务都该被扫。持册锁独占：缺失规格 = 空 live 集，update 的
+        // 会话对账会击杀兄弟 tui 用例在册的活会话，必须互斥。
+        let _g = spec_test_lock();
+        let _l = ledger_test_lock();
+        let _sd = SpecDirGuard::new("miss");
+        spawn_sleeper_slot("gone2");
+        wait_reg_quiet(&["gone2"]);
+        let hits0 = corrupt_hits();
+
+        // When
+        let snap = Task::update();
+
+        // Then: 维持"空集 = 全部消失"的既有语义，且不计 corrupt
+        assert!(
+            snap.iter().all(|s| s.id != "gone2"),
+            "缺失规格文件应维持原全部消失语义"
+        );
+        assert_eq!(corrupt_hits(), hits0, "文件缺失不是坏损");
+    }
+
+    #[test]
+    fn load_descs_at_distinguishes_missing_valid_and_corrupt() {
+        let _g = spec_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "atlas_task_spec_loader_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        // 缺失文件 = read-miss：空集 + ok
+        let (v, ok) = load_descs_at(&dir);
+        assert!(v.is_empty() && ok, "缺失文件应为 read-miss（ok）");
+        // 可解析且非空：描述符入集 + ok
+        fs::write(
+            dir.join("atlas_task.json"),
+            r#"[{"id":"x","name":"X","command":"true"}]"#,
+        )
+        .unwrap();
+        let (v, ok) = load_descs_at(&dir);
+        assert!(ok && v.iter().any(|d| d.id == "x"), "有效规格应加载且 ok");
+        // 截断 JSON：空集 + !ok + 计数恰 +1
+        fs::write(dir.join("atlas_task.json"), "[{").unwrap();
+        let hits0 = corrupt_hits();
+        let (v, ok) = load_descs_at(&dir);
+        assert!(!ok && v.is_empty(), "坏损规格应为空集 + !ok");
+        assert_eq!(corrupt_hits(), hits0 + 1, "坏损恰好计一次 WARN");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
