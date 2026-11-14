@@ -181,6 +181,11 @@ fn stop_notify() -> &'static tokio::sync::Notify {
 async fn run_sampler() {
     let _ = sample_round().await;
     loop {
+        // bug F8：stop 若落在工作段（select 未注册），notify_waiters 无人可唤——
+        // 重进 select 前必须先在 loop 顶复查停止标志，否则丢唤醒、睡满整拍
+        if stop_flag().load(Ordering::SeqCst) {
+            break;
+        }
         // enable() 在进 select 前即向 Notify 注册，杜绝“睡眠前 stop()”丢唤醒竞态
         let mut notified = std::pin::pin!(stop_notify().notified());
         let _ = notified.as_mut().enable();
@@ -222,6 +227,9 @@ async fn run_net_meter() {
     let mut prev_at = Instant::now();
     let mut fails: u32 = 0;
     loop {
+        if stop_flag().load(Ordering::SeqCst) {
+            break; // 见 run_sampler：loop 顶复查停止标志，堵工作段落地的丢唤醒
+        }
         let mut notified = std::pin::pin!(stop_notify().notified());
         let _ = notified.as_mut().enable();
         tokio::select! {
@@ -271,9 +279,12 @@ async fn run_net_meter() {
 /// 缓存冻结——warming 或旧拍照旧暴露，下拍照常再试。等待阶段同为 sleep
 /// 与停止 Notify 的 select 竞争（首拍 interval 即刻触发，预热窗 = 启动即扫）。
 async fn run_proc_meter() {
-    let mut tick = tokio::time::interval(PROC_SAMPLE_INTERVAL);
+    let mut tick = tokio::time::interval(proc_pause());
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if stop_flag().load(Ordering::SeqCst) {
+            break; // 见 run_sampler：loop 顶复查停止标志，堵工作段落地的丢唤醒
+        }
         let mut notified = std::pin::pin!(stop_notify().notified());
         let _ = notified.as_mut().enable();
         tokio::select! {
@@ -287,6 +298,49 @@ async fn run_proc_meter() {
             Ok(snap) => proc::update(snap),
             Err(e) => eprintln!("atlas: proc 扫描任务失败，缓存冻结: {e}"),
         }
+        #[cfg(test)]
+        work_hook_wait().await;
+    }
+}
+
+/// 进程回路等待相位时长：恒为 [`PROC_SAMPLE_INTERVAL`]；测试缝（task-13）
+/// 允许把节拍压短以在秒级墙钟内证伪丢唤醒。
+fn proc_pause() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_PAUSE_MS.load(Ordering::SeqCst);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    PROC_SAMPLE_INTERVAL
+}
+
+/// 测试专用节拍压缩（task-13）：>0 = 以该毫秒数覆盖进程回路等待相位，
+/// 0 = 生产节拍。
+#[cfg(test)]
+static TEST_PAUSE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 测试专用慢工作段（task-13）：装载后首个业务工作轮先向测试报
+/// `entered`、再等 release 放行——令 stop() 恰好落在工作段中段。一次性，取走即失效。
+#[cfg(test)]
+static WORK_HOOK: Mutex<
+    Option<(
+        tokio::sync::mpsc::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+> = Mutex::new(None);
+
+/// 工作段停驻点（task-13）：见 [`WORK_HOOK`]。未装载 = 空操作。
+#[cfg(test)]
+async fn work_hook_wait() {
+    let hook = WORK_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some((tx, release)) = hook {
+        let _ = tx.send(()).await;
+        let _ = release.await;
     }
 }
 
@@ -521,6 +575,45 @@ mod tests {
         assert!(
             matches!(&next, Some(v) if v.len() == 1 && v[0].kind == "mem"),
             "故障轮之后的正常轮必须照常产出"
+        );
+    }
+
+    /// 丢唤醒锁（bug F8）：stop 落在**工作段中段**时，唤醒通道尚无已注册
+    /// 等待者、`notify_waiters` 空转——回路必须靠 loop 顶部的停止复查在回到
+    /// 顶部那一轮立即退出，而非睡满整拍节拍。测试跑真 [`run_proc_meter`]：
+    /// 节拍经 [`TEST_PAUSE_MS`] 压到 5s（丢唤醒的代价即整拍），工作段经
+    /// [`WORK_HOOK`] 设一次性停驻；报入 → stop → 放行，回路须在 1s（远短于
+    /// 节拍）内收尾。全程信号同步，无墙钟猜测睡眠。
+    #[tokio::test]
+    async fn stops_mid_work_segment() {
+        use tokio::sync::{mpsc, oneshot};
+        stop_flag().store(false, Ordering::SeqCst);
+        TEST_PAUSE_MS.store(5_000, Ordering::SeqCst);
+        let (entered_tx, mut entered_rx) = mpsc::channel::<()>(1);
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        *WORK_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some((entered_tx, release_rx));
+        let h = tokio::spawn(run_proc_meter());
+        // When: drive the loop into its first work segment, stop mid-work
+        entered_rx
+            .recv()
+            .await
+            .expect("proc 回路首个工作轮必须执行并报入");
+        let t0 = Instant::now();
+        Operator::stop(); // 此刻 select 未注册（工作段中），notify_waiters 无人可唤
+        let _ = release_tx.send(()); // 放行工作段，回路回到 loop 顶部
+        let settled = tokio::time::timeout(Duration::from_millis(1_000), h).await;
+        let elapsed = t0.elapsed();
+        // 拆除测试缝，勿把全局态漏给并发用例
+        TEST_PAUSE_MS.store(0, Ordering::SeqCst);
+        stop_flag().store(false, Ordering::SeqCst);
+        // Then: 未等满 5s 节拍即退出
+        assert!(
+            matches!(settled, Ok(Ok(()))),
+            "stop 落工作段后回路须在 1s 内退出而非等满 5s 节拍（未退出或任务异常）"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "退出墙钟应远短于节拍，实际 {elapsed:?}"
         );
     }
 
