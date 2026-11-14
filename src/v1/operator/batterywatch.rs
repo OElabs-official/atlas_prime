@@ -7,12 +7,15 @@
 //! *静默*重武装（充电态本身即“已处理”，本轮不发任何恢复通知，与 memwatch 的
 //! “恢复”通知不同）；[`LOW_PCT`]..[`REARM_PCT`] 死区内状态不变。全程不震动。
 //!
-//! [`policy`] 是操作器每轮落库后调用的政策入口：从本轮存储行提取 battery/pct 与
-//! battery/plugged 读数（collect 把 plugged 存为 0/1 标记，**非零 = 在充电**，
-//! 含 AC/USB/无线模式）→ 状态机求值 → 事件以固定 [`BATT_NOTIFY_ID`] 经注入的
-//! [`Sender`] 出站（生产 = `notify::notify`，测试 = 记录器）；任一读数缺失的
-//! 轮次一律 no-op（不猜测）。发送失败仅单行中文 stderr——出站是政策的最末梢，
-//! 采样轮永不受扰。
+//! [`policy`] 是操作器每轮落库后调用的政策入口：从本轮存储行提取 battery/pct、
+//! battery/plugged 与 battery/present 读数（collect 把 plugged/present 存为 0/1
+//! 标记，**plugged 非零 = 在充电**，含 AC/USB/无线模式）→ **先过在位门**：
+//! present ≠ 真的轮次整轮 no-op——CLI 失败轮的 `Battery::default()` 会把
+//! pct/plugged 一并清零，只有 present 是可信的失败判据（见 system/battery.rs），
+//! 不过这道门假 0% 会伪造一次充电告警 → 状态机求值 → 事件以固定
+//! [`BATT_NOTIFY_ID`] 经注入的 [`Sender`] 出站（生产 = `notify::notify`，
+//! 测试 = 记录器）；任一读数缺失的轮次一律 no-op（不猜测）。发送失败仅单行
+//! 中文 stderr——出站是政策的最末梢，采样轮永不受扰。
 
 use std::sync::{Mutex, OnceLock};
 
@@ -85,21 +88,29 @@ fn batt_watch() -> &'static Mutex<BatteryWatch> {
     S.get_or_init(|| Mutex::new(BatteryWatch::new()))
 }
 
-/// 落库后的政策入口：从本轮存储行取 battery/pct 与 battery/plugged 读数
-/// （collect 存法：plugged 非零 = 在充电；缺任一读数 = 不猜测、整轮 no-op）→
-/// [`BatteryWatch`] 边沿求值 → 事件经 `send` 以 [`BATT_NOTIFY_ID`] 出站，不震动。
-/// 出站失败仅单行中文 stderr，采样轮永不受扰。
+/// 落库后的政策入口：从本轮存储行取 battery/pct、battery/plugged 与
+/// battery/present 读数（collect 存法：plugged/present 非零为真；缺任一读数 =
+/// 不猜测、整轮 no-op）→ **在位门先于 plugged 门**：`present != Some(true)`
+/// （含 present 行缺席）直接返回——CLI 失败轮的 `Battery::default()` 清零
+/// pct/plugged，只有 present 可信（system/battery.rs），不过门则假 0% 伪造告警
+/// → [`BatteryWatch`] 边沿求值 → 事件经 `send` 以 [`BATT_NOTIFY_ID`] 出站，
+/// 不震动。出站失败仅单行中文 stderr，采样轮永不受扰。
 pub fn policy(records: &[Record], send: Sender) {
     let mut pct = None;
     let mut plugged = None;
+    let mut present = None;
     for r in records {
         if r.kind == "battery" {
             match r.key.as_str() {
                 "pct" => pct = Some(r.value),
                 "plugged" => plugged = Some(r.value != 0.0),
+                "present" => present = Some(r.value != 0.0),
                 _ => {}
             }
         }
+    }
+    if present != Some(true) {
+        return; // 在位性未证实（假/缺行）：整轮 no-op，先于 plugged 门
     }
     let Some(plugged) = plugged else { return };
     let Some(alert) = batt_watch()
@@ -215,13 +226,24 @@ mod tests {
         assert_eq!(fired, 1, "49.5..54.5 抖动只应触发一次，实际 {fired}");
     }
 
+    /// 串行化锁：[`policy`] 驱动进程级静态状态机 [`batt_watch`]，所有政策级测试
+    /// 必须持锁串行执行，并在各自开头 [`reset_watch`] 取得干净的闭锁态。
+    static POLICY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 测试复位：把进程级状态机恢复为未闭锁（仅测试用；生产无复位路径）。
+    fn reset_watch() {
+        *batt_watch().lock().unwrap_or_else(|e| e.into_inner()) = BatteryWatch::new();
+    }
+
     /// 端到端（注入发送器，不触真实 CLI）：假 battery 存储行驱动落库后的完整政策
     /// 路径——跌破发一条（固定 id + 固定标题 + 含读数正文）；低迷、缺 plugged 键、
     /// 缺 pct 键一律静默；插电静默重武装后可再触发；坏发送器只损失一行 stderr，
-    /// 状态机不被打坏、轮次照常。本测试是 [`batt_watch`] 静态态的唯一驱动者，
-    /// 序列自洽与调度无关。
+    /// 状态机不被打坏、轮次照常。政策级测试经 [`POLICY_TEST_LOCK`] 串行驱动
+    /// [`batt_watch`] 静态态，序列自洽与调度无关。
     #[test]
     fn policy_sends_edges_via_injected_sender() {
+        let _serial = POLICY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_watch();
         static SENT: OnceLock<Mutex<Vec<(String, String, String)>>> = OnceLock::new();
         fn sent_log() -> Vec<(String, String, String)> {
             SENT.get_or_init(|| Mutex::new(Vec::new()))
@@ -243,6 +265,7 @@ mod tests {
             vec![
                 rec("battery", "pct", pct),
                 rec("battery", "plugged", plugged),
+                rec("battery", "present", 1.0),
             ]
         };
 
@@ -250,8 +273,8 @@ mod tests {
         assert_eq!(sent_log().len(), 1);
 
         policy(&round(40.0, 0.0), rec3); // 持续低迷 → 闭锁静默
-        policy(&[rec("battery", "pct", 40.0)], rec3); // 缺 plugged 键 → no-op
-        policy(&[rec("battery", "plugged", 0.0)], rec3); // 缺 pct 键 → no-op
+        policy(&[rec("battery", "pct", 40.0), rec("battery", "present", 1.0)], rec3); // 缺 plugged 键 → no-op
+        policy(&[rec("battery", "plugged", 0.0), rec("battery", "present", 1.0)], rec3); // 缺 pct 键 → no-op
         policy(&[], rec3); // 空轮 → no-op
         assert_eq!(sent_log().len(), 1, "低迷/缺读数不得重发");
 
@@ -270,5 +293,65 @@ mod tests {
         assert_eq!(sent[0].1, "ATLAS · 充电提醒");
         assert!(sent[0].2.contains("44"), "正文应含读数：{}", sent[0].2);
         assert!(sent[1].2.contains("40"), "正文应含读数：{}", sent[1].2);
+    }
+
+    /// CLI 失败轮零通知：`Battery::default()`（CLI 缺失/失败的唯一出口，
+    /// `present == false` 是唯一可信判据，见 system/battery.rs）落库后本轮行为
+    /// pct=0 / plugged=0 / present=0——未充电 + 假 0% 若不看在位性就会伪造一次
+    /// 充电告警。在位门必须让整轮 no-op，且不得污染状态机：恢复在位后的首个
+    /// 真跌破轮照常触发。
+    #[test]
+    fn cli_failure_round_is_noop() {
+        let _serial = POLICY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_watch();
+        static SENT: OnceLock<Mutex<usize>> = OnceLock::new();
+        fn cnt(_: &str, _: &str, _: &str) -> Result<(), NotifyError> {
+            *SENT.get_or_init(|| Mutex::new(0)).lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            Ok(())
+        }
+        fn sent() -> usize {
+            *SENT.get_or_init(|| Mutex::new(0)).lock().unwrap_or_else(|e| e.into_inner())
+        }
+        // Battery::default() 轮的落库行形：present=0，pct/plugged 一并清零
+        let cli_fail = vec![
+            rec("battery", "pct", 0.0),
+            rec("battery", "plugged", 0.0),
+            rec("battery", "present", 0.0),
+        ];
+        policy(&cli_fail, cnt);
+        policy(&cli_fail, cnt); // 连续失败轮也不得重发
+        assert_eq!(sent(), 0, "present=0 的 CLI 失败轮不得发出任何通知");
+
+        // 在位门不得悄悄改动闭锁态：恢复在位后首个跌破轮 = 新下降沿
+        policy(
+            &[
+                rec("battery", "pct", 44.0),
+                rec("battery", "plugged", 0.0),
+                rec("battery", "present", 1.0),
+            ],
+            cnt,
+        );
+        assert_eq!(sent(), 1, "present 恢复后新下降沿应恰触发一次");
+    }
+
+    /// 缺 present 行的轮次一律 no-op（不猜测语义与缺 pct/plugged 同构：present
+    /// 读数缺席 ⇒ 在位性不可证，整轮跳过；collect 正常轮恒带 present 行）。
+    #[test]
+    fn absent_present_row_is_noop() {
+        let _serial = POLICY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_watch();
+        static SENT: OnceLock<Mutex<usize>> = OnceLock::new();
+        fn cnt(_: &str, _: &str, _: &str) -> Result<(), NotifyError> {
+            *SENT.get_or_init(|| Mutex::new(0)).lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            Ok(())
+        }
+        fn sent() -> usize {
+            *SENT.get_or_init(|| Mutex::new(0)).lock().unwrap_or_else(|e| e.into_inner())
+        }
+        policy(
+            &[rec("battery", "pct", 44.0), rec("battery", "plugged", 0.0)],
+            cnt,
+        );
+        assert_eq!(sent(), 0, "缺 present 行必须整轮 no-op，不得伪造告警");
     }
 }
