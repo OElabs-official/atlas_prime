@@ -375,13 +375,13 @@ fn collect() -> Vec<Record> {
         let b = battery::Battery::get();
         push("battery", "pct".into(), b.percentage as f64);
         push("battery", "volt_mv".into(), b.voltage as f64);
-        push("battery", "current_ma".into(), b.current as f64);
+        push("battery", "current_ua".into(), b.current as f64); // CLI 值为 µA（负=放电）
         // 沿用 CLI 温度源；迁移 thermal::Temp.battery 属 system 侧改造，不在操作器内进行
         #[expect(
             deprecated,
             reason = "Battery::temperature 已弃用但迁移属 system 侧范围"
         )]
-        push("battery", "temp_c".into(), b.temperature / 10.0); // CLI 值为 0.1℃ 单位
+        push("battery", "temp_c".into(), b.temperature); // CLI 值已是 °C，原样入库
         push("battery", "cycle".into(), b.cycle as f64);
         push(
             "battery",

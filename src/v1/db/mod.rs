@@ -18,7 +18,7 @@
 //! - `ts` = RFC3339（秒精度、UTC，如 `2023-11-14T22:13:20Z`），由操作器采集时打戳；
 //! - `cpu_freq` key=`cpu{i}`（GHz）；`temp` key=`{类别}.{i}`（℃，类别=cpu_core/gpu/camera/pmic/battery）；
 //! - `mem` key=total/used/avail、`swap` key=total/used（MB）；
-//! - `battery` key=pct/volt_mv/current_ma/temp_c/cycle/plugged/present；
+//! - `battery` key=pct/volt_mv/current_ua/temp_c/cycle/plugged/present；
 //! - `disk` key=`{挂载点}|used` / `{挂载点}|total`（MB）。
 //!
 //! 滚动上限按 **kind 分档**（轮粒度：一轮 = 同一 ts 的全部样本行；RFC3339 统一

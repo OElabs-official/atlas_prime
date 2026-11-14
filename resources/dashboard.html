@@ -2516,7 +2516,7 @@ async function seedHistory() {
   const msOf = r => (r && typeof r.t === "string" && typeof r.v === "number" && Number.isFinite(r.v)) ? Date.parse(r.t) : NaN;
   const asc = m => Array.from(m.keys()).sort((a, b) => a - b);
 
-  // ① BATTERY：按 t 分组取 pct + (volt_mv,current_ma)；current_ma 键名误导 = 实际微安
+  // ① BATTERY：按 t 分组取 pct + (volt_mv,current_ua)；current_ua = 微安
   //   （负=放电），pow(W) = (volt_mv/1000) × (current/1e6)；缺 pct 的轮次跳过
   const bg = new Map();
   for (const r of arr(battRows)) {
@@ -2524,7 +2524,7 @@ async function seedHistory() {
     let g = bg.get(ms); if (!g) bg.set(ms, g = {});
     if (r.k === "pct") g.pct = r.v;
     else if (r.k === "volt_mv") g.vm = r.v;
-    else if (r.k === "current_ma") g.ua = r.v;
+    else if (r.k === "current_ua") g.ua = r.v;
   }
   for (const t of asc(bg)) {                           // t 此处已是毫秒时刻
     const g = bg.get(t);
