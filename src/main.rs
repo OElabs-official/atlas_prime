@@ -159,8 +159,24 @@ fn main() {
     // 3. Web API：后台线程内建 ntex System（句柄保活至进程结束）；
     // 监听地址 = --host > ATLAS_BIND > 默认 127.0.0.1:1025（loopback），见 resolve_bind
     let bind = resolve_bind(cli.host.as_deref(), env::var("ATLAS_BIND").ok().as_deref());
-    let _web = Web::spawn(bind.clone());
-    eprintln!("[atlas] api listening on http://{bind}");
+    let web = Web::spawn(bind.clone());
+    // 启动探针（GAP-8）：web 线程仅在解析/绑定失败时提前结束（监听期 run() 永不
+    // 返回），≤500ms 轮询取回真实结果后才打印——不再有无条件 'listening' 谎报。
+    // 绑定失败 → 明确报错 + exit 1：监控守护进程的端口已被他实例占据，本实例
+    // 无从履职，退出让监督器/运维看到清晰失败，好于僵尸空转（选择：exit-on-failure）。
+    let _web = match Web::probe_bind(web, Duration::from_millis(500)) {
+        Ok(live) => {
+            eprintln!("[atlas] api listening on http://{bind}");
+            live
+        }
+        Err(e) => {
+            eprintln!("[atlas] api FAILED to bind: {e}");
+            // exit 不走第 5 步收尾：手动停采样器 + 收净 autostart 任务（同形状），不留孤儿
+            Operator::stop();
+            Task::shutdown_all(Duration::from_secs(5));
+            std::process::exit(1);
+        }
+    };
 
     // 4. 阻塞至 Ctrl+C 或 SIGTERM（自带最小 runtime，不污染 v1 各域）
     let rt = tokio::runtime::Builder::new_current_thread()
