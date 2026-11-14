@@ -850,6 +850,14 @@ mod tests {
     #[tokio::test]
     async fn stops_mid_work_segment() {
         use tokio::sync::{mpsc, oneshot};
+        // w3-gate [18]：本用例复位全局 stop 标志并调用 Operator::stop()（W3 起
+        // 认领 settle 槽 + bounded join），与持锁的 stop_* 系列并行即互相串扰
+        // （标志被对方清零 → wedge 用例的 detached 线程永不收尾）。共锁串行化；
+        // guard 跨 await 安全：本 runtime 内只等待自发任务的通道/句柄，持锁方
+        // 均不同步等待本 runtime（std::sync::Mutex 仅约束跨线程串行）。
+        let _g = operator_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         stop_flag().store(false, Ordering::SeqCst);
         TEST_PAUSE_MS.store(5_000, Ordering::SeqCst);
         let (entered_tx, mut entered_rx) = mpsc::channel::<()>(1);
