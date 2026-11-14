@@ -290,11 +290,10 @@ impl TuiInput {
     /// 有界队列（[`PTY_INPUT_QUEUE`]）满时丢最旧不如丢最新——本帧直接丢弃,
     /// 与 task 域「队满立即背压」同语义（本路径无错误回通道，回 WS 即丢包）。
     fn send(&self, bytes: Vec<u8>) {
-        if let Err(e) = self.in_tx.try_send(bytes) {
-            if matches!(e, TrySendError::Full(_)) {
+        if let Err(e) = self.in_tx.try_send(bytes)
+            && matches!(e, TrySendError::Full(_)) {
                 eprintln!("atlas: tui 入向队列满（{PTY_INPUT_QUEUE} 帧），丢弃一帧");
             }
-        }
     }
 
     /// 改 PTY 尺寸（行列）。多窗口共享同一 PTY，后到的 resize 覆盖先到的。

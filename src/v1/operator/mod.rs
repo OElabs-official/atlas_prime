@@ -930,6 +930,7 @@ mod tests {
     /// [`WORK_HOOK`] 设一次性停驻；报入 → stop → 放行，回路须在 1s（远短于
     /// 节拍）内收尾。全程信号同步，无墙钟猜测睡眠。
     #[tokio::test]
+    #[expect(clippy::await_holding_lock, reason = "guard serializes test threads; awaits only target self-spawned tasks (comment above)")]
     async fn stops_mid_work_segment() {
         use tokio::sync::{mpsc, oneshot};
         // w3-gate [18]：本用例复位全局 stop 标志并调用 Operator::stop()（W3 起

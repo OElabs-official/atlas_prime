@@ -1092,7 +1092,7 @@ mod tests {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .filter(|(id, _)| !owned.iter().any(|o| *o == id.as_str()))
+                .filter(|(id, _)| !owned.contains(&id.as_str()))
                 .map(|(_, slot)| slot.desc.clone())
                 .collect();
             fs::write(self.spec_path(), serde_json::to_string(&foreign).unwrap()).unwrap();
@@ -1359,7 +1359,7 @@ mod tests {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .keys()
-                .all(|k| owned.iter().any(|o| *o == k.as_str()));
+                .all(|k| owned.contains(&k.as_str()));
             if quiet {
                 return;
             }
