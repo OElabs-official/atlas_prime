@@ -24,7 +24,8 @@
 //!   [`TuiError::UnknownTask`]，不占槽）→ 占槽 → 开 PTY（请求尺寸）→ 在 PTY 里
 //!   spawn **该任务描述符的命令**（[`task_cmd`]，与监督守护实例同一构造语义；
 //!   TERM=xterm-256color + COLORTERM=truecolor 先注入、spec envs 可覆盖；
-//!   cwd = desc.cwd → $HOME → /）→ 入册 → 拉起 pump 线程 → 订阅。Attach 意图——
+//!   cwd = desc.cwd → $HOME → /）→ 入册 → 订阅 → 拉起 pump 线程（F6：订阅先行，
+//!   快速退出的子进程 exit 广播必有落点）。Attach 意图——
 //!   查册（会话已消失 → [`TuiError::UnknownTask`]）→ 订阅。**回放快照与订阅注册
 //!   同一临界区**（不重帧不漏帧）；
 //! - 事件 [`TuiEvent::Exit`] = 子进程退出码（None = 拿不到）。
@@ -540,8 +541,9 @@ fn subscribe(core: &Arc<SessionCore>) -> (SessionRef, ReplayBuf, Receiver<TuiEve
 }
 
 /// Spawn 意图主路径：已有会话 → 降级 attach（attach 不占槽）；没有 → 查描述符
-/// （查不到 → UnknownTask，**不占槽**）→ 占槽开 PTY → 入册 → 起 pump 线程 →
-/// 订阅。并发双 spawn（同任务两窗口同时点按钮）由入册时的二次查册裁决，
+/// （查不到 → UnknownTask，**不占槽**）→ 占槽开 PTY → 入册 → 订阅 → 起 pump
+/// 线程（订阅先行，F6：pump 先起会让快速退出的 Exit 广播落空）。
+/// 并发双 spawn（同任务两窗口同时点按钮）由入册时的二次查册裁决，
 /// 输家 guard 就地 drop = 新子进程即杀、槽位即还。
 fn spawn_or_attach(
     task_id: &str,
@@ -580,16 +582,22 @@ fn spawn_or_attach(
         led.insert(task_id.to_owned(), rec);
     }
 
+    // F6：订阅先于 pump 拉起。open_desc 返回时子进程可能已退出；若 pump 先起、
+    // 订阅后补，exit 广播打在空 subs 表上，Exit 就此蒸发（订阅者永挂）。
+    // 泵未起时 outbox 已缓冲全部输出，起泵后经订阅端原样送达——不重不漏。
+    let sub = subscribe(&core);
+
     let pump_core = Arc::clone(&core);
     let pump_task = task_id.to_owned();
     match thread::Builder::new()
         .name(format!("tui-pump-{}", pump_core.sid))
         .spawn(move || pump_loop(pump_core.sid, pump_task, pump_core, outbox_rx))
     {
-        Ok(_) => Ok(subscribe(&core)),
+        Ok(_) => Ok(sub),
         Err(e) => {
             let msg = format!("{e:?}");
             eprintln!("atlas: tui 任务 {task_id} pump 线程起步失败: {msg}");
+            drop(sub); // 早订阅就地作废：detach 幂等，subs/attached 同步归还
             let victim = sessions()
                 .lock()
                 .unwrap_or_else(|er| er.into_inner())
@@ -926,10 +934,13 @@ impl OutboxRx {
 mod tests {
     use super::*;
 
-    /// 触碰 LIVE / 会话册的用例串行化（共享静态，慢 ARM 上时序敏感）。
+    /// 触碰 LIVE / 会话册的用例串行化（共享静态，慢 ARM 上时序敏感）。锁本体在
+    /// task 域（`super::ledger_test_lock`）：task 侧驱动 `Task::update` 的规格对账
+    /// 用例同样持它——`update()` 末段的 `tui::prune_missing` 会把兄弟用例在册的
+    /// 活 PTY 会话 guard-drop 击杀（信号死亡经 xpty 记为 exit_code=1，负载下
+    /// 表现为本用例偶发「exit 1」而非 7）。
     fn ledger_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: Mutex<()> = Mutex::new(());
-        L.lock().unwrap_or_else(|e| e.into_inner())
+        super::super::ledger_test_lock()
     }
 
     // ---- 无 PTY 的册条目夹具（真 guard 需真子进程，纯结构测试用假句柄） ----
@@ -1199,5 +1210,86 @@ mod tests {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove("tui_live1");
+    }
+
+    // ---- F6：快速退出竞态（订阅必须先于 pump 拉起） ----
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_never_evaporates() {
+        let _g = ledger_lock();
+        let d = TaskDescriptor {
+            id: "tui_race1".into(),
+            name: "race".into(),
+            command: "sh".into(),
+            args: vec!["-c".into(), "exit 7".into()],
+            cwd: None,
+            envs: None,
+            autostart: false,
+            group: "test".into(),
+            log_limit: Some(64),
+            restart_policy: Some(super::super::RestartPolicy::Never),
+            stop_grace_ms: Some(500),
+        };
+        super::super::reg()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("tui_race1".into(), super::super::Slot::new(d));
+
+        let live0 = LIVE.load(Ordering::Relaxed);
+        for i in 0..20 {
+            let (sref, _replay, mut rx) =
+                attach_or_spawn("tui_race1", TokenKind::Spawn, 80, 24).expect("spawn 必须成功");
+            // 订阅若先于 pump 建立，exit 广播必有落点：Exit 必达（Bytes 忽略）。
+            let mut got: Option<Option<i32>> = None;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while got.is_none() && Instant::now() < deadline {
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(TuiEvent::Exit(code)) => got = Some(code),
+                    Ok(TuiEvent::Bytes(_)) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(_) => {} // 超时：交给循环条件裁决
+                }
+            }
+            assert_eq!(got, Some(Some(7)), "第 {i} 轮：快速退出的 Exit 蒸发（竞态）");
+            // 收尾等摘册：pump 广播 exit 后才摘册；在册时下一轮会降级 attach
+            // 到垂死会话，必须等它真正回收再开下一轮。
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while session_snapshot().iter().any(|(id, _)| id == "tui_race1")
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            drop(sref);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while LIVE.load(Ordering::Relaxed) != live0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(LIVE.load(Ordering::Relaxed), live0, "20 轮回收后槽位必须归零");
+        super::super::reg()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove("tui_race1");
+    }
+
+    #[test]
+    fn early_subscribe_drop_is_clean() {
+        let _g = ledger_lock();
+        let live0 = LIVE.load(Ordering::Relaxed);
+        inject_fake_session("race_early");
+        let core = session_core("race_early").expect("夹具会话在册");
+        let att0 = core.attached.load(Ordering::Relaxed);
+        // 订阅后立即退订（对应 pump 起步失败路径：早订阅的句柄被就地 drop）：
+        // 不 panic、不漏 attached 计数、双退订幂等。
+        let (sref, replay, _rx) = subscribe(&core);
+        assert!(replay.is_empty(), "空环回放为空");
+        assert_eq!(core.attached.load(Ordering::Relaxed), att0 + 1);
+        sref.detach();
+        sref.detach(); // 幂等：重复退订只减一次
+        drop(sref); // Drop 再触发 detach，仍幂等
+        assert_eq!(core.attached.load(Ordering::Relaxed), att0);
+        assert!(kill("race_early"));
+        assert_eq!(LIVE.load(Ordering::Relaxed), live0, "假会话回收后槽位归还");
     }
 }

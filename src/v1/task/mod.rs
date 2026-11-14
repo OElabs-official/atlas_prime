@@ -803,6 +803,16 @@ fn load_descs() -> Vec<TaskDescriptor> {
 
 // ---------------- 测试 ----------------
 
+/// 用例级**会话册串行锁**（域内共享）：tui.rs 的册用例与本域驱动 `Task::update`
+/// 的规格对账用例共持——`update()` 末段的 `tui::prune_missing` 是册副作用，会把
+/// 兄弟用例在册的活 PTY 会话 guard-drop 击杀（xpty 把信号死亡记成 exit_code=1，
+/// 负载下表现为偶发「exit 1」）。锁序全局一致：本锁 → spec 锁 → reg → 册锁。
+#[cfg(test)]
+pub(crate) fn ledger_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: Mutex<()> = Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
