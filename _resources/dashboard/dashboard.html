@@ -863,10 +863,6 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   animation:chartloadSlide 1.4s ease-in-out infinite alternate}
 @keyframes chartloadSlide{from{left:-36%}to{left:100%}}
 @media(prefers-reduced-motion:reduce){.chartload i{animation:none;left:32%}}
-/* 临时诊断标签（seed 探针）：图上右上角直书，免 toast 堆叠 */
-.seedtag{position:absolute;top:2px;right:4px;z-index:4;font:500 9px/1.2 system-ui,sans-serif;
-  color:var(--label-2,var(--md-sys-color-on-surface-variant,#888));opacity:.9;pointer-events:none;
-  background:color-mix(in srgb,var(--a-cpu) 8%,transparent);padding:1px 4px;border-radius:3px}
 </style>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
 
@@ -1013,7 +1009,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.31 -->
+    <!-- rev 2026-11-25.32 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3413,27 +3409,8 @@ function seedGate(key, label, hostSel, work, onOk) {
   };
   p.then(st => {
     if (bar) bar.remove();
-    // 临时诊断（rev .23 probe，.24 改图上直书）：标签常驻该图右上角，刷新前一直可读
-    if (host) {
-      let txt;
-      if (st === "ok") {
-        try { onOk(); } catch { /* 容忍：等首个 live tick 重绘 */ }
-        try {
-          const b = { freq: H.freq, hot: H.hot, mem: H.mem, batt: HB }[key];
-          txt = "历史 " + b.win(300000, 1510).length + "/" + b.win(3600000, 1510).length + "/" + b.win(86400000, 1510).length;
-        } catch { txt = "hist?"; }
-      } else txt = st === "timeout" ? "历史超时" : "历史不可用";
-      const tag = el("span", "seedtag", txt);
-      host.appendChild(tag);
-    }
-    if (st !== "ok") toast(label + " 历史" + (st === "timeout" ? "加载超时（>10s）" : "不可用") + "，折线从实时开始", "err");
-    // 临时诊断：全局可查快照（控制台 window.DBG()）
-    window.DBG = () => ({ seeds: Object.assign({}, SEEDK), winIx: chartWinIx,
-      pts: { freq: [H.freq.win(300000,1510).length, H.freq.win(3600000,1510).length, H.freq.win(86400000,1510).length],
-             hot:   [H.hot.win(300000,1510).length,  H.hot.win(3600000,1510).length,  H.hot.win(86400000,1510).length],
-             mem:   [H.mem.win(300000,1510).length,  H.mem.win(3600000,1510).length,  H.mem.win(86400000,1510).length],
-             gpu:   [H.gpu.win(300000,1510).length,  H.gpu.win(3600000,1510).length,  H.gpu.win(86400000,1510).length],
-             batt:  [HB.win(300000,1510).length,     HB.win(3600000,1510).length,     HB.win(259200000,1510).length] } });
+    if (st === "ok") { try { onOk(); } catch { /* 容忍：等首个 live tick 重绘 */ } }
+    else toast(label + " 历史" + (st === "timeout" ? "加载超时（>10s）" : "不可用") + "，折线从实时开始", "err");
   });
   return p;
 }
