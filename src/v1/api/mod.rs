@@ -54,7 +54,7 @@
 //!   幂等 `{"killed":bool}`）/ `GET /tui/sessions`（`{"sessions":[{"id","attached"}]}`）
 //!   ——本域只管传输（[`tui`]），会话核心（PTY/子进程/槽位/会话册/回放环）在
 //!   **task 域**（`task::tui`），不限流（WS 长连接）；
-//! - `GET /vendor/{name}` → 内嵌前端资产（xterm 五件白名单名，`include_bytes!` 随二进制
+//! - `GET /vendor/{name}` → 内嵌前端资产（d3 + xterm 六件白名单名，`include_bytes!` 随二进制
 //!   发布），响应带 `cache-control: public, max-age=86400`（24h），其余名字 404 JSON；
 //! - CORS 全放开（本地工具 API）；task / 静态路由不设限（写操作语义，重复提交自有幂等错误）。
 //!

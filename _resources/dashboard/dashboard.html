@@ -11,8 +11,19 @@
   设计血统：dashboard_4.html（M3 重构版）的同族兄弟 —— 令牌层 --md-sys-*
   数值契约逐字沿用（形状 §8 / 间距 §9 / 状态层 §11 / 动效 §10 / 字阶 §6.2 /
   elevation §7；布局 = 每行一张卡，全断点单列），卡片家族三件套 --a-*/--ac-*/--aoc-* 与毛玻璃
-  配方同源；组件以纯 CSS 复刻（无 @material/web 运行时、零外部资源）。
-  图标 = 内联 SVG（本文件独立服务，不引外部图标字体）。
+   配方同源；组件以纯 CSS 复刻（无 @material/web 运行时、零外网资源——折线/柱状
+   所需 d3.min.js 走同源 /vendor/，无 CDN）。
+   图标 = 内联 SVG（本文件独立服务，不引外部图标字体）。
+   折线/柱状 = D3 SVG（同源 d3.min.js），样式走 charts.css 同款 MD3 图表纪律：网格 =
+   outline-variant 1dp 无轴线、刻度/标签 = on-surface-variant @ label-small 11px 地板、
+    柱轨道/条纹 = surface-container、动效走 --md-sys-motion-* 令牌；多序列图色序按
+    primary→tertiary→secondary→error 角色（序列主色 = 该卡 --a-* 家族主色，其已映射 M3 角色）。
+    折线渐变面积 = charts.js §2 纪律：defs linearGradient 纵向、stop-color=系列色运行时解析值
+    （明暗自动换色）、stop-opacity 28%→0（第二序列 18% 防双面积糊底）；实色序列面积
+    curveMonotoneX 与线同滑，逐段归因序列直连 + 卡族主色单渐变（归因语义优先）。
+    STORAGE 用量条 = wavy 进度（md-wavy-linear determinate 适配：sin 波形 path JS 程序化
+    生成 λ=12/A=1.6，观察窗 clip 宽=使用%、右槽空轨 surface-container，平移循环走
+    --md-sys-motion-duration-extra-long4 + linear，reduced-motion 通配压平）。
   数据面 = 本服务器封闭 API（同源、无鉴权、CORS 全开）：
     GET  /system/cpu            {"freq_ghz":[f32..]}
     GET  /system/thermal        {cpu_core:[[°C,type],..],cpu_cluster,gpu,dsp,
@@ -58,7 +69,8 @@
                                    向全部镜像窗口广播 exit 帧再 Close）
     GET  /tui/sessions           → {"sessions":[{"id":"<任务id>","attached":N}]}（仅活会话；
                                    tickTasks 并采 → tuiIds，驱动药丸叠加 + 按钮矩阵 + 停止键）
-     GET  /vendor/*              同源静态资源：xterm.css / xterm.js /
+     GET  /vendor/*              同源静态资源：d3.min.js（v7，折线/柱状 SVG 渲染层）/
+                                  xterm.css / xterm.js /
                                   addon-unicode-graphemes.js / addon-fit.js /
                                     addon-webgl.js（UMD 全局；CONSOLE 卡 = xterm.js
                                      交互式 PTY 终端，会话持久化：进程生命周期 = 服务端会话、
@@ -87,7 +99,7 @@
     页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
    失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
    30s 节流一条；明暗主题跟随 OS（prefers-color-scheme，无手动开关，matchMedia
-   翻转时画布配色热重解析）；绝不产生未捕获拒绝。
+   翻转时图表配色热重解析——canvas 环 + D3 SVG 折线/柱状一并重画）；绝不产生未捕获拒绝。
 作业抽屉（蓝图 ex2_v2 bottom-sheet 把手模式）：TASKS / CONSOLE 两卡移出 grid，
      入固定底抽屉 #jobs（surface-container-low 停靠面 + 顶缘 corner-extra-large 圆角
      + §3.29 handle 32×4@40%）；两档 closed 仅露 56px 把手（--jh ResizeObserver 实测、
@@ -131,6 +143,7 @@
   --md-sys-motion-duration-long1:450ms;   --md-sys-motion-duration-long2:500ms;
   --md-sys-motion-duration-extra-long4:1000ms;
   --md-sys-motion-easing-standard:cubic-bezier(0.2,0,0,1);
+  --md-sys-motion-easing-emphasized:cubic-bezier(0.2,0,0,1);   /* 本轮补定义（charts.md 惯例值；修 .bg-mesh 静默回退） */
   --md-sys-motion-easing-standard-decelerate:cubic-bezier(0,0,0,1);
   --md-sys-motion-easing-emphasized-decelerate:cubic-bezier(0.05,0.7,0.1,1);
   --md-sys-motion-easing-linear:cubic-bezier(0,0,1,1);
@@ -191,7 +204,9 @@
   --a-proc:#D1E1FF; --ac-proc:#0842A0; --aoc-proc:#D3E3FD;
   --a-sens:#CAC4D0; --ac-sens:#2B2930; --aoc-sens:#CAC4D0;
 
-  --d4-pgrid:#49454F; --d4-plabel:#938F99; --d4-pcross:#CAC4D0;
+  /* 图表网格/刻度 = M3 角色令牌重定向（charts.css 纪律：网格 outline-variant 1dp 无轴线、
+     刻度 on-surface-variant）；cacheColors 对 var() 做一级解析取回 hex */
+  --d4-pgrid:var(--md-sys-color-outline-variant); --d4-plabel:var(--md-sys-color-on-surface-variant); --d4-pcross:#CAC4D0;
 
   --d4-blur:14px;
   --d4-glass-fill:color-mix(in srgb,var(--md-sys-color-surface-container) 58%,transparent);
@@ -240,7 +255,8 @@
   --a-proc:#6991D6; --ac-proc:#D3E3FD; --aoc-proc:#0842A0;
   --a-sens:#49454F; --ac-sens:#ECE6F0; --aoc-sens:#49454F;
 
-  --d4-pgrid:#CAC4D0; --d4-plabel:#79747E; --d4-pcross:#49454F;
+  /* 同上（亮色）：刻度由 #79747E（4.3:1 不达 AA）改指 on-surface-variant #49454F（≈8.5:1） */
+  --d4-pgrid:var(--md-sys-color-outline-variant); --d4-plabel:var(--md-sys-color-on-surface-variant); --d4-pcross:#49454F;
 
   --d4-blur:12px;
   --d4-glass-fill:color-mix(in srgb,var(--md-sys-color-surface-container-low) 80%,transparent);
@@ -401,27 +417,33 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .read .v s{text-decoration:none;font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant);margin-left:var(--md-sys-space25)}
 .read.hi .v{color:var(--acc)}
 
-/* 图表 */
+/* 图表（折线/柱状 = D3 SVG：.lh 宿主 div 内单张 svg，1:1 像素 viewBox 由 drawLines 每绘重建；
+   样式走 charts.css 同款 MD3 图表纪律：网格 = outline-variant 1dp 无轴线（y 取整 +.5 半像素
+   对齐），刻度/右缘标签 = on-surface-variant（经 --d4-pgrid/--d4-plabel 令牌重定向一处生效）、
+   字号地板 = label-small 11px；环形盘 canvas 不走本组规则——见 .gauge/.dg canvas） */
 .chartbox{position:relative;margin-top:var(--md-sys-space150)}
-.chartbox canvas{width:100%;height:100%;display:block}
+.chartbox .lh{width:100%;height:100%}
+.chartbox .lh svg{width:100%;height:100%;display:block}
+.plab{font-family:var(--d4-mono);font-size:11px}     /* 网格刻度 = label-small 地板 11px（原 canvas 11px mono） */
+.prlab{font-family:var(--d4-mono);font-size:11px}    /* 右缘对数刻度 = label-small 地板（本轮 10→11px） */
 .h96{height:96px}.h84{height:84px}
 
-/* 每核频率柱（同族 hues：base−20°..base+20° 均匀展开；峰值核亮帽高亮；读数在柱下方） */
-.cores{display:grid;grid-template-columns:repeat(8,1fr);gap:var(--md-sys-space50);height:92px;margin-top:var(--md-sys-space150)}
-.core{display:flex;flex-direction:column;gap:var(--md-sys-space25);min-width:0}
-.core .ctrack{position:relative;flex:1;background:var(--md-sys-color-surface-container);
-  border-radius:var(--md-sys-shape-corner-extra-small);overflow:hidden}
-.core .f{position:absolute;left:0;right:0;bottom:0;height:var(--h,0%);
-  background:linear-gradient(to top,var(--fc,var(--acc)),color-mix(in srgb,var(--fc,var(--acc)) 78%,#fff));
-  transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
-             filter var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard);
-  -webkit-mask-image:repeating-linear-gradient(to bottom,#000 0 4px,transparent 4px 6.5px);
-          mask-image:repeating-linear-gradient(to bottom,#000 0 4px,transparent 4px 6.5px)}
-.core .f::after{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:#fff;opacity:0;
-  transition:opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
-.core.pk .f{filter:brightness(1.32) saturate(1.1)}
-.core.pk .f::after{opacity:.85}
-.core .ghz{text-align:center;font-family:var(--d4-mono);font-variant-numeric:tabular-nums;
+/* 每核频率柱（D3 SVG：一卡一 svg、scaleBand 槽位；同族 hues：base−20°..base+20° 均匀展开；
+   峰值核亮帽高亮（.pk filter + 2px 白帽 rect，卡族表达保留）；读数行与 band 同网格对齐，
+   列宽/4dp 缝逐式相同。图表纪律：轨道/条纹 fill = surface-container（.ctrk/.tstrip），
+   柱圆角 rx = min(4, 带宽/2) = corner-extra-small 档，生长过渡走 motion 令牌（.cbar/.tbar2）） */
+.cores{display:grid;grid-template-rows:1fr auto;gap:var(--md-sys-space25);height:92px;margin-top:var(--md-sys-space150)}
+.cores .corebars{display:block;width:100%;height:100%;min-width:0;min-height:0}
+.corelabs{display:grid;gap:var(--md-sys-space50);min-width:0}
+.ctrk{fill:var(--md-sys-color-surface-container)}    /* 柱槽轨道（原 .ctrack 底色） */
+.cbar{transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
+                   y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
+                   filter var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+.cbar.pk{filter:brightness(1.32) saturate(1.1)}      /* 峰值核高亮（原 .core.pk .f） */
+.ccap{fill:#fff;opacity:0;transition:opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+.ccap.pk{opacity:.85}                                /* 峰值核白帽（原 .f::after） */
+.cglo{pointer-events:none}                           /* gloss 渐变层（白 22%→0，纯观感） */
+.corelabs .ghz{text-align:center;font-family:var(--d4-mono);font-variant-numeric:tabular-nums;
   font-size:11px;line-height:1.1;color:var(--md-sys-color-on-surface);white-space:nowrap;overflow:hidden}
 
 /* 热区分组竖条（与 CPU 柱同一视觉语言；分组块内部滚动） */
@@ -434,15 +456,15 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .tgh .thv{margin-left:auto;font-weight:500;font-size:var(--md-sys-typescale-title-large-size);line-height:1;color:var(--acc)}
 .tgh .thv s{text-decoration:none;font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant);margin-left:var(--md-sys-space25)}
 .tgh .thv.warn{color:var(--md-sys-color-tertiary)} .tgh .thv.crit{color:var(--md-sys-color-error)}
-.tgb{display:flex;gap:var(--md-sys-space50);align-items:stretch;height:70px}
-.tcell{flex:1 1 0;min-width:11px;display:flex;flex-direction:column;gap:2px}
-.tbar{position:relative;flex:1;background:var(--md-sys-color-surface-container);
-  border-radius:var(--md-sys-shape-corner-extra-small);overflow:hidden}
-.tbar i{position:absolute;left:0;right:0;bottom:0;height:var(--h,0%);background:var(--bc,var(--acc));
-  transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate);
-  -webkit-mask-image:repeating-linear-gradient(to bottom,#000 0 4px,transparent 4px 6.5px);
-          mask-image:repeating-linear-gradient(to bottom,#000 0 4px,transparent 4px 6.5px)}
-.tlab{font-family:var(--d4-mono);font-size:9.5px;line-height:1.1;text-align:center;
+/* 每传感器柱（D3 SVG：每组一 svg、scaleBand 槽位；名称行与 band 同网格（同列数同 4dp 缝），
+   条纹 = 轨道色横带 rect 组（原 mask 条纹的等价复刻，SVG 通用无 mask 兼容风险）） */
+.tgb{display:flex;flex-direction:column;gap:2px;height:70px}
+.tgb .tbars{flex:1;display:block;width:100%;min-width:0;min-height:0}
+.tlabs{display:grid;gap:var(--md-sys-space50);min-width:0}
+.tbar2{transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
+                    y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate)}
+.tstrip rect{fill:var(--md-sys-color-surface-container)}
+.tlabs .tlab{font-family:var(--d4-mono);font-size:9.5px;line-height:1.1;text-align:center;
   color:var(--md-sys-color-on-surface-variant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* MEM 横向双轨（>80% 越界段以更响的 error 色锐利起笔） */
@@ -454,11 +476,18 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .gc2 s{text-decoration:none;font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant);margin-left:2px}
 .gc2.crit{color:var(--md-sys-color-error)}
 
-/* 线性进度（4dp 轨道） */
-.lin{position:relative;height:4px;background:var(--md-sys-color-surface-container-highest);
-  border-radius:var(--md-sys-shape-corner-full);overflow:hidden}
-.lin i{position:absolute;left:0;top:0;bottom:0;width:var(--w,0%);background:var(--acc);border-radius:inherit;
-  transition:width var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-standard)}
+/* STORAGE 用量条 = wavy 进度（md-wavy-linear determinate 适配：波形 path 由 JS 程序化生成
+   （sin、λ=12/A=1.6，源码不粘字面 d），观察窗 clip 宽 = 使用%，右侧空槽直轨 = surface-container；
+   波形水平平移一波长循环（transform-only、合成器友好），duration 走 motion 令牌 + linear
+   （循环），reduced-motion 通配压平。高 8 = 轨厚 2 + 2A + 2 圆整） */
+.wprog{position:relative;height:8px;background:var(--md-sys-color-surface-container);
+  border-radius:var(--md-sys-shape-corner-full);overflow:hidden;color:var(--a-sto)}
+.wprog.crit{color:var(--md-sys-color-error)}
+.wprog__clip{position:absolute;inset-block:0;left:0;width:var(--w,0%);overflow:hidden}
+.wprog__svg{display:block;height:100%;width:calc(100% + 24px);   /* 容器 + 2 波长：平移一周期后右缘无缝 */
+  animation:ap-wavy-travel var(--md-sys-motion-duration-extra-long4) linear infinite}
+.wprog__wave{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+@keyframes ap-wavy-travel{to{transform:translateX(-12px)}}       /* 一波长 λ=12px，Loop 无缝 */
 
 /* 网络行（label 列固定 72px，地址列吃满剩余 = 主导份额；hover 8% 状态层 + 1dp outline-variant 分隔） */
 .tlist{display:flex;flex-direction:column;margin-top:var(--md-sys-space150)}
@@ -515,7 +544,7 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .sp s{text-decoration:none;font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant);margin-left:2px}
 .sp.warn{color:var(--md-sys-color-tertiary)} .sp.crit{color:var(--md-sys-color-error)}
 .sinfo{min-width:0}
-.sinfo .lin{margin-top:var(--md-sys-space75)}
+.sinfo .wprog{margin-top:var(--md-sys-space75)}
 /* STORAGE 折叠（PROCESS 剪裁壳同款配方）：总容量 >32 GiB 的行 = 列表直子，其余入
    #stoRest>.stoIn；旗标 stoExpanded 只驱动 #diskList 的 .open 类，与 PROCESS 区态独立 */
 #stoRest{display:grid;grid-template-rows:0fr;
@@ -747,6 +776,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   .gc .gn s{font-size:11px}
 }
 @media(prefers-reduced-motion:reduce){
+  /* 通配选择子同时命中 SVG 图元：D3 折线/柱状（.cbar/.tbar2/.ccap 及 svg 内一切
+     transition/animation）一并压平为 .01ms，无需额外 svg 选择子 */
   *{animation-duration:.01ms!important;transition-duration:.01ms!important}
   .card{opacity:1;transform:none}
   /* 背景是环境层：减弱动态下仍保留流动，但放慢一档 */
@@ -769,8 +800,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
         <div class="read hi"><div class="k">PEAK FREQ</div><div class="v num" id="cpuPeak">0.00<s>GHz</s></div><div class="k">| core <span id="cpuCore">#-</span></div></div>
         <div class="read"><div class="k">AVG FREQ · 60s</div><div class="v num" id="cpuAvg">0.00<s>GHz</s></div><div class="k">| 最活跃 core <span id="cpuAvgCore">#-</span></div></div>
       </div>
-      <div class="chartbox h96"><canvas id="cpuChart"></canvas></div>
-      <div class="cores" id="cores"></div>
+      <div class="chartbox h96"><div class="lh" id="cpuChart" role="img" aria-label="CPU 峰值频率 5 分钟折线（0–5 GHz，逐段按峰值核着色）"></div></div>
+      <div class="cores" id="cores" role="img" aria-label="每核实时频率柱状图（满量程 5 GHz）"></div>
     </section>
 
     <!-- ====== GPU：双环表盘（内=使用率顺时针、外=频率逆时针，线性 0–1500MHz 满刻度；
@@ -791,10 +822,10 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
             <div class="read"><div class="k">GPU 负载</div><div class="v num sm" id="gpuLoadRv">使用率 —</div></div>
             <div class="read"><div class="k">GPU 时钟</div><div class="v num sm" id="gpuFreqRv">频率 —</div></div>
           </div>
-          <div class="chartbox h84"><canvas id="gpuChart"></canvas></div>
+          <div class="chartbox h84"><div class="lh" id="gpuChart" role="img" aria-label="GPU 使用率与频率 5 分钟双序列折线（频率按峰值自缩放）"></div></div>
           <div class="legend">
             <div><em style="background:var(--a-gpu)"></em>GPU 使用率 %</div>
-            <div><em style="background:var(--a-cpu)"></em>GPU 频率 · 按峰值自缩放</div>
+            <div><em style="background:var(--md-sys-color-tertiary)"></em>GPU 频率 · 按峰值自缩放</div>
           </div>
         </div>
       </div>
@@ -813,7 +844,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
             <div class="read"><div class="k">MEM 用量</div><div class="v num sm" id="memRv">--</div></div>
             <div class="read"><div class="k">SWAP 用量</div><div class="v num sm" id="swapRv">—</div></div>
           </div>
-          <div class="chartbox h84"><canvas id="memChart"></canvas></div>
+          <div class="chartbox h84"><div class="lh" id="memChart" role="img" aria-label="内存与交换使用率 5 分钟双序列折线（0–100%，80% 警示线）"></div></div>
           <div class="legend">
             <div><em style="background:var(--a-mem)"></em>内存使用率</div>
             <div><em style="background:var(--a-proc)"></em>交换分区使用率</div>
@@ -840,7 +871,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
             <div class="read"><div class="k">CURRENT</div><div class="v num" id="bCurr">--<s>A</s></div></div>
             <div class="read"><div class="k">POWER</div><div class="v num" id="bPow">--<s>W</s></div></div>
           </div>
-          <div class="chartbox h84 battsw"><canvas id="battChart"></canvas><span class="bwin" id="battWinTag">24h</span></div>
+          <div class="chartbox h84 battsw"><div class="lh" id="battChart" role="img" aria-label="电量百分比与功率双轴折线（默认 24 小时窗，可滑至 72 小时）"></div><span class="bwin" id="battWinTag">24h</span></div>
           <div class="legend">
             <div><em style="background:var(--a-pow)"></em>电量 %</div>
             <div><em style="background:var(--a-net)"></em>功率 W</div>
@@ -867,7 +898,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
     <!-- ====== THERMALS：固定分组序竖条矩阵 + 全域最高温（1|5fps） ====== -->
     <section class="card acc-therm" id="card-thermal">
       <header class="ch"><h2>THERMALS</h2></header>
-      <div class="chartbox h84" style="margin-top:0"><canvas id="hotChart"></canvas></div>
+      <div class="chartbox h84" style="margin-top:0"><div class="lh" id="hotChart" role="img" aria-label="全域最高温 5 分钟折线（20–90 °C）"></div></div>
       <div class="tgrps scroll" id="thermList"></div>
     </section>
 
@@ -881,7 +912,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-09.7 -->
+    <!-- rev 2026-11-25.3 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -945,7 +976,9 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 
 <div class="snack" id="snack" role="status"></div>
 
-<!-- xterm.js UMD 资源（同源 /vendor 服务；加载顺序固定：xterm → unicode-graphemes → fit → webgl） -->
+<!-- d3 v7.9.2（ISC，同源 /vendor 服务；折线/柱状 SVG 渲染层，必须先于主内联脚本加载） -->
+<script src="/vendor/d3.min.js"></script>
+<!-- xterm.js UMD 资源（同源 /vendor 服务；加载顺序固定：d3 → xterm → unicode-graphemes → fit → webgl） -->
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-unicode-graphemes.js"></script>
 <script src="/vendor/addon-fit.js"></script>
@@ -984,7 +1017,9 @@ async function postJSON(path, body) {
 const C = {};
 function cacheColors() {
   const cs = getComputedStyle(document.documentElement);
-  const v = n => cs.getPropertyValue(n).trim();
+  /* var() 一级解析：--d4-pgrid/--d4-plabel 已重定向为 M3 角色令牌，此处取回目标 hex
+     （hexa()/ctx 依赖 hex 字面量，getComputedStyle 不递归解析自定义属性内的 var()） */
+  const v = n => { const t = cs.getPropertyValue(n).trim(); const m = /^var\(\s*(--[\w-]+)/.exec(t); return (m ? cs.getPropertyValue(m[1]) : t).trim(); };
   C.grid = v("--d4-pgrid"); C.label = v("--d4-plabel");
   C.cpu = v("--a-cpu"); C.therm = v("--a-therm"); C.mem = v("--a-mem");
   C.gpu = v("--a-gpu");
@@ -996,6 +1031,9 @@ function cacheColors() {
      STORAGE 语义活在行表面而非表盘，跨卡借用不混淆——BATTERY 外环借 C.net 同例。 */
   C.netUp = C.sto;
   C.task = v("--a-proc"); C.err = v("--md-sys-color-error");
+  /* charts.js 色序角色 2（primary→tertiary→secondary→error）：多序列图第二序列的
+     「下一角色」色源；现仅 gpuChart 频率线使用（与卡族主色 C.gpu 冷色近邻对撞，改走 tertiary） */
+  C.tert = v("--md-sys-color-tertiary");
   C.trk = v("--md-sys-color-surface-container-highest");
   C.onsv = v("--md-sys-color-on-surface-variant");
 }
@@ -1034,65 +1072,127 @@ function setupCanvas(cv) {
   return { ctx, w, h };
 }
 
-/* ---------- 折线原语（唯一图表绘制器：多系列 / 逐段归因着色 / 每系列可选 tf 归一化 + 线宽 s.w /
-               固定轴 + 网格标签 + 右缘独立刻度 rlab[{p:0..1,t}]） ---------- */
-function drawLines(cv, series, opts) {
-  if (!cv || !cv.isConnected) return;
+/* ---------- 折线原语（D3 v7 SVG：多系列 / 逐段归因着色（同色连段合并单 path）/ 每系列可选
+               tf 归一化 + 线宽 s.w / 固定轴 + 网格标签 + 右缘独立刻度 rlab[{p:0..1,t}]）。
+   宿主 = 带 role="img" aria-label 的 div.lh（css 定尺寸），内建单张 1:1 像素 viewBox svg；
+   每次调用按宿主 clientWidth/Height 重建 viewBox 与全部图元（d3 数据连接：join 复用节点、
+   只刷属性 → 高度/位置可走 CSS transition）。调用点契约与 canvas 旧版逐字兼容：
+   opts{min,max,axis,gridLines[{v,label,emph,color}],rlab,fill(默认开线面积,false 关)}、
+   series[{v,c,w,tf,ac?(逐段序列的面积色=卡族主色)}]。
+   配色 = cacheColors 的 hex 现值注入（主题翻转走 cacheColors→redrawAll 热重解析）；
+   resize = window resize→redrawAll 重绘（与 canvas 版同链路、逻辑等价）。
+   d3 缺席（/vendor 资源缺失）= 图区留空，其余面板不受累。 ---------- */
+function drawLines(host, series, opts) {
+  if (!host || !host.isConnected || typeof d3 === "undefined") return;
   const o = opts || {};
-  const { ctx, w, h } = setupCanvas(cv);
-  ctx.clearRect(0, 0, w, h);
   const lo = o.min, hi = o.max;
   if (!(hi > lo)) return;
+  const w = host.clientWidth || 120, h = host.clientHeight || 24;
   const padL = o.axis ? 20 : 2, padR = o.rlab ? 18 : 2, padT = 4, padB = 3;
   const iw = Math.max(1, w - padL - padR), ih = Math.max(1, h - padT - padB);
   const YN = n => padT + (1 - Math.min(1, Math.max(0, n))) * ih;
   const Y = v => YN((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo));
-  if (o.gridLines) {
-    ctx.font = '11px "Maple Mono","Roboto Mono",monospace';
-    ctx.textBaseline = "middle"; ctx.textAlign = "left";
-    for (const g of o.gridLines) {
-      const y = Math.round(Y(g.v)) + 0.5;
-      ctx.strokeStyle = hexa(g.color || C.grid, g.emph ? 0.55 : 0.35);
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
-      if (g.label) { ctx.fillStyle = C.label; ctx.fillText(g.label, 2, y); }
-    }
+  let svg = host.__lsvg;
+  if (!svg || !svg.isConnected) {
+    svg = d3.select(host).append("svg")
+      .attr("preserveAspectRatio", "none")
+      .attr("aria-hidden", "true")
+      .node();
+    host.__lsvg = svg;
+    const s = d3.select(svg);
+    host.__lroot = {
+      grid: s.append("g").attr("class", "lg").node(),
+      ser: s.append("g").attr("class", "ls").node(),
+      lab: s.append("g").attr("class", "lr").node(),
+      defs: s.append("defs").node()
+    };
   }
-  for (const s of series) {
-    const cnt = s.v.length;
-    if (cnt < 2) continue;
-    const X = i => padL + (i / (cnt - 1)) * iw;
-    const YS = s.tf ? (v => YN(s.tf(v))) : Y;
-    const solid = Array.isArray(s.c) ? null : s.c;
-    if (o.fill && solid) {
-      ctx.beginPath();
-      for (let i = 0; i < cnt; i++) { const x = X(i), y = YS(s.v[i]); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
-      ctx.lineTo(padL + iw, h - padB); ctx.lineTo(padL, h - padB); ctx.closePath();
-      const gr = ctx.createLinearGradient(0, 0, 0, h);
-      gr.addColorStop(0, hexa(solid, 0.26)); gr.addColorStop(1, hexa(solid, 0.02));
-      ctx.fillStyle = gr; ctx.fill();
-    }
-    ctx.lineWidth = s.w || 1.6; ctx.lineJoin = "round";
-    if (Array.isArray(s.c)) {
-      for (let i = 0; i < cnt - 1; i++) {
-        ctx.strokeStyle = s.c[i] || C.cpu;
-        ctx.beginPath(); ctx.moveTo(X(i), YS(s.v[i])); ctx.lineTo(X(i + 1), YS(s.v[i + 1])); ctx.stroke();
+  const root = host.__lroot;
+  d3.select(svg).attr("viewBox", "0 0 " + w + " " + h).attr("width", w).attr("height", h);
+  const gGrid = d3.select(root.grid), gSer = d3.select(root.ser), gLab = d3.select(root.lab);
+  const gl = o.gridLines || [];
+  /* 网格 = charts.css 纪律：色走 outline-variant（C.grid 经令牌重定向）、1dp、无轴线
+     （domain 不绘制）、y 取整 +0.5 半像素对齐；emph = 同色更高 alpha */
+  gGrid.selectAll("line").data(gl).join("line")
+    .attr("x1", padL).attr("x2", w - padR)
+    .attr("y1", g => Math.round(Y(g.v)) + 0.5).attr("y2", g => Math.round(Y(g.v)) + 0.5)
+    .attr("stroke", g => hexa(g.color || C.grid, g.emph ? 0.55 : 0.35))
+    .attr("stroke-width", 1);
+  gGrid.selectAll("text").data(gl.filter(g => g.label)).join("text")
+    .attr("class", "plab").attr("x", 2)
+    .attr("y", g => Math.round(Y(g.v)) + 0.5).attr("dy", "0.32em")
+    .attr("fill", C.label)
+    .text(g => g.label);
+  const fillOn = o.fill !== false;                        // 渐变面积默认开启（fill:false 显式关）
+  const usedGrad = [];                                    // 本轮活着的渐变 id（defs 剪枝依据）
+  gSer.selectAll("g").data(series).join("g")
+    .each(function (s, si) {
+      const g = d3.select(this);
+      const cnt = s.v.length;
+      const enough = cnt >= 2;
+      const X = i => padL + (i / Math.max(1, cnt - 1)) * iw;
+      const YS = s.tf ? (v => YN(s.tf(v))) : Y;
+      const pts = enough ? s.v.map((v, i) => [X(i), YS(v)]) : [];
+      const solid = Array.isArray(s.c) ? null : s.c;
+      const lineS = d3.line().x(p => p[0]).y(p => p[1]);
+      /* 参考纪律渐变面积（charts.js §2 / sparkline fill 款）：面积色 = 序列主色，逐段归因
+         序列走调用点 ac（卡族主色单渐变，面积不逐段）；实色序列面积与线同走 curveMonotoneX，
+         逐段序列保持折线直连（数据归因语义优先，取舍已登记）。 */
+      const ac = solid || s.ac || null;
+      let fills = [];
+      if (enough && fillOn && ac)
+        fills = [{ d: (solid ? d3.area().curve(d3.curveMonotoneX) : d3.area())
+          .x(p => p[0]).y0(h - padB).y1(p => p[1])(pts), id: (host.id || "lc") + "-f" + si, c: ac }];
+      const runs = [];
+      if (enough) {
+        if (solid) runs.push({ c: solid, d: lineS(pts) });
+        else {
+          let run = null;
+          for (let i = 0; i < cnt - 1; i++) {
+            const col = s.c[i] || C.cpu;
+            if (run && run.c === col) run.seg.push([X(i + 1), YS(s.v[i + 1])]);
+            else { run = { c: col, seg: [[X(i), YS(s.v[i])], [X(i + 1), YS(s.v[i + 1])]] }; runs.push(run); }
+          }
+          for (const r of runs) r.d = lineS(r.seg);
+        }
       }
-    } else {
-      ctx.beginPath();
-      for (let i = 0; i < cnt; i++) { const x = X(i), y = YS(s.v[i]); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
-      ctx.strokeStyle = solid; ctx.stroke();
-    }
-    const lastCol = Array.isArray(s.c) ? (s.c[cnt - 1] || C.cpu) : solid;
-    ctx.beginPath(); ctx.arc(w - padR - 1.5, YS(s.v[cnt - 1]), 2.4, 0, Math.PI * 2);
-    ctx.fillStyle = lastCol; ctx.fill();
-  }
-  if (o.rlab) {
-    ctx.font = '10px "Maple Mono","Roboto Mono",monospace';
-    ctx.textBaseline = "middle"; ctx.textAlign = "right"; ctx.fillStyle = C.label;
-    for (const r of o.rlab) ctx.fillText(r.t, w - 1, YN(r.p));
-    ctx.textAlign = "left";
-  }
+      g.selectAll("path.lfill").data(fills).join("path").attr("class", "lfill")
+        .attr("d", f => f.d).attr("stroke", "none").attr("fill", f => "url(#" + f.id + ")");
+      for (const f of fills) {
+        // 参考 §2 同款：stop-color=系列色实值（cacheColors 每绘重解析→主题翻转自动换色）、stop-opacity 纵向 28%→0；
+        // 第二序列起点降 18% 防双面积糊成一片。id = 宿主id+序列号，每宿主自带 defs，全局唯一。
+        usedGrad.push(f.id);
+        const op0 = si === 0 ? "0.28" : "0.18";
+        let grad = root.defs.querySelector("#" + CSS.escape(f.id));
+        if (!grad) {
+          grad = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
+          grad.id = f.id;
+          grad.setAttribute("x1", "0"); grad.setAttribute("y1", "0");
+          grad.setAttribute("x2", "0"); grad.setAttribute("y2", "1");
+          grad.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "stop"));
+          grad.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "stop"));
+          root.defs.appendChild(grad);
+        }
+        const st0 = grad.children[0], st1 = grad.children[1];
+        st0.setAttribute("offset", "0"); st0.setAttribute("stop-color", f.c); st0.setAttribute("stop-opacity", op0);
+        st1.setAttribute("offset", "1"); st1.setAttribute("stop-color", f.c); st1.setAttribute("stop-opacity", "0");
+      }
+      g.selectAll("path.lp").data(runs).join("path").attr("class", "lp")
+        .attr("fill", "none").attr("stroke-linejoin", "round")
+        .attr("stroke-width", s.w || 1.6)
+        .attr("stroke", r => r.c).attr("d", r => r.d);
+      g.selectAll("circle").data(enough ? [{ c: Array.isArray(s.c) ? (s.c[cnt - 1] || C.cpu) : solid, y: YS(s.v[cnt - 1]) }] : []).join("circle")
+        .attr("class", "le")
+        .attr("cx", w - padR - 1.5).attr("cy", d => d.y).attr("r", 2.4)
+        .attr("fill", d => d.c);
+    });
+  for (const gd of Array.from(root.defs.querySelectorAll("linearGradient")))
+    if (!usedGrad.includes(gd.id)) gd.remove();           // 序列缺席即剪（不留过期渐变）
+  gLab.selectAll("text").data(o.rlab || []).join("text")
+    .attr("class", "prlab").attr("x", w - 1).attr("text-anchor", "end")
+    .attr("y", r => YN(r.p)).attr("dy", "0.32em")
+    .attr("fill", C.label)
+    .text(r => r.t);
 }
 
 /* ---------- 电池双层表盘 ----------
@@ -1259,7 +1359,7 @@ function toast(msg, kind) {
 /* ---------- CPU ---------- */
 let coreCount = 0;
 let coreColors = [];
-let barEls = [], ghzEls = [];
+let ghzEls = [];               // 读数行节点（柱层节点由 D3 join 管理，不缓存）
 function spreadCoreColors(hex, n) {
   const { h, s, l } = hexHsl(hex);
   const out = [];
@@ -1272,21 +1372,110 @@ function spreadCoreColors(hex, n) {
 function buildCores(n) {
   const box = $("#cores");
   box.textContent = "";
-  box.style.gridTemplateColumns = "repeat(" + n + ",1fr)";
   coreColors = spreadCoreColors(C.cpu, n);
-  barEls = []; ghzEls = [];
+  ghzEls = [];
+  const labs = el("div", "corelabs");
+  labs.style.gridTemplateColumns = "repeat(" + n + ",1fr)";
   for (let i = 0; i < n; i++) {
-    const c = el("div", "core"); c.id = "core" + i;
-    const tr = el("div", "ctrack");
-    const f = el("div", "f"); f.style.setProperty("--fc", coreColors[i]);
-    tr.appendChild(f);
     const g = el("div", "ghz", "0.00");
-    c.append(tr, g);
-    box.appendChild(c);
-    barEls.push({ core: c, f });
+    labs.appendChild(g);
     ghzEls.push(g);
   }
+  box.appendChild(labs);
+  d3.select(box).insert("svg", ":first-child").attr("class", "corebars")
+    .attr("aria-hidden", "true");
   coreCount = n;
+}
+/* 柱状公共机件（CPU 每核柱 + 温度每传感器柱共用）：一组 scaleBand 槽位，每槽五层
+   轨道(.ctrk)/柱(.cbar)/gloss/条纹/白帽(.ccap) + 悬停 <title>。
+   条纹 = 轨道色 2.5dp 横带每 6.5dp 一条、全宽一组（原 .f/.tbar i 的 CSS mask 条纹的
+   等价复刻，免 SVG 元素 mask 兼容风险；轨缝处同色覆盖 = 视觉仅柱体出缝）；
+   gloss = 白 22%→0 竖向渐变（原 linear-gradient(fc → fc 78%+#fff) 的观感等价）。
+   band 缝 ≈4dp 时列几何与标签行 grid（repeat(n,1fr) + gap 4dp）逐式同宽，天然对齐。 */
+const SVG_NS = "http://www.w3.org/2000/svg";
+let barSeq = 0;
+function drawBarSet(svg, W, H, n) {
+  if (!svg || typeof d3 === "undefined" || !(W > 0) || !(H > 0)) return null;
+  if (!svg.__bid) svg.__bid = "bset" + (++barSeq);
+  const d3s = d3.select(svg);
+  d3s.attr("viewBox", "0 0 " + W + " " + H).attr("width", W).attr("height", H).attr("preserveAspectRatio", "none");
+  const band = d3.scaleBand().domain(d3.range(n)).range([0, W]).paddingOuter(0)
+    .paddingInner(Math.min(0.92, (4 * n) / (W + 4)));
+  const gid = svg.__bid + "G";
+  const defs = d3s.selectAll("defs").data([0]).join("defs");
+  if (!defs.node().querySelector("linearGradient")) {
+    const mk = (t) => document.createElementNS(SVG_NS, t);
+    const grad = mk("linearGradient");
+    grad.id = gid;
+    grad.setAttribute("x1", "0"); grad.setAttribute("y1", "0");
+    grad.setAttribute("x2", "0"); grad.setAttribute("y2", "1");
+    for (const [off, op] of [["0", "0.22"], ["1", "0"]]) {
+      const st = mk("stop"); st.setAttribute("offset", off);
+      st.setAttribute("stop-color", "#fff"); st.setAttribute("stop-opacity", op);
+      grad.appendChild(st);
+    }
+    defs.node().appendChild(grad);
+  }
+  const ids = d3.range(n);
+  const bw = band.bandwidth(), rx = Math.min(4, bw / 2);
+  const lay = (cls, data) => d3s.selectAll("rect." + cls).data(data).join("rect")
+    .attr("class", cls).attr("x", (_, i) => band(i)).attr("width", bw).attr("rx", rx);
+  lay("ctrk", ids).attr("y", 0).attr("height", H);
+  const bars = lay("cbar", ids);
+  lay("cglo", ids).attr("fill", "url(#" + gid + ")");
+  let stripes = d3s.select("g.tstrip").node();      // 绘制树内（defs 不渲染）：柱+gloss 之上、白帽之下
+  if (!stripes) {
+    const mk = (t) => document.createElementNS(SVG_NS, t);
+    stripes = mk("g"); stripes.setAttribute("class", "tstrip");
+    for (let y = 4; y < 96; y += 6.5) {
+      const r = mk("rect"); r.setAttribute("y", y); r.setAttribute("height", 2.5);
+      stripes.appendChild(r);
+    }
+    d3s.node().appendChild(stripes);
+  }
+  d3.select(stripes).selectAll("rect").attr("x", 0).attr("width", W);
+  const caps = lay("ccap", ids).attr("height", 2);  // join 重排保持：白帽追加在条纹之后 = 最上
+  d3s.selectAll("rect.ccap").raise();
+  const tmap = new Map();
+  bars.each(function (_, i) {
+    let t = this.querySelector("title");
+    if (!t) { t = document.createElementNS(SVG_NS, "title"); this.appendChild(t); }
+    tmap.set(i, t);
+  });
+  return {
+    W, H, n,
+    update(vals, colOf, maxV, pkIdx, tipOf) {
+      const hOf = i => Math.min(1, Math.max(0, (vals[i] || 0) / (maxV || 1))) * H;
+      bars.each(function (id, i) {
+        const v = hOf(i);
+        d3.select(this).attr("y", H - v).attr("height", v).attr("fill", colOf(i));
+        this.classList.toggle("pk", i === pkIdx);
+      });
+      d3s.selectAll("rect.cglo").each(function (id, i) { const v = hOf(i); d3.select(this).attr("y", H - v).attr("height", v); });
+      caps.each(function (id, i) {
+        const v = hOf(i);
+        d3.select(this).attr("y", H - v).attr("height", v > 1.5 ? 2 : 0);
+        this.classList.toggle("pk", i === pkIdx);
+      });
+      if (tipOf) tmap.forEach((t, i) => { t.textContent = tipOf(i); });
+    }
+  };
+}
+/* 每核柱刷新（D3 数据连接；槽位几何随容器宽/核数重建，柱高每 tick 走 CSS transition） */
+let coreBarSet = null;
+function updateCoreBars(fr, pkIdx) {
+  const box = $("#cores");
+  const svg = box.querySelector("svg.corebars");
+  if (!svg || typeof d3 === "undefined") return;
+  const W = box.clientWidth || 240, H = svg.clientHeight || Math.max(1, (box.clientHeight || 92) - 13);
+  if (!coreBarSet || svg !== coreBarSet.svg || coreBarSet.n !== fr.length ||
+      coreBarSet.set.W !== W || coreBarSet.set.H !== H) {
+    const set = drawBarSet(svg, W, H, fr.length);
+    if (!set) { coreBarSet = null; return; }              // 零尺寸容器（隐藏卡/无布局）：本轮跳过
+    coreBarSet = { svg, n: fr.length, set };
+  }
+  coreBarSet.set.update(fr, i => coreColors[i] || C.cpu, 5, pkIdx,
+    i => "core" + i + " · " + f2(fr[i] || 0) + " GHz");
 }
 function renderCpu(fr, o) {
   const opts = o || {};
@@ -1313,19 +1502,13 @@ function renderCpu(fr, o) {
   const pv = $("#cpuPeak"); pv.textContent = ""; pv.append(f2(peak), unit("GHz"));
   $("#cpuCore").textContent = "#" + peakIdx;
   $("#cpuAvgCore").textContent = hotCore < 0 ? "#-" : "#" + hotCore;
-  for (let i = 0; i < fr.length; i++) {
-    const b = barEls[i];
-    if (!b) continue;
-    b.f.style.setProperty("--h", Math.min(100, (fr[i] / 5) * 100) + "%"); // 固定满量程 5GHz
-    b.f.style.setProperty("--fc", coreColors[i]);
-    b.core.classList.toggle("pk", i === peakIdx);
-    ghzEls[i].textContent = f2(fr[i]);
-  }
+  updateCoreBars(fr, peakIdx);                        // D3 band 柱状（固定满量程 5GHz，峰值核 .pk）
+  for (let i = 0; i < fr.length; i++) if (ghzEls[i]) ghzEls[i].textContent = f2(fr[i]);
   const vals = rows.map(r => r.v.peak);
   const cols = rows.map(r => coreColors[r.v.core] || C.cpu);
   const gl = [];
   for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-  drawLines($("#cpuChart"), [{ v: vals, c: cols }], { min: 0, max: 5, gridLines: gl, axis: true });
+  drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu }], { min: 0, max: 5, gridLines: gl, axis: true });
 }
 async function tickCpu() {
   try {
@@ -1390,18 +1573,21 @@ function renderTherm(d, o) {
     hv.append(f1(c.mx), unit("°C"));
     head.appendChild(hv);
     const bars = el("div", "tgb");
-    c.pairs.forEach((p, i) => {
-      const cell = el("div", "tcell");
-      const tr = el("div", "tbar");
-      const fill = el("i");
-      fill.style.setProperty("--h", Math.min(100, Math.max(0, (p[0] / 90) * 100)) + "%"); // 固定满量程 90°C
-      fill.style.setProperty("--bc", thermBarColor(p[0]));
-      tr.appendChild(fill);
-      cell.append(tr, el("div", "tlab", shortThermName(p[1], i)));
-      bars.appendChild(cell);
-    });
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "tbars");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", c.label + " 组每传感器温度柱状（满量程 90 °C）");
+    bars.appendChild(svg);
+    const labs = el("div", "tlabs");
+    labs.style.gridTemplateColumns = "repeat(" + c.pairs.length + ",1fr)";
+    c.pairs.forEach((p, i) => labs.appendChild(el("span", "tlab", shortThermName(p[1], i))));
+    bars.appendChild(labs);
     g.append(head, bars);
     list.appendChild(g);
+    // 每柱 SVG（D3 机件，与 CPU 每核柱同函数）：入册后再量画（同帧布局已可得宽度）
+    const set = drawBarSet(svg, bars.clientWidth || 240, svg.clientHeight || 55, c.pairs.length);
+    if (set) set.update(c.pairs.map(p => p[0]), i => thermBarColor(c.pairs[i][0]), 90, -1,
+      i => shortThermName(c.pairs[i][1], i) + " · " + f1(c.pairs[i][0]) + " °C");
   }
 }
 async function tickTherm() {
@@ -1481,7 +1667,7 @@ let gpuSeeded = false, gpuMax = 0;
 let gpuFill = { l: 0, f: 0 };
 /* 双环表盘（netRings 机件复用、零新抽象）：同盘径（--d4-gauge）同几何比例（k=R/60）兄弟。
    内=使用率 0..100% 线性顺时针（C.gpu，与面积图同色）；外=频率 LINEAR 0..1500MHz 满刻度
-   逆时针（C.cpu，与频率细线同色；>1500 钳顶），均自 12 点起。500/1000/1500MHz 淡刻度跨外轨
+   逆时针（C.cpu；频率细线按图表色序改走角色 2 = C.tert，环/线色解耦、数据仍同源；>1500 钳顶），均自 12 点起。500/1000/1500MHz 淡刻度跨外轨
    径向 = NET 环十年刻度 idiom（1500=满圈回起点，与电池环 128W 刻度同位）；小字标注压在内轨
    中线、绘于双弧之后保证彩弧上可读。环每 tick 读 live payload 原值（与 chips 同源、与
    gpuFill 顺推解耦）：load=null → 内轨仅轨道，freq=null → 外轨仅轨道+刻度。 */
@@ -1538,7 +1724,9 @@ function drawGpuChart() {
   const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
   drawLines($("#gpuChart"), [
     { v: rows.map(r => r.v.l), c: C.gpu },
-    { v: rows.map(r => r.v.f), c: C.cpu, w: 1.1, tf: v => v / (smax || 1) }
+    /* 频率线 = 色序角色 2（tertiary）：原借 C.cpu（--a-cpu 淡紫）与 C.gpu 淡蓝同为高亮度
+       冷色、暗色下色相距仅 ~41° 不达「同图两线色相可辨」；mem/batt 双线图经核对无此问题 */
+    { v: rows.map(r => r.v.f), c: C.tert, w: 1.1, tf: v => v / (smax || 1) }
   ], { min: 0, max: 100, gridLines: gl, axis: true });
 }
 function renderGpu(d, o) {
@@ -1797,6 +1985,17 @@ async function tickNet() {
 }
 
 /* ---------- STORAGE（大字占用率居左；默认只列 >32 GiB 总容量分区，其余入剪裁壳折叠） ---------- */
+/* wavy 波形 path（参考 m3e wavy-linear λ40/A3 的观感，按 8px 小轨等比缩到 λ=12/A=1.6，
+   每 λ/4 采样一点 = 峰/谷/过零四点制，与参考 d 串步进语义同构）：宽 = 观察窗实测宽 + 2λ
+   （平移一周期右缘无缝）；renderSto 挂载后按 clientWidth 现测现填，resize/主题翻转经
+   redrawAll→renderSto 重测，源码零字面 d。 */
+const WAVY_L = 12, WAVY_A = 1.6, WAVY_H = 8;
+function wavyD(w) {
+  let d = "M0 " + WAVY_H / 2;
+  for (let x = WAVY_L / 4; x <= w; x += WAVY_L / 4)
+    d += "L" + x.toFixed(1) + " " + (WAVY_H / 2 - WAVY_A * Math.sin(x * 2 * Math.PI / WAVY_L)).toFixed(1);
+  return d;
+}
 let stoExpanded = false;                                  // 卡折叠旗标（模块作用域：60s 刷新 + 主题重渲染保态；只驱动 .open 类）
 function renderSto(d) {
   const disks = d && Array.isArray(d.disks) ? d.disks : [];
@@ -1818,12 +2017,14 @@ function renderSto(d) {
     nm.append(String(k.mount_point || "?"));
     nm.appendChild(el("small", null, String(k.device || "") + " · " + String(k.fs || "") +
       " · " + giB(used) + " / " + giB(total) + " · 余 " + giB(avail)));
-    const lin = el("div", "lin");
-    const fill = el("i");
-    fill.style.setProperty("--w", Math.min(100, pct) + "%");
-    if (pct >= 90) fill.style.background = "var(--md-sys-color-error)";
-    lin.appendChild(fill);
-    info.append(nm, lin);
+    const wp = el("div", "wprog" + (pct >= 90 ? " crit" : ""));   // wavy determinate：波面止于 used%，右槽空轨
+    wp.setAttribute("role", "progressbar");
+    wp.setAttribute("aria-valuenow", String(Math.round(pct)));
+    wp.setAttribute("aria-valuemin", "0");
+    wp.setAttribute("aria-valuemax", "100");
+    wp.style.setProperty("--w", Math.min(100, pct) + "%");
+    wp.innerHTML = '<div class="wprog__clip"><svg class="wprog__svg" aria-hidden="true" focusable="false"><path class="wprog__wave"></path></svg></div>';
+    info.append(nm, wp);
     r.append(big, info);
     return r;
   };
@@ -1838,6 +2039,8 @@ function renderSto(d) {
     rest.appendChild(inner);
     list.appendChild(rest);
   }
+  for (const wp of list.querySelectorAll(".wprog"))       // 已挂载 → 实测 clip 宽现填波形 d（剪裁壳内行同填；宽 0 退 480 假设，60s 重渲染自愈）
+    wp.querySelector(".wprog__wave").setAttribute("d", wavyD((wp.firstChild.clientWidth || 480) + 2 * WAVY_L));
   // 展开/收起按钮：无 remainder 或无 qualifiers 整体隐（剪裁壳也不产出，防空卡错觉）；折叠 →「展开其余 N 个分区」，展开 →「收起」
   fold.hidden = !qual.length || !restRows.length;
   fold.textContent = stoExpanded ? "收起" : "展开其余 " + restRows.length + " 个分区";
@@ -2478,7 +2681,7 @@ function wireDbl(sel, handler) {
   });
 }
 
-/* ---------- 主题翻转重绘（快照重渲染 + 画布配色热重解析） ---------- */
+/* ---------- 主题翻转重绘（快照重渲染 + 图表配色热重解析：canvas 环 + D3 SVG） ---------- */
 function redrawAll() {
   try { if (lastData.cpu) { coreColors = spreadCoreColors(C.cpu, lastData.cpu.length); renderCpu(lastData.cpu, { noHist: true }); } } catch { /* 快照过期容忍 */ }
   try { if (lastData.thermal) renderTherm(lastData.thermal, { noHist: true }); } catch { /* 同上 */ }
@@ -2600,7 +2803,7 @@ function redrawHistCharts() {
   try {
     const rows = H.freq.rows;
     const gl = []; for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-    drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu) }],
+    drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu }],
       { min: 0, max: 5, gridLines: gl, axis: true });
   } catch { /* 容忍：等首个 live tick 重绘 */ }
   try {

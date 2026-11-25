@@ -24,7 +24,7 @@
 //!   `{"killed":false}`（恒 200）；
 //! - `GET /tui/sessions` → `{"sessions":[{"id":"<任务 id>","attached":<n>}]}`
 //!   （仅活会话）；
-//! - `GET /vendor/{name}` —— 白名单前端资产（xterm 五件），字节 `include_bytes!` 内嵌
+//! - `GET /vendor/{name}` —— 白名单前端资产（d3 + xterm 六件），字节 `include_bytes!` 内嵌
 //!   随二进制发布；`cache-control: public, max-age=86400`（24h）；其余名字 404 JSON。
 //!
 //! # 传输结构（承重的并发设计在 task::tui，这里只是接驳）
@@ -328,10 +328,17 @@ pub async fn h_sessions() -> HttpResponse {
     HttpResponse::Ok().json(&serde_json::json!({ "sessions": sessions }))
 }
 
-// ---------------- /vendor 前端资产（内嵌，白名单五件） ----------------
+// ---------------- /vendor 前端资产（内嵌，白名单六件） ----------------
 
 /// 白名单资产：名字 → 内嵌字节 → MIME。路径相对本文件上溯至仓库根 _resources/vendor/。
 const VENDOR: &[(&str, &[u8], &str)] = &[
+    (
+        // d3 v7.9.2（ISC，Copyright 2010-2026 Mike Bostock，https://d3js.org）：
+        // 面板折线/柱状 SVG 渲染层（dashboard.html drawLines/柱状）经同源 /vendor 供给。
+        "d3.min.js",
+        include_bytes!("../../../_resources/vendor/d3.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
     (
         "xterm.css",
         include_bytes!("../../../_resources/vendor/xterm.css"),
