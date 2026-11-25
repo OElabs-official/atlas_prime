@@ -1013,7 +1013,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.28 -->
+    <!-- rev 2026-11-25.29 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1415,6 +1415,12 @@ function drawLines(host, series, opts) {
       else lp.interrupt().attr("transform", null);
       // 种段 = 沿数据行进的 wavy 波（λ14/A1.6/1λ每秒；reduced-motion = 静态波形；免滑入动画）
       const wRuns = dashes.map(r => ({ c: r.c, pts: r.seg.map(p => ({ x: p[0], y: p[1] })) }));
+      /* 左缘补齐：最左种段未触及窗起点（库覆盖早于窗口或播种覆盖有限）→ 以首个库点的
+         水平线把波带延长到左缘 = "更早历史未知"仍以 wavy 语言呈现，不留空白断头。 */
+      if (wRuns.length) {
+        const f0 = wRuns[0].pts[0];
+        if (f0.x > padL + 1) wRuns[0] = { c: wRuns[0].c, pts: [{ x: padL, y: f0.y }].concat(wRuns[0].pts) };
+      }
       const wj = g.selectAll("path.lwave").data(wRuns).join("path").attr("class", "lwave")
         .attr("fill", "none").attr("stroke-linejoin", "round").attr("stroke-linecap", "round")
         .attr("stroke-width", (s.w || 1.6) * 0.85)
