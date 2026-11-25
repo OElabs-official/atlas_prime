@@ -1013,7 +1013,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.26 -->
+    <!-- rev 2026-11-25.27 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1295,6 +1295,7 @@ function drawLines(host, series, opts) {
          ③ 自适应（等距摊满 cnt−1，几何同旧式）。 */
       const slot = o.xCap ? iw / (o.xCap - 1) : iw / Math.max(1, cnt - 1);
       const ts = s.ts;
+      const sd = s.sd;
       const useT = !!o.time && o.winMs > 0 && Array.isArray(ts) && ts.length === cnt;
       const X = i => useT
         ? (w - padR) - Math.min(1, Math.max(0, (nowT - ts[i]) / o.winMs)) * iw
@@ -1307,22 +1308,38 @@ function drawLines(host, series, opts) {
          序列走调用点 ac（卡族主色单渐变，面积不逐段）；实色序列面积与线同走 curveMonotoneX，
          逐段序列保持折线直连（数据归因语义优先，取舍已登记）。 */
       const ac = solid || s.ac || null;
-      let fills = [];
-      if (enough && fillOn && ac)
-        fills = [{ d: (solid ? d3.area().curve(d3.curveMonotoneX) : d3.area())
-          .x(p => p[0]).y0(h - padB).y1(p => p[1])(pts), id: (host.id || "lc") + "-f" + si, c: ac }];
+      /* 来源分段（sd 标记）：两端皆播种 = 种段 → wavy 族点虚线（低透明、无面积、免动画）；
+         live 段与「种→live」过渡段 = 现状（实线/逐段色归因/渐变面积/滑入动画）。
+         sd 缺席（battery 等）→ 全 live，画风零变化。 */
+      const sdOn = Array.isArray(s.sd) && s.sd.length === cnt;
       const runs = [];
+      const dashes = [];
       if (enough) {
-        if (solid) runs.push({ c: solid, d: lineS(pts) });
-        else {
-          let run = null;
-          for (let i = 0; i < cnt - 1; i++) {
-            const col = s.c[i] || C.cpu;
-            if (run && run.c === col) run.seg.push([X(i + 1), YS(s.v[i + 1])]);
-            else { run = { c: col, seg: [[X(i), YS(s.v[i])], [X(i + 1), YS(s.v[i + 1])]] }; runs.push(run); }
+        let run = null, dRun = null;
+        const flushRun = () => { if (run) { if (run.seg.length > 1) { run.d = lineS(run.seg); runs.push(run); } run = null; } };
+        const flushD = () => { if (dRun) { if (dRun.seg.length > 1) { dRun.d = lineS(dRun.seg); dashes.push(dRun); } dRun = null; } };
+        for (let i = 0; i < cnt - 1; i++) {
+          const col = solid !== null ? solid : (s.c[i] || C.cpu);
+          if (sdOn && sd[i] && sd[i + 1]) {
+            flushRun();
+            if (!dRun) dRun = { c: col, seg: [pts[i], pts[i + 1]] };
+            else dRun.seg.push(pts[i + 1]);
+          } else {
+            flushD();
+            if (run && run.c === col) run.seg.push(pts[i + 1]);
+            else { flushRun(); run = { c: col, seg: [pts[i], pts[i + 1]] }; }
           }
-          for (const r of runs) r.d = lineS(r.seg);
         }
+        flushRun(); flushD();
+      }
+      let fills = [];
+      if (enough && fillOn && ac) {
+        runs.forEach((r, ri) => {
+          if (r.seg.length < 2) return;
+          fills.push({ d: (solid ? d3.area().curve(d3.curveMonotoneX) : d3.area())
+            .x(p => p[0]).y0(h - padB).y1(p => p[1])(r.seg),
+            id: (host.id || "lc") + "-f" + si + "-" + ri, c: ac });
+        });
       }
       const fp = g.selectAll("path.lfill").data(fills).join("path").attr("class", "lfill")
         .attr("d", f => f.d).attr("stroke", "none").attr("fill", f => "url(#" + f.id + ")");
@@ -1355,6 +1372,12 @@ function drawLines(host, series, opts) {
       if (anim) lp.attr("transform", "translate(" + slot + ",0)").transition().duration(LINE_ANIM_MS)
         .ease(d3.easeCubicOut).attr("transform", "translate(0,0)");
       else lp.interrupt().attr("transform", null);
+      // 种段点虚线（wavy 族：round cap 点划 + 低透明；历史位置稳定，免滑入动画）
+      g.selectAll("path.ldash").data(dashes).join("path").attr("class", "ldash")
+        .attr("fill", "none").attr("stroke-linejoin", "round").attr("stroke-linecap", "round")
+        .attr("stroke-width", (s.w || 1.6) * 0.9)
+        .attr("stroke", d => d.c).attr("d", d => d.d)
+        .attr("stroke-dasharray", "0.1 4.5").attr("opacity", 0.55);
       const cd = enough ? [{ c: Array.isArray(s.c) ? (s.c[cnt - 1] || C.cpu) : solid,
                              x: useT ? Math.min(w - padR - 1.5, Math.max(padL, X(cnt - 1))) : w - padR - 1.5,
                              y: YS(s.v[cnt - 1]) }] : [];
@@ -1435,11 +1458,12 @@ function drawRing(cv, pct, color, powW, charging) {
 function hist(keepMs, cap) {
   const a = [];
   return {
-    push(v, t) {
+    // sd=1 → DB 播种来源（绘制端走点虚线）；live push 缺省 sd=0（实线现状）
+    push(v, t, sd) {
       const ts = t || Date.now();
       let i = a.length; while (i > 0 && a[i - 1].t > ts) i--;
-      if (i > 0 && a[i - 1].t === ts) { a[i - 1].v = v; return; }
-      a.splice(i, 0, { t: ts, v });
+      if (i > 0 && a[i - 1].t === ts) { a[i - 1].v = v; a[i - 1].sd = sd ? 1 : 0; return; }
+      a.splice(i, 0, { t: ts, v, sd: sd ? 1 : 0 });
       const cut = a[a.length - 1].t - keepMs;
       while (a.length && a[0].t < cut) a.shift();
       if (a.length > cap) {
@@ -1703,7 +1727,7 @@ function renderCpu(fr, o) {
   const cols = rows.map(r => coreColors[r.v.core] || C.cpu);
   const gl = [];
   for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-  drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu, ts: rows.map(r => r.t) }],
+  drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) }],
     { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, time: true, winMs: chartWinMs("freq"), key: lastT(rows) });
 }
 async function tickCpu() {
@@ -1866,7 +1890,7 @@ function renderTherm(d, o) {
   if (!opts.noHist) H.hot.push(hot);
   const gl = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
   const hr = H.hot.win(chartWinMs("hot"), 1510);
-  drawLines($("#hotChart"), [{ v: hr.map(r => r.v), c: C.therm, ts: hr.map(r => r.t) }],
+  drawLines($("#hotChart"), [{ v: hr.map(r => r.v), c: C.therm, ts: hr.map(r => r.t), sd: hr.map(r => r.sd ? 1 : 0) }],
     { min: 20, max: 90, gridLines: gl, axis: true, xCap: 1510, time: true, winMs: chartWinMs("hot"), key: lastT(hr) });
   if (thermDrag && thermDrag.on) return;                 // 拖拽中：本轮免重建（最高温折线照更新）
   const list = $("#thermList");
@@ -1971,8 +1995,8 @@ function renderMem(d, o) {
   const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
   gl.push({ v: 80, label: "80", color: C.err, emph: true });
   drawLines($("#memChart"), [
-    { v: rows.map(r => r.v.m), c: C.mem, ts: rows.map(r => r.t) },
-    { v: rows.map(r => r.v.s), c: C.task, ts: rows.map(r => r.t) }
+    { v: rows.map(r => r.v.m), c: C.mem, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) },
+    { v: rows.map(r => r.v.s), c: C.task, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) }
   ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510, time: true, winMs: chartWinMs("mem"), key: lastT(rows) });
 }
 async function tickMem() {
@@ -2060,11 +2084,12 @@ function drawGpuChart() {
   for (const r of rows) if (r.v.f > smax) smax = r.v.f;
   const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
   const ts = rows.map(r => r.t);
+  const sd = rows.map(r => r.sd ? 1 : 0);
   drawLines($("#gpuChart"), [
-    { v: rows.map(r => r.v.l), c: C.gpu, ts },
+    { v: rows.map(r => r.v.l), c: C.gpu, ts, sd },
     /* 频率线 = 色序角色 2（tertiary）：原借 C.cpu（--a-cpu 淡紫）与 C.gpu 淡蓝同为高亮度
        冷色、暗色下色相距仅 ~41° 不达「同图两线色相可辨」；mem/batt 双线图经核对无此问题 */
-    { v: rows.map(r => r.v.f), c: C.tert, w: 1.1, tf: v => v / (smax || 1), ts }
+    { v: rows.map(r => r.v.f), c: C.tert, w: 1.1, tf: v => v / (smax || 1), ts, sd }
   ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510, time: true, winMs: chartWinMs("gpu"), key: lastT(rows) });
 }
 function renderGpu(d, o) {
@@ -2098,7 +2123,7 @@ async function seedGpu() {
       const e = g.get(t);
       if (typeof e.l !== "number") continue;                        // 使用率为主线：缺载轮次跳过
       if (typeof e.f === "number") prevF = e.f;                     // 缺频正向填充（CPU 稀疏归位同法）
-      H.gpu.push({ l: Math.min(100, Math.max(0, e.l)), f: prevF || 0 }, t);
+      H.gpu.push({ l: Math.min(100, Math.max(0, e.l)), f: prevF || 0 }, t, 1);
     }
   } catch { /* 回填失败容忍：图从实时开始 */ }
 }
@@ -3253,7 +3278,7 @@ function seedBattPush(rs) {
     const g = bg.get(t);
     if (typeof g.pct !== "number") continue;
     const pow = (typeof g.vm === "number" && typeof g.ua === "number") ? (g.vm / 1000) * (g.ua / 1e6) : 0;
-    HB.push({ pct: Math.min(100, Math.max(0, g.pct)), pow }, t);
+    HB.push({ pct: Math.min(100, Math.max(0, g.pct)), pow }, t, 1);
   }
 }
 // ② MEMORY + SWAP：同一 t 合成 {m,s}（SWAP 缺 → s=0）
@@ -3275,7 +3300,7 @@ function seedMemPush(rsM, rsS) {
     if (!(g.tot > 0) || typeof g.used !== "number") continue;
     const sw = sg.get(t);
     const s = (sw && sw.tot > 0 && typeof sw.used === "number") ? (sw.used / sw.tot) * 100 : 0;
-    H.mem.push({ m: (g.used / g.tot) * 100, s }, t);
+    H.mem.push({ m: (g.used / g.tot) * 100, s }, t, 1);
   }
 }
 // ③ CPU_FREQ：数值后缀归位（稀疏安全：长度=最大下标+1，缺核→上一轮同位值，再缺→0）
@@ -3301,7 +3326,7 @@ function seedFreqPush(rs) {
     prevGhz = ghz;
     let peak = 0, core = 0;
     for (let i = 0; i < n; i++) if (ghz[i] > peak) { peak = ghz[i]; core = i; }
-    H.freq.push({ peak, core, ghz }, t);
+    H.freq.push({ peak, core, ghz }, t, 1);
   }
 }
 // ④ THERM 热度线：每个 t 取全域 max
@@ -3313,7 +3338,7 @@ function seedHotPush(rs) {
     const cur = tg.get(ms);
     if (cur === undefined || r.v > cur) tg.set(ms, r.v);
   }
-  for (const t of asc(tg)) H.hot.push(tg.get(t), t);
+  for (const t of asc(tg)) H.hot.push(tg.get(t), t, 1);
 }
 
 /* 每图播种门闩：独立 promise / 独立 5s 超时 / 图内四色加载条 / 独立提示。
@@ -3358,13 +3383,13 @@ function seedGate(key, label, hostSel, work, onOk) {
 function redrawFreq() {
   const rows = H.freq.win(chartWinMs("freq"), 1510);
   const gl = []; for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-  drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu, ts: rows.map(r => r.t) }],
+  drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) }],
     { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, time: true, winMs: chartWinMs("freq"), key: lastT(rows) });
 }
 function redrawHot() {
   const rows = H.hot.win(chartWinMs("hot"), 1510);
   const glT = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
-  drawLines($("#hotChart"), [{ v: rows.map(r => r.v), c: C.therm, ts: rows.map(r => r.t) }],
+  drawLines($("#hotChart"), [{ v: rows.map(r => r.v), c: C.therm, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) }],
     { min: 20, max: 90, gridLines: glT, axis: true, xCap: 1510, time: true, winMs: chartWinMs("hot"), key: lastT(rows) });
 }
 function redrawMem() {
@@ -3372,8 +3397,8 @@ function redrawMem() {
   const glM = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
   glM.push({ v: 80, label: "80", color: C.err, emph: true });
   drawLines($("#memChart"), [
-    { v: rows.map(r => r.v.m), c: C.mem, ts: rows.map(r => r.t) },
-    { v: rows.map(r => r.v.s), c: C.task, ts: rows.map(r => r.t) }
+    { v: rows.map(r => r.v.m), c: C.mem, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) },
+    { v: rows.map(r => r.v.s), c: C.task, ts: rows.map(r => r.t), sd: rows.map(r => r.sd ? 1 : 0) }
   ], { min: 0, max: 100, gridLines: glM, axis: true, xCap: 1510, time: true, winMs: chartWinMs("mem"), key: lastT(rows) });
 }
 
