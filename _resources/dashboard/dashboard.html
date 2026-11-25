@@ -1010,7 +1010,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.20 -->
+    <!-- rev 2026-11-25.21 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1443,16 +1443,21 @@ const H = {
 
 /* ---------- 电池历史（5s⇄1s 双节奏）：按时间修剪至 72h，总量封顶 6000 点
    （封顶时对旧半区隔点抽稀 = 老数据先变稀）；绘制端再按当前窗步进取样 ====== */
+/* 电池历史缓冲 HB：与 winHist v2 同语义（按时刻有序插入 + 同刻覆盖 + 修剪基准 = 队尾
+   最大 t），不依赖门闩保序；CAP 超限时对前半数隔一抽稀（升序不变，近期半全量保留）。 */
 const HB = (() => {
   const CAP = 6000, KEEP_MS = 259200000; // 72h
   let a = [];
   return {
     push(rec) {
-      a.push(rec);
-      while (a.length && a[0].t < rec.t - KEEP_MS) a.shift();
+      let i = a.length; while (i > 0 && a[i - 1].t > rec.t) i--;
+      if (i > 0 && a[i - 1].t === rec.t) { a[i - 1].v = rec.v; return; }
+      a.splice(i, 0, rec);
+      const cut = a[a.length - 1].t - KEEP_MS;
+      while (a.length && a[0].t < cut) a.shift();
       if (a.length > CAP) {
         const mid = a.length >> 1, k = [];
-        for (let i = 0; i < a.length; i++) if (!(i < mid && (i & 1))) k.push(a[i]);
+        for (let j = 0; j < a.length; j++) if (!(j < mid && (j & 1))) k.push(a[j]);
         a = k;
       }
     },
