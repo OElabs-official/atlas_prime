@@ -1013,7 +1013,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.30 -->
+    <!-- rev 2026-11-25.31 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3301,7 +3301,7 @@ mqLight.addEventListener("change", () => {
    {t:毫秒,k,v}（坏行过滤 = 旧「畸形 t → 跳行」语义）。服务端按 t 升序，limit 钳 1..=5000。
    自持封顶：freq/mem/swap/temp/gpu=5000 行（temp 传感器密集 ≈5h 覆盖，24h 视图缺口由
    live 续采自然补齐）、battery=4500（≈21h）。去重护栏：ms > Date.now()-5000 的种子行丢弃。
-   每 kind 独立 5s 超时：某图超时/失败只影响该图（迟到弃收），其余图历史照常上屏。 */
+   每 kind 独立 10s 超时：某图超时/失败只影响该图（迟到弃收），其余图历史照常上屏。 */
 // fmt=arr 行适配器：[[ts_secs,"k",v],...] → [{t:毫秒,k,v}]；非数组 → []。
 const histRows = d => Array.isArray(d) ? d
   .filter(r => Array.isArray(r) && r.length === 3
@@ -3393,7 +3393,7 @@ function seedHotPush(rs) {
   for (const t of asc(tg)) H.hot.push(tg.get(t), t, 1);
 }
 
-/* 每图播种门闩：独立 promise / 独立 5s 超时 / 图内四色加载条 / 独立提示。
+/* 每图播种门闩：独立 promise / 独立 10s 超时 / 图内四色加载条 / 独立提示。
    状态 SEEDK[key]：pending→ok|timeout|err；超时后迟到 work 结果被 builder 前置检查弃收。 */
 function seedGate(key, label, hostSel, work, onOk) {
   SEEDK[key] = "pending";
@@ -3402,9 +3402,15 @@ function seedGate(key, label, hostSel, work, onOk) {
   if (host) { host.style.position = "relative"; bar = el("span", "chartload"); bar.appendChild(el("i")); host.appendChild(bar); }
   const p = new Promise(res => {
     const settle = st => { if (SEEDK[key] !== "pending") return; SEEDK[key] = st; res(st); };
-    setTimeout(() => settle("timeout"), 5000);
+    setTimeout(() => settle("timeout"), 10000);
     Promise.resolve().then(work).then(() => settle("ok"), () => settle("err"));
   });
+  p.again = () => {                                   // 静默重播种（回页补洞）：幂等、免加载条与提示
+    if (SEEDK[key] === "pending") return;
+    SEEDK[key] = "pending";
+    Promise.resolve().then(work).then(() => { SEEDK[key] = "ok"; try { onOk(); } catch { /* 下一拍兜底 */ } },
+      () => { SEEDK[key] = "err"; });
+  };
   p.then(st => {
     if (bar) bar.remove();
     // 临时诊断（rev .23 probe，.24 改图上直书）：标签常驻该图右上角，刷新前一直可读
@@ -3420,7 +3426,7 @@ function seedGate(key, label, hostSel, work, onOk) {
       const tag = el("span", "seedtag", txt);
       host.appendChild(tag);
     }
-    if (st !== "ok") toast(label + " 历史" + (st === "timeout" ? "加载超时（>5s）" : "不可用") + "，折线从实时开始", "err");
+    if (st !== "ok") toast(label + " 历史" + (st === "timeout" ? "加载超时（>10s）" : "不可用") + "，折线从实时开始", "err");
     // 临时诊断：全局可查快照（控制台 window.DBG()）
     window.DBG = () => ({ seeds: Object.assign({}, SEEDK), winIx: chartWinIx,
       pts: { freq: [H.freq.win(300000,1510).length, H.freq.win(3600000,1510).length, H.freq.win(86400000,1510).length],
@@ -3553,7 +3559,7 @@ function redrawMem() {
 /* ---------- 启动 ---------- */
 cacheColors();
 /* 每图播种门闩（rev .22，独立化改造）：每张折线卡只对自己的 kind 负责——独立请求、
-   独立 5s 超时、图内四色加载条、独立失败提示；任何一图的慢/失败都不拖累其它卡与
+   独立 10s 超时、图内四色加载条、独立失败提示；任何一图的慢/失败都不拖累其它卡与
    其它数据面。tickBusy = tick 单飞锁（门后排队拍合并一次补拍）；hist v3 缓冲自身
    乱序免疫（有序插入），门闩仅保正常态「种子先于 live」。GPU 走延迟种子，无启动门闩。 */
 const SEEDK = {};
@@ -3616,7 +3622,15 @@ wireDbl("#card-cons", () => { safeFit(activeRec()); });   // 双击 = 对活动�
 function tickAll() {
   tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickProc(); tickTasks();
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) tickAll(); });
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  // 回页三步：先用现有缓冲立即重绘（图先回来）→ 隐屏 ≥30s 则静默重播种补盲区（幂等）→ 全量补拍
+  try { redrawFreq(); redrawHot(); redrawMem(); drawGpuChart(); drawBattChart(); } catch { /* 无数据容忍 */ }
+  if (hiddenAt && Date.now() - hiddenAt >= 30000)
+    for (const g of Object.values(gates)) { try { g.again(); } catch { /* 单路失败不拦别的 */ } }
+  tickAll();
+});
 requestAnimationFrame(() => {
   const cards = document.querySelectorAll(".card");
   cards.forEach((c, i) => setTimeout(() => c.classList.add("in"), 60 * i));
