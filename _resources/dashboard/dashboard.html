@@ -852,6 +852,19 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 <link rel="stylesheet" href="/vendor/xterm.css">
 </head>
 <body>
+<style>
+/* 启动历史播种加载条（template §3.33 四色序列 → 线性变体）：4dp 顶缘固定，
+   四色渐变段 = 本页四族主色（--a-cpu/--a-gpu/--a-mem/--a-net，与模板 primary/
+   primary-container/tertiary/tertiary-container 四象限同构），indeterminate 往返滑行；
+   播种门闩落地（ok / 5s 超时 / 失败）即移除。reduced-motion = 静止置中。 */
+#seedbar{position:fixed;top:0;left:0;right:0;height:4px;z-index:90;background:color-mix(in srgb,var(--a-cpu) 10%,transparent)}
+#seedbar .sb-bar{position:absolute;top:0;bottom:0;width:36%;border-radius:2px;
+  background:linear-gradient(90deg,var(--a-cpu),var(--a-gpu),var(--a-mem),var(--a-net));
+  animation:seedbarSlide 1.4s ease-in-out infinite alternate}
+@keyframes seedbarSlide{from{left:-36%}to{left:100%}}
+@media(prefers-reduced-motion:reduce){#seedbar .sb-bar{animation:none;left:32%}}
+</style>
+<div id="seedbar" role="progressbar" aria-label="加载历史数据"><span class="sb-bar"></span></div>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
 
 <div class="shell">
@@ -997,7 +1010,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.19 -->
+    <!-- rev 2026-11-25.20 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1402,11 +1415,16 @@ function drawRing(cv, pct, color, powW, charging) {
 }
 
 /* ---------- 时间窗历史环形缓冲（fps 切换时按时间窗自然伸缩） ---------- */
+/* winHist v2：按时刻有序插入（迟到种子/乱序 push 免疫）+ 修剪基准 = 队尾（最大 t）。
+   同刻覆盖：重复时戳以新值替换（播种遇同刻 live 边缘点 = 语义正确去重）。 */
 function winHist(winMs, maxN) {
   const a = [];
   return {
     push(v, t) {
-      a.push({ t: t || Date.now(), v });
+      const ts = t || Date.now();
+      let i = a.length; while (i > 0 && a[i - 1].t > ts) i--;
+      if (i > 0 && a[i - 1].t === ts) { a[i - 1].v = v; return; }
+      a.splice(i, 0, { t: ts, v });
       const cut = a[a.length - 1].t - winMs;
       while (a.length > maxN || a[0].t < cut) a.shift();
     },
@@ -1681,6 +1699,9 @@ function renderCpu(fr, o) {
   drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu }], { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
 }
 async function tickCpu() {
+  await seedDone;                                      // 播种门闩：库数据先于 live 点入缓冲
+  if (tickBusy.cpu) return;                            // 门后排队拍合并（单飞锁）
+  tickBusy.cpu = true;
   try {
     const d = await getJSON("/system/cpu");
     const raw = d && Array.isArray(d.freq_ghz) ? d.freq_ghz : [];
@@ -1690,6 +1711,7 @@ async function tickCpu() {
     renderCpu(fr);
     okPanel("cpu");
   } catch { failPanel("cpu"); }
+  finally { tickBusy.cpu = false; }
 }
 
 /* ---------- THERMALS（分组竖条矩阵） ---------- */
@@ -1878,6 +1900,9 @@ function renderTherm(d, o) {
 }
 const thermPrev = new Map();   // 组键→上轮温度
 async function tickTherm() {
+  await seedDone;
+  if (tickBusy.therm) return;
+  tickBusy.therm = true;
   try {
     const d = await getJSON("/system/thermal");
     if (!d || typeof d !== "object") throw new Error("thermal payload invalid");
@@ -1885,6 +1910,7 @@ async function tickTherm() {
     renderTherm(d);
     okPanel("therm");
   } catch { failPanel("therm"); }
+  finally { tickBusy.therm = false; }
 }
 
 /* ---------- MEMORY（双层环 + 双曲线） ---------- */
@@ -1940,6 +1966,9 @@ function renderMem(d, o) {
   ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
 }
 async function tickMem() {
+  await seedDone;
+  if (tickBusy.mem) return;
+  tickBusy.mem = true;
   try {
     const d = await getJSON("/system/mem");
     if (!d || !Number(d.total_mem_mb)) throw new Error("total_mem_mb zero");
@@ -1947,6 +1976,7 @@ async function tickMem() {
     renderMem(d);
     okPanel("mem");
   } catch { failPanel("mem"); }
+  finally { tickBusy.mem = false; }
 }
 
 /* ---------- GPU（双环表盘 = netRings 机件复用，见下方 drawGpuRing；面积图 = memChart 同族；
@@ -2062,6 +2092,10 @@ async function seedGpu() {
   } catch { /* 回填失败容忍：图从实时开始 */ }
 }
 async function tickGpu() {
+  await seedDone;
+  if (tickBusy.gpu) return;
+  tickBusy.gpu = true;
+  try {
   let d = null;
   try { d = await getJSON("/system/gpu"); } catch { d = null; }
   if (!d || d.available !== true) {
@@ -2073,10 +2107,11 @@ async function tickGpu() {
     return;
   }
   if (!gpuSeen) { gpuSeen = true; showBox(cardMeta.gpu.elm, true); }   // 首次现身：入流但视口不动
-  if (!gpuSeeded) { gpuSeeded = true; await seedGpu(); }               // 种子必早于 live 点 → 时序不破
+  if (!gpuSeeded) { gpuSeeded = true; if (SEED.st === "ok") await seedGpu(); }   // 门规：仅播种成功才回填历史
   lastData.gpu = d;
   renderGpu(d);
   okPanel("gpu");
+  } finally { tickBusy.gpu = false; }
 }
 
 /* ---------- BATTERY（默认 5s · 双击切 1s；服务器有 1/s CLI 桶 + 缓存 HIT 兜底） ---------- */
@@ -2133,6 +2168,9 @@ function renderBatt(d, o) {
   else bp.append((amp >= 0 ? "+" : "−") + f2(Math.abs(powW)), unit("W"));
 }
 async function tickBatt() {
+  await seedDone;
+  if (tickBusy.batt) return;
+  tickBusy.batt = true;
   try {
     const d = await getJSON("/system/cli/battery");
     if (!d || d.present !== true) throw new Error("battery not present");
@@ -2140,6 +2178,7 @@ async function tickBatt() {
     renderBatt(d);
     okPanel("batt");
   } catch { failPanel("batt"); }
+  finally { tickBusy.batt = false; }
 }
 /* 折线窗滑动手势：pointer 水平拖拽 ≥40px —— 左滑 72h / 右滑 24h */
 {
@@ -3191,6 +3230,8 @@ async function seedHistory() {
     getJSON("/db/history?kind=cpu_freq&limit=200&fmt=arr"),  // cpu0..cpuN（GHz）
     getJSON("/db/history?kind=temp&limit=2000&fmt=arr")      // {cpu_core|gpu|camera|pmic|battery}.{i}（°C）
   ]);
+  // 门闩已落地（>5s 超时 / 失败）→ 迟到种子一律弃收：不再入缓冲（超时 = 放弃历史，直接 live）
+  if (SEED.st !== "pending") return;
   const arr = histRows;                                // 坏行过滤 + 秒→毫秒 统一在适配器
   // 行合法性已由 histRows 保证（t=有限毫秒、v=有限数值）；保留数值直取
   const msOf = r => (r && typeof r.t === "number" && Number.isFinite(r.t)
@@ -3366,7 +3407,22 @@ function redrawHistCharts() {
 
 /* ---------- 启动 ---------- */
 cacheColors();
-seedHistory().then(redrawHistCharts).catch(() => toast("历史数据不可用，图表从实时开始", "err"));
+/* 播种门闩（rev .20，修「乱序入缓冲」缺陷）：五张历史卡（cpu/therm/mem/gpu/batt）的
+   live 点在库数据尘埃落定前不落缓冲——返回=ok / >5s=timeout（弃历史，live 直接起画）/
+   失败=err。四色序列加载条（body 首 #seedbar）随门闩落地移除。tickBusy = 门后排队拍
+   合并的单飞锁；winHist v2 有序插入兜底 seedGpu 等残余乱序路径。 */
+const SEED = { st: "pending" };
+const tickBusy = {};
+const seedDone = new Promise(res => {
+  const settle = st => { if (SEED.st === "pending") { SEED.st = st; res(st); } };
+  setTimeout(() => settle("timeout"), 5000);
+  seedHistory().then(() => settle("ok"), () => settle("err"));
+});
+seedDone.then(st => {
+  const bar = $("#seedbar"); if (bar) bar.remove();
+  if (st === "ok") redrawHistCharts();
+  else toast(st === "timeout" ? "历史数据加载超时（>5s），图表从实时开始" : "历史数据不可用，图表从实时开始", "err");
+});
 arm("cpu", tickCpu, fastMs("cpu"), 200);           // 快速 · 错峰
 arm("therm", tickTherm, fastMs("therm"), 700);     // 快速 · 错峰
 arm("mem", tickMem, fastMs("mem"), 1200);          // 快速 · 错峰
