@@ -853,18 +853,17 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 </head>
 <body>
 <style>
-/* 启动历史播种加载条（template §3.33 四色序列 → 线性变体）：4dp 顶缘固定，
-   四色渐变段 = 本页四族主色（--a-cpu/--a-gpu/--a-mem/--a-net，与模板 primary/
-   primary-container/tertiary/tertiary-container 四象限同构），indeterminate 往返滑行；
-   播种门闩落地（ok / 5s 超时 / 失败）即移除。reduced-motion = 静止置中。 */
-#seedbar{position:fixed;top:0;left:0;right:0;height:4px;z-index:90;background:color-mix(in srgb,var(--a-cpu) 10%,transparent)}
-#seedbar .sb-bar{position:absolute;top:0;bottom:0;width:36%;border-radius:2px;
+/* 每图独立的历史播种加载指示（template §3.33 四色序列 → 每图变体）：JS 注入到各
+   折线 host 顶缘，3dp 四色渐变段（--a-cpu/--a-gpu/--a-mem/--a-net 与模板四象限同构）
+   indeterminate 往返；该图种子门闩落地（ok/超时/失败）即移除。他图互不影响。
+   reduced-motion = 静止置中。 */
+.chartload{position:absolute;left:0;right:0;top:0;height:3px;z-index:3;overflow:hidden;border-radius:2px}
+.chartload i{position:absolute;top:0;bottom:0;width:36%;border-radius:2px;
   background:linear-gradient(90deg,var(--a-cpu),var(--a-gpu),var(--a-mem),var(--a-net));
-  animation:seedbarSlide 1.4s ease-in-out infinite alternate}
-@keyframes seedbarSlide{from{left:-36%}to{left:100%}}
-@media(prefers-reduced-motion:reduce){#seedbar .sb-bar{animation:none;left:32%}}
+  animation:chartloadSlide 1.4s ease-in-out infinite alternate}
+@keyframes chartloadSlide{from{left:-36%}to{left:100%}}
+@media(prefers-reduced-motion:reduce){.chartload i{animation:none;left:32%}}
 </style>
-<div id="seedbar" role="progressbar" aria-label="加载历史数据"><span class="sb-bar"></span></div>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
 
 <div class="shell">
@@ -1010,7 +1009,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.21 -->
+    <!-- rev 2026-11-25.22 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1415,9 +1414,11 @@ function drawRing(cv, pct, color, powW, charging) {
 }
 
 /* ---------- 时间窗历史环形缓冲（fps 切换时按时间窗自然伸缩） ---------- */
-/* winHist v2：按时刻有序插入（迟到种子/乱序 push 免疫）+ 修剪基准 = 队尾（最大 t）。
-   同刻覆盖：重复时戳以新值替换（播种遇同刻 live 边缘点 = 语义正确去重）。 */
-function winHist(winMs, maxN) {
+/* hist v3（统一历史缓冲，原 winHist/HB 归一）：按时刻有序插入（乱序免疫）+ 同刻覆盖 +
+   留存修剪基准 = 队尾（最大 t）+ 超 CAP 对前半数隔一抽稀（升序不变，近期半全量保留）。
+   绘制期 win(winMs, maxPts) 按时间窗过滤 + 步进取样（≤maxPts、末点恒收）= battery 实证画法。
+   绘制 x 标尺固定槽数（drawLines xCap，右锚定）：槽宽恒定，未满窗时线从右缘向左生长。 */
+function hist(keepMs, cap) {
   const a = [];
   return {
     push(v, t) {
@@ -1425,37 +1426,9 @@ function winHist(winMs, maxN) {
       let i = a.length; while (i > 0 && a[i - 1].t > ts) i--;
       if (i > 0 && a[i - 1].t === ts) { a[i - 1].v = v; return; }
       a.splice(i, 0, { t: ts, v });
-      const cut = a[a.length - 1].t - winMs;
-      while (a.length > maxN || a[0].t < cut) a.shift();
-    },
-    get rows() { return a; }
-  };
-}
-/* 快速三连折线窗 = 固定 5min（1fps→300 点 / 5fps→1500 点，上限 1510）；电池另有 HB 模块。
-   绘制 x 标尺与缓冲上限同数钉死（drawLines xCap=1510 / 电池 1200，右锚定）：
-   槽宽恒定，未满窗时线从右缘向左生长，1fps/5fps 点密度可比。 */
-const H = {
-  freq: winHist(300000, 1510),
-  hot:  winHist(300000, 1510),
-  mem:  winHist(300000, 1510),
-  gpu:  winHist(300000, 1510)
-};
-
-/* ---------- 电池历史（5s⇄1s 双节奏）：按时间修剪至 72h，总量封顶 6000 点
-   （封顶时对旧半区隔点抽稀 = 老数据先变稀）；绘制端再按当前窗步进取样 ====== */
-/* 电池历史缓冲 HB：与 winHist v2 同语义（按时刻有序插入 + 同刻覆盖 + 修剪基准 = 队尾
-   最大 t），不依赖门闩保序；CAP 超限时对前半数隔一抽稀（升序不变，近期半全量保留）。 */
-const HB = (() => {
-  const CAP = 6000, KEEP_MS = 259200000; // 72h
-  let a = [];
-  return {
-    push(rec) {
-      let i = a.length; while (i > 0 && a[i - 1].t > rec.t) i--;
-      if (i > 0 && a[i - 1].t === rec.t) { a[i - 1].v = rec.v; return; }
-      a.splice(i, 0, rec);
-      const cut = a[a.length - 1].t - KEEP_MS;
+      const cut = a[a.length - 1].t - keepMs;
       while (a.length && a[0].t < cut) a.shift();
-      if (a.length > CAP) {
+      if (a.length > cap) {
         const mid = a.length >> 1, k = [];
         for (let j = 0; j < a.length; j++) if (!(j < mid && (j & 1))) k.push(a[j]);
         a = k;
@@ -1473,7 +1446,22 @@ const HB = (() => {
       return out;
     }
   };
-})();
+}
+/* 快速四图：自持 24h + 绘制窗三档（5min/1h/24h，图面滑动手势切换，同 battery 族）。
+   1fps×24h 会被 cap 抽稀（5min 窗永远全精度：抽稀只动前半段，近期半恒全量）。 */
+const FAST_WIN = [300000, 3600000, 86400000];
+const FAST_WIN_LBL = ["5m", "1h", "24h"];
+const chartWinIx = { freq: 0, hot: 0, mem: 0, gpu: 0 };
+const chartWinMs = k => FAST_WIN[chartWinIx[k]];
+const H = {
+  freq: hist(86400000, 6000),
+  hot:  hist(86400000, 6000),
+  mem:  hist(86400000, 6000),
+  gpu:  hist(86400000, 6000)
+};
+
+/* ---------- 电池历史（5s⇄1s 双节奏）：同构 hist 实例（72h / 6000） ====== */
+const HB = hist(259200000, 6000);
 let batt72 = false;                       // 折线窗：false=24h（默认）· true=72h（滑动手势切换）
 const battWinMs = () => batt72 ? 259200000 : 86400000;
 
@@ -1678,10 +1666,10 @@ function renderCpu(fr, o) {
   const now = Date.now();
   // 历史条目 = {peak, core, ghz:[每核原值]}；60s 均值纯前端由 ghz 数组聚合（读 r.v.peak / r.v.ghz）
   if (!opts.noHist) H.freq.push({ peak, core: peakIdx, ghz: fr.slice() }, now);
-  const rows = H.freq.rows;
+  const rows = H.freq.win(chartWinMs("freq"), 1510);   // 当前窗绘制序（窗过滤+取样）
   let avgSum = 0, avgN = 0;
   const coreSum = new Array(fr.length).fill(0), coreN = new Array(fr.length).fill(0);
-  for (const r of rows) if (now - r.t <= 60000) {
+  for (const r of H.freq.win(65000, 1510)) if (now - r.t <= 60000) {   // 60s 均值恒用 65s 细窗（与视图窗无关）
     const g = r.v.ghz;
     for (let i = 0; i < g.length && i < fr.length; i++) { avgSum += g[i]; coreSum[i] += g[i]; coreN[i]++; }
     avgN += Math.min(g.length, fr.length);
@@ -1704,7 +1692,7 @@ function renderCpu(fr, o) {
   drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu }], { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
 }
 async function tickCpu() {
-  await seedDone;                                      // 播种门闩：库数据先于 live 点入缓冲
+  await gates.freq;                                    // 每图独立门闩：仅等自己的 kind
   if (tickBusy.cpu) return;                            // 门后排队拍合并（单飞锁）
   tickBusy.cpu = true;
   try {
@@ -1862,7 +1850,8 @@ function renderTherm(d, o) {
   for (const c of cats) hot = hot === null ? c.mx : Math.max(hot, c.mx);
   if (!opts.noHist) H.hot.push(hot);
   const gl = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
-  drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }], { min: 20, max: 90, gridLines: gl, axis: true, xCap: 1510, key: lastT(H.hot.rows) });
+  const hr = H.hot.win(chartWinMs("hot"), 1510);
+  drawLines($("#hotChart"), [{ v: hr.map(r => r.v), c: C.therm }], { min: 20, max: 90, gridLines: gl, axis: true, xCap: 1510, key: lastT(hr) });
   if (thermDrag && thermDrag.on) return;                 // 拖拽中：本轮免重建（最高温折线照更新）
   const list = $("#thermList");
   const snap = scrollSnap(list);                         // 重建不改视口 / 列表内滚动位
@@ -1905,7 +1894,7 @@ function renderTherm(d, o) {
 }
 const thermPrev = new Map();   // 组键→上轮温度
 async function tickTherm() {
-  await seedDone;
+  await gates.hot;
   if (tickBusy.therm) return;
   tickBusy.therm = true;
   try {
@@ -1962,7 +1951,7 @@ function renderMem(d, o) {
   setRv("#memRv", (used / 1024).toFixed(1));
   setRv("#swapRv", st ? (su / 1024).toFixed(1) : null);
   if (!opts.noHist) H.mem.push({ m: pct, s: spct });
-  const rows = H.mem.rows;
+  const rows = H.mem.win(chartWinMs("mem"), 1510);
   const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
   gl.push({ v: 80, label: "80", color: C.err, emph: true });
   drawLines($("#memChart"), [
@@ -1971,7 +1960,7 @@ function renderMem(d, o) {
   ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
 }
 async function tickMem() {
-  await seedDone;
+  await gates.mem;
   if (tickBusy.mem) return;
   tickBusy.mem = true;
   try {
@@ -2050,7 +2039,7 @@ function drawGpuRing(cv, load, mhz) {
   wavyReg(cv, () => drawGpuRing(cv, load, mhz));  // wavy 重绘登记（幂等）
 }
 function drawGpuChart() {
-  const rows = H.gpu.rows;
+  const rows = H.gpu.win(chartWinMs("gpu"), 1510);
   let smax = gpuMax;
   for (const r of rows) if (r.v.f > smax) smax = r.v.f;
   const gl = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
@@ -2077,7 +2066,7 @@ function renderGpu(d, o) {
 }
 async function seedGpu() {
   try {
-    const rows = await getJSON("/db/history?kind=gpu&limit=200&fmt=arr"); // {load_pct,freq_mhz}，t 升序（紧凑形，histRows 适配）
+    const rows = await getJSON("/db/history?kind=gpu&limit=5000&fmt=arr"); // {load_pct,freq_mhz}，t 升序（紧凑形，histRows 适配；5000 行 ≈ 33h 轮次）
     if (!Array.isArray(rows)) return;
     const cut = Date.now() - 5000;                                  // 去重护栏：过新种子行跳过
     const g = new Map();
@@ -2097,7 +2086,7 @@ async function seedGpu() {
   } catch { /* 回填失败容忍：图从实时开始 */ }
 }
 async function tickGpu() {
-  await seedDone;
+  // GPU 无启动门闩：种子在首次成功拍内延迟回填（先种后 live，时序天然正确；卡缺席时本就自隐）
   if (tickBusy.gpu) return;
   tickBusy.gpu = true;
   try {
@@ -2112,7 +2101,7 @@ async function tickGpu() {
     return;
   }
   if (!gpuSeen) { gpuSeen = true; showBox(cardMeta.gpu.elm, true); }   // 首次现身：入流但视口不动
-  if (!gpuSeeded) { gpuSeeded = true; if (SEED.st === "ok") await seedGpu(); }   // 门规：仅播种成功才回填历史
+  if (!gpuSeeded) { gpuSeeded = true; await seedGpu(); }                // 种子必早于 live 点 → 时序不破
   lastData.gpu = d;
   renderGpu(d);
   okPanel("gpu");
@@ -2157,8 +2146,8 @@ function renderBatt(d, o) {
   const aRaw = Number(d.current_average) || Number(d.current) || 0; // 微安，负=放电
   const amp = aRaw / 1e6;
   const powW = aRaw === 0 ? 0 : vV * amp;                    // 瓦，带符号
-  // 记录形状 = {t, v:{pct,pow}}：与 winHist 同款，绘制端统一读 r.v.pct / r.v.pow
-  if (!opts.noHist) HB.push({ t: Date.now(), v: { pct, pow: powW } });
+  // 记录形状 = {v:{pct,pow}, t}（hist 统一形状）：绘制端统一读 r.v.pct / r.v.pow
+  if (!opts.noHist) HB.push({ pct, pow: powW }, Date.now());
   const col = pct <= 15 ? C.err : C.pow;
   drawRing($("#battRing"), pct, col, powW, amp > 0);
   drawBattChart();
@@ -2173,7 +2162,7 @@ function renderBatt(d, o) {
   else bp.append((amp >= 0 ? "+" : "−") + f2(Math.abs(powW)), unit("W"));
 }
 async function tickBatt() {
-  await seedDone;
+  await gates.batt;
   if (tickBusy.batt) return;
   tickBusy.batt = true;
   try {
@@ -3212,62 +3201,53 @@ mqLight.addEventListener("change", () => {
   for (const rec of consSess.values()) { try { rec.term.options.theme = termTheme(); } catch { /* 主题热替换容忍 */ } }   // 全部会话终端配色随 OS 明暗热翻转
 });
 
-/* ---------- 历史回填（/db/history：打开即播种，随后实时续采） ----------
-   种子请求带 &fmt=arr（task-28 紧凑形，冷启动载荷 ≤60%）：行契约 =
-   [[ts_secs,"k",v],...]（t 为 unix 秒数值）；histRows 统一适配成 {t:<毫秒>,k,v}
-   （秒 ×1000；非三元组/字段类型不符的坏行在此过滤 = 旧「畸形 t → 跳行」语义）。
-   服务端已按 t 升序；limit 服务端钳 1..=5000。
-   t 已是毫秒时刻，比 Date.now()-5000 更新的行丢弃（避免与即将到来的首个 live 样本重复边缘）。
-   5min 窗卡（freq/hot/mem）经 winHist 修剪只剩末端 2-3 个种子点 = 预期行为；
-   电池 HB 自持 72h 修剪，种子旧点仅在 72h 视图可见 = 正确行为。 */
+/* ---------- 历史回填（/db/history：每图独立播种、独立门闩、独立加载指示） ----------
+   种子请求带 &fmt=arr（紧凑形）：行契约 = [[ts_secs,"k",v],...]；histRows 统一适配
+   {t:毫秒,k,v}（坏行过滤 = 旧「畸形 t → 跳行」语义）。服务端按 t 升序，limit 钳 1..=5000。
+   自持封顶：freq/mem/swap/temp/gpu=5000 行（temp 传感器密集 ≈5h 覆盖，24h 视图缺口由
+   live 续采自然补齐）、battery=4500（≈21h）。去重护栏：ms > Date.now()-5000 的种子行丢弃。
+   每 kind 独立 5s 超时：某图超时/失败只影响该图（迟到弃收），其余图历史照常上屏。 */
 // fmt=arr 行适配器：[[ts_secs,"k",v],...] → [{t:毫秒,k,v}]；非数组 → []。
 const histRows = d => Array.isArray(d) ? d
   .filter(r => Array.isArray(r) && r.length === 3
     && Number.isFinite(r[0]) && typeof r[1] === "string"
     && typeof r[2] === "number" && Number.isFinite(r[2]))
   .map(r => ({ t: r[0] * 1000, k: r[1], v: r[2] })) : [];
-async function seedHistory() {
-  const cut = Date.now() - 5000;                       // 去重护栏：解析毫秒 > cut 的种子行跳过
-  const [battRows, memRows, swapRows, freqRows, tempRows] = await Promise.all([
-    getJSON("/db/history?kind=battery&limit=4500&fmt=arr"), // 7 键/轮 → ~640 轮 ≈ 21h
-    getJSON("/db/history?kind=mem&limit=200&fmt=arr"),       // total/used/avail（MB）
-    getJSON("/db/history?kind=swap&limit=200&fmt=arr"),      // total/used（MB）
-    getJSON("/db/history?kind=cpu_freq&limit=200&fmt=arr"),  // cpu0..cpuN（GHz）
-    getJSON("/db/history?kind=temp&limit=2000&fmt=arr")      // {cpu_core|gpu|camera|pmic|battery}.{i}（°C）
-  ]);
-  // 门闩已落地（>5s 超时 / 失败）→ 迟到种子一律弃收：不再入缓冲（超时 = 放弃历史，直接 live）
-  if (SEED.st !== "pending") return;
-  const arr = histRows;                                // 坏行过滤 + 秒→毫秒 统一在适配器
-  // 行合法性已由 histRows 保证（t=有限毫秒、v=有限数值）；保留数值直取
-  const msOf = r => (r && typeof r.t === "number" && Number.isFinite(r.t)
-    && typeof r.v === "number" && Number.isFinite(r.v)) ? r.t : NaN;
-  const asc = m => Array.from(m.keys()).sort((a, b) => a - b);
+const msOf = r => (r && typeof r.t === "number" && Number.isFinite(r.t)
+  && typeof r.v === "number" && Number.isFinite(r.v)) ? r.t : NaN;
+const asc = m => Array.from(m.keys()).sort((a, b) => a - b);
+const seedCut = () => Date.now() - 5000;               // 去重护栏：ms > cut 的种子行丢弃
 
-  // ① BATTERY：按 t 分组取 pct + (volt_mv,current_ua)；current_ua = 微安
-  //   （负=放电），pow(W) = (volt_mv/1000) × (current/1e6)；缺 pct 的轮次跳过
+/* 四个播种分组（纯函数：已适配行 → 按 t 聚合 → push 入对应 hist 缓冲；乱序由 hist v3 免疫） */
+// ① BATTERY：按 t 取 pct + (volt_mv,current_ua)；current_ua=微安（负=放电），
+//    pow(W)=(volt_mv/1000)×(ua/1e6)；缺 pct 的轮次跳过
+function seedBattPush(rs) {
+  const cut = seedCut();
   const bg = new Map();
-  for (const r of arr(battRows)) {
-    const ms = msOf(r); if (!(ms <= cut)) continue;    // NaN（畸形 t）或过新 → 跳行
+  for (const r of rs) {
+    const ms = msOf(r); if (!(ms <= cut)) continue;
     let g = bg.get(ms); if (!g) bg.set(ms, g = {});
     if (r.k === "pct") g.pct = r.v;
     else if (r.k === "volt_mv") g.vm = r.v;
     else if (r.k === "current_ua") g.ua = r.v;
   }
-  for (const t of asc(bg)) {                           // t 此处已是毫秒时刻
+  for (const t of asc(bg)) {
     const g = bg.get(t);
     if (typeof g.pct !== "number") continue;
     const pow = (typeof g.vm === "number" && typeof g.ua === "number") ? (g.vm / 1000) * (g.ua / 1e6) : 0;
-    HB.push({ t, v: { pct: Math.min(100, Math.max(0, g.pct)), pow } });
+    HB.push({ pct: Math.min(100, Math.max(0, g.pct)), pow }, t);
   }
-
-  // ② MEMORY + SWAP：同一 t 合成 {m,s}（SWAP 缺 → s=0）
+}
+// ② MEMORY + SWAP：同一 t 合成 {m,s}（SWAP 缺 → s=0）
+function seedMemPush(rsM, rsS) {
+  const cut = seedCut();
   const mg = new Map(), sg = new Map();
-  for (const r of arr(memRows)) {
+  for (const r of rsM) {
     const ms = msOf(r); if (!(ms <= cut)) continue;
     let g = mg.get(ms); if (!g) mg.set(ms, g = {});
     if (r.k === "total") g.tot = r.v; else if (r.k === "used") g.used = r.v;
   }
-  for (const r of arr(swapRows)) {
+  for (const r of rsS) {
     const ms = msOf(r); if (!(ms <= cut)) continue;
     let g = sg.get(ms); if (!g) sg.set(ms, g = {});
     if (r.k === "total") g.tot = r.v; else if (r.k === "used") g.used = r.v;
@@ -3279,15 +3259,17 @@ async function seedHistory() {
     const s = (sw && sw.tot > 0 && typeof sw.used === "number") ? (sw.used / sw.tot) * 100 : 0;
     H.mem.push({ m: (g.used / g.tot) * 100, s }, t);
   }
-
-  // ③ CPU_FREQ：按数值后缀归位（稀疏安全：长度 = 最大下标+1，缺核 → 上一轮同位值，再缺 → 0）
+}
+// ③ CPU_FREQ：数值后缀归位（稀疏安全：长度=最大下标+1，缺核→上一轮同位值，再缺→0）
+function seedFreqPush(rs) {
+  const cut = seedCut();
   const fg = new Map();
-  for (const r of arr(freqRows)) {
+  for (const r of rs) {
     const ms = msOf(r); if (!(ms <= cut)) continue;
     const m = /^cpu(\d+)$/.exec(String(r.k));
     if (!m) continue;
     let g = fg.get(ms); if (!g) fg.set(ms, g = []);
-    g[Number(m[1])] = r.v;                             // 稀疏赋值 → length 即最大下标+1
+    g[Number(m[1])] = r.v;
   }
   let prevGhz = null;
   for (const t of asc(fg)) {
@@ -3303,40 +3285,84 @@ async function seedHistory() {
     for (let i = 0; i < n; i++) if (ghz[i] > peak) { peak = ghz[i]; core = i; }
     H.freq.push({ peak, core, ghz }, t);
   }
-
-  // ④ THERM 热度线：每个 t 取全域 max
+}
+// ④ THERM 热度线：每个 t 取全域 max
+function seedHotPush(rs) {
+  const cut = seedCut();
   const tg = new Map();
-  for (const r of arr(tempRows)) {
+  for (const r of rs) {
     const ms = msOf(r); if (!(ms <= cut)) continue;
     const cur = tg.get(ms);
     if (cur === undefined || r.v > cur) tg.set(ms, r.v);
   }
   for (const t of asc(tg)) H.hot.push(tg.get(t), t);
 }
-/* 播种后四图各重绘一次（纯读历史缓冲，与 render* 内同一套轴/刻度定义；
-   live tick 到达后各自整体重渲染，此处只保证回填立即可见） */
-function redrawHistCharts() {
-  try {
-    const rows = H.freq.rows;
-    const gl = []; for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-    drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu }],
-      { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
-  } catch { /* 容忍：等首个 live tick 重绘 */ }
-  try {
-    const glT = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
-    drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }],
-      { min: 20, max: 90, gridLines: glT, axis: true, xCap: 1510, key: lastT(H.hot.rows) });
-  } catch { /* 同上 */ }
-  try {
-    const glM = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
-    glM.push({ v: 80, label: "80", color: C.err, emph: true });
-    drawLines($("#memChart"), [
-      { v: H.mem.rows.map(r => r.v.m), c: C.mem },
-      { v: H.mem.rows.map(r => r.v.s), c: C.task }
-    ], { min: 0, max: 100, gridLines: glM, axis: true, xCap: 1510, key: lastT(H.mem.rows) });
-  } catch { /* 同上 */ }
-  try { drawGpuChart(); } catch { /* 同上 */ }
-  try { drawBattChart(); } catch { /* 同上 */ }
+
+/* 每图播种门闩：独立 promise / 独立 5s 超时 / 图内四色加载条 / 独立提示。
+   状态 SEEDK[key]：pending→ok|timeout|err；超时后迟到 work 结果被 builder 前置检查弃收。 */
+function seedGate(key, label, hostSel, work, onOk) {
+  SEEDK[key] = "pending";
+  const host = $(hostSel);
+  let bar = null;
+  if (host) { host.style.position = "relative"; bar = el("span", "chartload"); bar.appendChild(el("i")); host.appendChild(bar); }
+  const p = new Promise(res => {
+    const settle = st => { if (SEEDK[key] !== "pending") return; SEEDK[key] = st; res(st); };
+    setTimeout(() => settle("timeout"), 5000);
+    Promise.resolve().then(work).then(() => settle("ok"), () => settle("err"));
+  });
+  p.then(st => {
+    if (bar) bar.remove();
+    if (st === "ok") { try { onOk(); } catch { /* 容忍：等首个 live tick 重绘 */ } }
+    else toast(label + " 历史" + (st === "timeout" ? "加载超时（>5s）" : "不可用") + "，折线从实时开始", "err");
+  });
+  return p;
+}
+/* 每图历史重绘（种子到达 / 切窗时调用；纯读缓冲当前窗，无数据/失败等首个 live tick） */
+function redrawFreq() {
+  const rows = H.freq.win(chartWinMs("freq"), 1510);
+  const gl = []; for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
+  drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu }],
+    { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510, key: lastT(rows) });
+}
+function redrawHot() {
+  const rows = H.hot.win(chartWinMs("hot"), 1510);
+  const glT = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
+  drawLines($("#hotChart"), [{ v: rows.map(r => r.v), c: C.therm }],
+    { min: 20, max: 90, gridLines: glT, axis: true, xCap: 1510, key: lastT(rows) });
+}
+function redrawMem() {
+  const rows = H.mem.win(chartWinMs("mem"), 1510);
+  const glM = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
+  glM.push({ v: 80, label: "80", color: C.err, emph: true });
+  drawLines($("#memChart"), [
+    { v: rows.map(r => r.v.m), c: C.mem },
+    { v: rows.map(r => r.v.s), c: C.task }
+  ], { min: 0, max: 100, gridLines: glM, axis: true, xCap: 1510, key: lastT(rows) });
+}
+
+/* 快速四图绘制窗滑动手势（与 battery 同形）：图面水平拖拽 ≥40px，左滑→更长窗、
+   右滑→更短窗，三档 5m/1h/24h 端点夹紧；切窗只重绘该图（holdScroll 无关：图区高度不变） */
+{
+  const FAST_REDRAW = { freq: redrawFreq, hot: redrawHot, mem: redrawMem, gpu: () => drawGpuChart() };
+  const bindWin = (sel, k, label) => {
+    const host = $(sel); if (!host) return;
+    let swX = null;
+    host.addEventListener("pointerdown", ev => { swX = ev.clientX; });
+    host.addEventListener("pointerup", ev => {
+      if (swX === null) return;
+      const dx = ev.clientX - swX; swX = null;
+      const dir = dx <= -40 ? 1 : dx >= 40 ? -1 : 0;
+      if (!dir) return;
+      const ix = Math.min(2, Math.max(0, chartWinIx[k] + dir));
+      if (ix === chartWinIx[k]) return;
+      chartWinIx[k] = ix;
+      try { FAST_REDRAW[k](); } catch { /* 窗内暂无数据：等下一拍 */ }
+      toast(label + " 折线窗 → " + FAST_WIN_LBL[ix]);
+    });
+    host.addEventListener("pointercancel", () => { swX = null; });
+  };
+  bindWin("#cpuChart", "freq", "CPU"); bindWin("#hotChart", "hot", "THERMALS");
+  bindWin("#memChart", "mem", "MEMORY"); bindWin("#gpuChart", "gpu", "GPU");
 }
 
 /* ---------- 作业抽屉（ex2_v2 蓝图移植：两档状态机 closed|open，三档实验已回退）----------
@@ -3412,22 +3438,28 @@ function redrawHistCharts() {
 
 /* ---------- 启动 ---------- */
 cacheColors();
-/* 播种门闩（rev .20，修「乱序入缓冲」缺陷）：五张历史卡（cpu/therm/mem/gpu/batt）的
-   live 点在库数据尘埃落定前不落缓冲——返回=ok / >5s=timeout（弃历史，live 直接起画）/
-   失败=err。四色序列加载条（body 首 #seedbar）随门闩落地移除。tickBusy = 门后排队拍
-   合并的单飞锁；winHist v2 有序插入兜底 seedGpu 等残余乱序路径。 */
-const SEED = { st: "pending" };
+/* 每图播种门闩（rev .22，独立化改造）：每张折线卡只对自己的 kind 负责——独立请求、
+   独立 5s 超时、图内四色加载条、独立失败提示；任何一图的慢/失败都不拖累其它卡与
+   其它数据面。tickBusy = tick 单飞锁（门后排队拍合并一次补拍）；hist v3 缓冲自身
+   乱序免疫（有序插入），门闩仅保正常态「种子先于 live」。GPU 走延迟种子，无启动门闩。 */
+const SEEDK = {};
 const tickBusy = {};
-const seedDone = new Promise(res => {
-  const settle = st => { if (SEED.st === "pending") { SEED.st = st; res(st); } };
-  setTimeout(() => settle("timeout"), 5000);
-  seedHistory().then(() => settle("ok"), () => settle("err"));
-});
-seedDone.then(st => {
-  const bar = $("#seedbar"); if (bar) bar.remove();
-  if (st === "ok") redrawHistCharts();
-  else toast(st === "timeout" ? "历史数据加载超时（>5s），图表从实时开始" : "历史数据不可用，图表从实时开始", "err");
-});
+const gates = {
+  freq: seedGate("freq", "CPU", "#cpuChart",
+    async () => { const rows = histRows(await getJSON("/db/history?kind=cpu_freq&limit=5000&fmt=arr"));
+      if (SEEDK.freq === "pending") seedFreqPush(rows); }, redrawFreq),
+  hot: seedGate("hot", "THERMALS", "#hotChart",
+    async () => { const rows = histRows(await getJSON("/db/history?kind=temp&limit=5000&fmt=arr"));
+      if (SEEDK.hot === "pending") seedHotPush(rows); }, redrawHot),
+  mem: seedGate("mem", "MEMORY", "#memChart",
+    async () => { const [m, s] = await Promise.all([
+        getJSON("/db/history?kind=mem&limit=5000&fmt=arr"),
+        getJSON("/db/history?kind=swap&limit=5000&fmt=arr")]);
+      if (SEEDK.mem === "pending") seedMemPush(m, s); }, redrawMem),
+  batt: seedGate("batt", "BATTERY", "#battChart",
+    async () => { const rows = histRows(await getJSON("/db/history?kind=battery&limit=4500&fmt=arr"));
+      if (SEEDK.batt === "pending") seedBattPush(rows); }, drawBattChart),
+};
 arm("cpu", tickCpu, fastMs("cpu"), 200);           // 快速 · 错峰
 arm("therm", tickTherm, fastMs("therm"), 700);     // 快速 · 错峰
 arm("mem", tickMem, fastMs("mem"), 1200);          // 快速 · 错峰
