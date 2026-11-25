@@ -997,7 +997,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.16 -->
+    <!-- rev 2026-11-25.17 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -2527,7 +2527,7 @@ function renderTasks() {
   if (!tasks.length) {
     body.appendChild(el("div", "pempty", "注册表为空 —— 点击「重扫配置」扫描 atlas_task.json / script 目录。"));
   }
-  let runN = 0;                                       // 把手徽标计数：与状态药丸同一谓词（监督运行中 ∨ PTY 会话活）
+  let runN = 0; const apRun = [];                     // 把手徽标 = APG 左半，同一处收集：谓词 = 监督运行中 ∨ PTY 会话活
   for (const t of tasks) {
     const row = el("div", "prow" + (t.id === selId ? " sel" : ""));
     row.dataset.id = String(t.id);
@@ -2541,7 +2541,7 @@ function renderTasks() {
     const phase = String(t.phase || "Idle");
     const pty = tuiIds.has(t.id);                     // 服务端 PTY 会话存活（/tui/sessions 并采）
     const live = !!PHASE_RUNNINGISH[phase] || pty;    // 药丸谓词 = 监督运行中 ∨ PTY 会话活 → 一律叠加「运行中」样式与文案
-    if (live) runN++;                                 // 徽标计数 = 与状态药丸同一谓词（与按钮无关）
+    if (live) { runN++; apRun.push(String(t.name || t.id)); }   // 徽标与 APG 左半同源同谓词（与按钮无关）
     const pid = el("div", "pnum" + (t.pid ? " act" : ""), t.pid ? String(t.pid) : "—");
     pid.title = t.started_at && typeof t.started_at === "object" ? "启动于 " + fmtTime(t.started_at) : "";
     const le = t.last_exit && typeof t.last_exit === "object" ? t.last_exit : null;
@@ -2560,11 +2560,10 @@ function renderTasks() {
   const jb = $("#jobsBadge");                         // 把手徽标 = running 数（0 隐藏）
   jb.textContent = String(runN);
   jb.classList.toggle("on", runN > 0);
-  const apRun = tasks.filter(t => PHASE_RUNNINGISH[t.phase]);   // APG 左半：同谓词运行数 + 小字列名（无分母）
-  $("#apgRunN").textContent = String(apRun.length);
-  const apKey = apRun.map(t => String(t.name || t.id)).join("\0");
-  if (apKey !== apRunKey) { apRunKey = apKey; holdScroll(() => {   // 运行集合变化 → 列表重建经 holdScroll，视口不动
-    $("#apgRunList").replaceChildren(...apRun.map(t => el("div", "aps", String(t.name || t.id))));
+  $("#apgRunN").textContent = String(apRun.length);             // APG 左半 = runN = JOBS 徽标（恒等）
+  const apKey = apRun.join("\0");                               // 运行集合变化才重建列表，视口不动
+  if (apKey !== apRunKey) { apRunKey = apKey; holdScroll(() => {
+    $("#apgRunList").replaceChildren(...apRun.map(n => el("div", "aps", n)));
   }); }
 }
 async function tickTasks() {
