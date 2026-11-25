@@ -7,6 +7,7 @@
 //! 日志目录（svlogd 不会自建目录，缺目录时 log/run 直接退出——设备 E2E 实证）→
 //! 全程不写 down 占位，调用 sv-enable 直接上线。
 //! SVDIR 解析：显式非空 env SVDIR 优先；未设/为空则兜底 $PREFIX/var/service 并打印所用根。
+//! --sv-restart：前置判定（未安装→Err）→ 清 down 占位 → sv-restart/`sv restart` 双退路。
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -243,6 +244,69 @@ pub fn install() -> Result<(), String> {
     Ok(())
 }
 
+/// restart 前置判定（纯函数）：服务目录不存在 = 未安装 → 可读 Err（指路 --sv-install）；
+/// 存在 → Ok(())，调用方继续走 helper 链。
+fn restart_guard(svc: &Path) -> Result<(), String> {
+    if svc.is_dir() {
+        Ok(())
+    } else {
+        Err(format!(
+            "未安装（{} 不存在）——先运行 'atlas_prime --sv-install'",
+            svc.display()
+        ))
+    }
+}
+
+/// 重启 runit 服务并确保 up 态（一次性 CLI，服务本身由 runsvdir 监管、与本进程无关）：
+/// 未安装 → Err exit 1；残留 down 占位先移除（restart 语义 = 要它在跑）；helper 优先
+/// sv-restart、退 `sv restart`，子进程环境注入解析后的 SVDIR（与 enable/disable 侧同源）；
+/// 两者皆不可用/失败 → 打印监管状态与手动路径后 Err（restart 未发生，不假装成功）。
+pub fn restart() -> Result<(), String> {
+    let svdir = env::var_os("SVDIR");
+    let svroot = resolve_svroot(svdir.as_deref());
+    eprintln!("[atlas] SVDIR = {}（{}）", svroot.display(), root_label(&svdir));
+    let svc = svroot.join(SV_NAME);
+    restart_guard(&svc)?;
+
+    if fs::remove_file(svc.join("down")).is_ok() {
+        eprintln!("[atlas] 已移除 down 占位（restart 语义 = 确保 up）");
+    }
+
+    let mut reasons = Vec::new();
+    if let Some(bin) = find_helper("sv-restart") {
+        match Command::new(&bin).env("SVDIR", &svroot).arg(SV_NAME).status() {
+            Ok(st) if st.success() => {
+                eprintln!("[atlas] sv-restart {SV_NAME} 完成：runsvdir 已 TERM→重拉，≤5s 后 'sv status {SV_NAME}' 应见 run");
+                return Ok(());
+            }
+            Ok(st) => reasons.push(format!("sv-restart 退出码 {:?}", st.code())),
+            Err(e) => reasons.push(format!("sv-restart 拉起失败: {e}")),
+        }
+    }
+    if let Some(bin) = find_helper("sv") {
+        match Command::new(&bin).env("SVDIR", &svroot).args(["restart", SV_NAME]).status() {
+            Ok(st) if st.success() => {
+                eprintln!("[atlas] sv restart {SV_NAME} 完成：runsvdir 已 TERM→重拉");
+                return Ok(());
+            }
+            Ok(st) => reasons.push(format!("sv restart 退出码 {:?}", st.code())),
+            Err(e) => reasons.push(format!("sv 拉起失败: {e}")),
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push("未找到 sv-restart / sv（termux-services 未安装？）".to_string());
+    }
+    for r in &reasons {
+        eprintln!("[atlas] WARN {r}");
+    }
+    match runsvdir_alive() {
+        Some(true) => eprintln!("[atlas] runsvdir 在跑：手动路径 export SVDIR={} && sv restart {SV_NAME}", svroot.display()),
+        Some(false) => eprintln!("[atlas] runsvdir 未在跑：restart 无处安放——先 source $PREFIX/etc/profile.d/start-services.sh 拉起监管"),
+        None => eprintln!("[atlas] runsvdir 存活状态不可探测（/proc 不可读）"),
+    }
+    Err(format!("restart 未发生：{}", reasons.join("; ")))
+}
+
 /// 卸载 runit 服务：best-effort sv-disable（失败忽略）→ 删除服务目录。
 /// 未安装同样成功（exit 0）；$PREFIX/bin 二进制与日志历史有意保留。
 pub fn uninstall() -> Result<(), String> {
@@ -284,7 +348,7 @@ pub fn status_hint() {
         eprintln!("[atlas] 当前未由 runit 监管——运行 'atlas_prime --sv-install' 安装为 runit 服务");
     } else if svc.join("down").exists() {
         eprintln!(
-            "[atlas] {} 带 down 占位（服务停用中）——运行 'atlas_prime --sv-install' 重新 enable",
+            "[atlas] {} 带 down 占位（服务停用中）——运行 'atlas_prime --sv-restart'（或 --sv-install）重新上线",
             svc.display()
         );
     }
@@ -364,6 +428,20 @@ mod tests {
         assert!(!supervise_ready(&svc), "目录缺失应判未注册");
         std::fs::create_dir_all(svc.join("supervise")).expect("临时 supervise/ 可建");
         assert!(supervise_ready(&svc), "supervise/ 就位应判已注册");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// restart 前置判定（纯函数）：服务目录缺失 → 可读 Err 指路 --sv-install；
+    /// 就位 → Ok（IO 与 helper 链不在纯判定内，避免测试依赖 SVDIR 进程环境）。
+    #[test]
+    fn restart_guard_demands_install_when_absent() {
+        let base = std::env::temp_dir().join(format!("atlas_sv_restart_qa_{}", std::process::id()));
+        let svc = base.join(SV_NAME);
+        let _ = std::fs::remove_dir_all(&base);
+        let err = restart_guard(&svc).expect_err("目录缺失必须判未安装");
+        assert!(err.contains("未安装") && err.contains("--sv-install"), "指路文案: {err}");
+        std::fs::create_dir_all(&svc).expect("临时服务目录可建");
+        restart_guard(&svc).expect("目录就位应放行");
         let _ = std::fs::remove_dir_all(&base);
     }
 

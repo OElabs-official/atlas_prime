@@ -8,6 +8,8 @@
 //! - `atlas_prime --sv-install`   一次性：安装/刷新 runit 服务（复制二进制到 $PREFIX/bin +
 //!   内嵌服务资产落 $SVDIR + sv-enable），成功 exit 0（逻辑在 [`v1::service`]）
 //! - `atlas_prime --sv-uninstall` 一次性：卸载 runit 服务（二进制与日志历史有意保留），exit 0
+//! - `atlas_prime --sv-restart`   一次性：重启 runit 服务并确保 up（清 down 占位 +
+//!   sv-restart/`sv restart` 双退路）；未安装或 restart 未发生 → exit 1
 //!
 //! 启动顺序：0 单例锁（flock 数据目录 atlas_prime.lock，进程退出——含崩溃/kill——自动释放；
 //! 二启检测到锁被占用直接退出 1）→ 任务规格装载（autostart 项即拉）→ 操作器（唯一自主
@@ -28,8 +30,8 @@ use v1::operator::Operator;
 use v1::task::Task;
 use v1::api::Web;
 
-/// CLI 表面：守护模式（无旗标）+ runit 安装/卸载（互斥两旗标，一次性退出不取单例锁）
-/// + 守护模式监听地址覆盖（--host，与两旗标正交，仅守护模式生效）。
+/// CLI 表面：守护模式（无旗标）+ runit 安装/卸载/重启（互斥三旗标，一次性退出不取单例锁）
+/// + 守护模式监听地址覆盖（--host，与三旗标正交，仅守护模式生效）。
 #[derive(Parser)]
 #[command(
     author,
@@ -37,7 +39,7 @@ use v1::api::Web;
     about,
     long_about = "atlas_prime —— headless 系统监控守护进程：周期采样硬件/网络写入本地 sqlite，\
                   经 HTTP/JSON API 服务面板（守护模式）；另提供一次性服务命令 \
-                  --sv-install / --sv-uninstall（runit 安装/卸载，执行完即退）。",
+                  --sv-install / --sv-uninstall / --sv-restart（runit 安装/卸载/重启，执行完即退）。",
     after_help = "监听（仅守护模式）：默认 127.0.0.1:1025（loopback）。\n  \
         --host 0.0.0.0          全网卡监听，端口自动补 1025（ADDR 接受 host 或 host:port，含 ':' 原样使用）\n  \
         --host 0.0.0.0:8123     全网卡 + 自定义端口\n  \
@@ -51,6 +53,9 @@ struct Cli {
     /// 卸载 runit 服务：sv-disable + 删服务目录（二进制与日志历史有意保留）
     #[arg(long)]
     sv_uninstall: bool,
+    /// 重启 runit 服务并确保 up：清 down 占位 + sv-restart/`sv restart`；未安装或未能重启则 exit 1
+    #[arg(long, conflicts_with_all = ["sv_install", "sv_uninstall"])]
+    sv_restart: bool,
     /// 守护模式监听地址（仅守护模式生效）：ADDR 含 ':' 按 host:port 原样使用，裸 host 补端口 1025；
     /// 未给退 ATLAS_BIND 环境变量，均缺省则 127.0.0.1:1025（loopback）
     #[arg(long, value_name = "ADDR")]
@@ -121,13 +126,16 @@ fn resolve_bind(host_flag: Option<&str>, atlas_bind: Option<&str>) -> String {
 }
 
 fn main() {
-    // 一次性服务命令：不取单例锁（服务在跑时亦可安装/卸载），执行完直接退
+    // 一次性服务命令：不取单例锁（服务在跑时亦可安装/卸载/重启），执行完直接退
     let cli = Cli::parse();
     if cli.sv_install {
         one_shot(v1::service::install());
     }
     if cli.sv_uninstall {
         one_shot(v1::service::uninstall());
+    }
+    if cli.sv_restart {
+        one_shot(v1::service::restart());
     }
 
     // 0. 单例锁：绑定贯穿整个 main，锁持至进程结束
