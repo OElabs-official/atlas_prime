@@ -55,8 +55,10 @@
     GET  /system/cli/battery    {present,technology,health,plugged,status,
                                  percentage,voltage(毫伏),current(微安,负=放电),
                                  current_average;其余键本面板忽略}
-     GET  /system/apg            {services:[{pkg,state,pid}]} —— APG 包组恰 4 行，随 TASKS 60s
-                                  并拍；run|down|alert|uninstalled / coming_soon
+     GET  /system/apg            {services:[{pkg,label,state,pid}]} —— APG 包组恰 5 行，随
+                                   TASKS 60s 并拍；label = CamelCase 显示名（Network/
+                                   Explorer2/AgentFLow/MediaNode/ExpertRAWPipeline）；
+                                   state = run|down|alert|uninstalled / coming_soon
     GET  /task                  [{id,name,group,command,phase,pid,started_at,
                                  uptime_ms,restarts,last_exit,log_lines,
                                  log_dropped}]
@@ -992,7 +994,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.13 -->
+    <!-- rev 2026-11-25.14 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -2605,19 +2607,23 @@ $("#updBtn").addEventListener("click", async () => {
   finally { b.disabled = false; }
 });
 
-/* ---------- APG 包组（并拍；失败留旧行，首拍静默） ---------- */
+/* ---------- APG 包组（并拍；失败留旧行，首拍静默；显示名以服务端 label 为权威） ---------- */
 const APG_ST = { run: ["stR", "R", "RUN"], down: ["stW", "W", "DOWN"], alert: ["stW", "W", "ALERT"],
   uninstalled: ["", "nil", "NOT INSTALLED"], coming_soon: ["", "soon", "SOON"] };
 const apRowEls = {};
-for (const p of ["atlas_network", "atlas_ex2", "agentflow", "medianode"]) {
+// 占位行 [pkg, 初始显示名]；服务端返回后 renderApg 用 s.label 覆盖（服务端为唯一权威）
+for (const [p, nm] of [["atlas_network", "Network"], ["atlas_ex2", "Explorer2"],
+    ["agentflow", "AgentFLow"], ["medianode", "MediaNode"], ["expert_raw_pipeline", "ExpertRAWPipeline"]]) {
   const c = el("span", "ph apc nil", "—"), i = el("span", "apid"), r = el("div", "aprow");
-  r.append(el("i", "apd"), el("span", "apn2", p), c, i);
+  const n = el("span", "apn2", nm);
+  r.append(el("i", "apd"), n, c, i);
   $("#apgRows").appendChild(r);
-  apRowEls[p] = { r, c, i };
+  apRowEls[p] = { r, c, i, n };
 }
 function renderApg(svcs) {
   for (const s of svcs) {
     const e = apRowEls[String(s.pkg)]; if (!e) continue;
+    if (s.label) e.n.textContent = String(s.label);   // CamelCase 名服务端下发；行高恒定，仅换文字不动布局
     const m = APG_ST[String(s.state)] || ["", "nil", "—"];
     e.r.className = m[0] ? "aprow " + m[0] : "aprow";
     e.c.className = "ph apc " + m[1]; e.c.textContent = m[2];

@@ -286,11 +286,12 @@ async fn h_cli_battery() -> HttpResponse {
     .await
 }
 
-/// `GET /system/apg`（rev 2026-11-25.13）：APG 家族 runit 状态快照——
+/// `GET /system/apg`（rev 2026-11-25.14）：APG 家族 runit 状态快照恰 5 行——
 /// atlas_network / atlas_ex2 读 SVDIR 下 supervise/stat+pid（纯文件读、零 fork，
-/// 走普通桶即可）；agentflow / medianode = coming_soon 占位。响应
-/// `{"services":[{"pkg","state","pid"}]}`，state ∈ run|down|alert|uninstalled|
-/// coming_soon。前端 APG 卡数据源；本机未装的包如实报 uninstalled。
+/// 走普通桶即可）；agentflow / medianode / expert_raw_pipeline = coming_soon 占位。
+/// 响应 `{"services":[{"pkg","label","state","pid"}]}`，label = CamelCase 显示名，
+/// state ∈ run|down|alert|uninstalled|coming_soon。前端 APG 卡数据源；本机未装
+/// 的包如实报 uninstalled。成员/显示名见 `service::APG_PKGS`。
 async fn h_apg() -> HttpResponse {
     respond("/system/apg", false, || {
         serde_json::to_vec(&crate::v1::service::apg_snapshot())

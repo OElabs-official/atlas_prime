@@ -356,19 +356,24 @@ pub fn status_hint() {
 
 // ---------------- APG 服务状态读（GET /system/apg 的数据源） ----------------
 
-/// APG（atlas_package_group）家族成员：前两位 SVDIR 在档则真实探测，后两位
-/// 尚未发布 = 恒 "coming_soon" 占位（前端灰显）。
-pub const APG_PKGS: [(&str, bool); 4] = [
-    ("atlas_network", true),
-    ("atlas_ex2", true),
-    ("agentflow", false),
-    ("medianode", false),
+/// APG（atlas_package_group）家族成员 `(runit 目录名, 是否活体探测, CamelCase 显示名)`。
+/// `live=true` 者读 SVDIR 下 supervise/stat；`live=false` 者尚未发布 = 恒
+/// "coming_soon" 占位（前端灰显）。显示名（label）即前端渲染名，`pkg` 仍为目录名。
+/// ExpertRAWPipeline 目录名暂用 `expert_raw_pipeline`，发布时按实际服务名改此一行即可。
+pub const APG_PKGS: [(&str, bool, &str); 5] = [
+    ("atlas_network", true, "Network"),
+    ("atlas_ex2", true, "Explorer2"),
+    ("agentflow", false, "AgentFLow"),
+    ("medianode", false, "MediaNode"),
+    ("expert_raw_pipeline", false, "ExpertRAWPipeline"),
 ];
 
 /// 单包 runit 状态（`GET /system/apg` 响应形状；序列化即对外契约）。
 #[derive(serde::Serialize)]
 pub struct ApgState {
     pub pkg: &'static str,
+    /// CamelCase 显示名（前端渲染用，与 pkg 目录名解耦）
+    pub label: &'static str,
     /// run | down | alert | uninstalled | coming_soon
     pub state: &'static str,
     /// 仅 run 态携带（supervise/pid 文本解析）；其余为 None
@@ -402,24 +407,24 @@ pub fn apg_snapshot() -> Vec<ApgState> {
     let root = svroot();
     APG_PKGS
         .iter()
-        .map(|(pkg, live)| {
+        .map(|(pkg, live, label)| {
             if !*live {
-                return ApgState { pkg, state: "coming_soon", pid: None };
+                return ApgState { pkg, label, state: "coming_soon", pid: None };
             }
             let (state, pid) = sv_state(&root.join(pkg));
-            ApgState { pkg, state, pid }
+            ApgState { pkg, label, state, pid }
         })
         .collect()
 }
 
-/// 纯函数版（可测）：给定 svroot 快照 APG 前两位成员状态。
-fn apg_pair_probe(root: &std::path::Path) -> Vec<ApgState> {
+/// 纯函数版（可测）：给定 svroot 快照 APG 活体成员（live=true）状态。
+fn apg_live_probe(root: &std::path::Path) -> Vec<ApgState> {
     APG_PKGS
         .iter()
-        .filter(|(_, live)| *live)
-        .map(|(pkg, _)| {
+        .filter(|(_, live, _)| *live)
+        .map(|(pkg, _, label)| {
             let (state, pid) = sv_state(&root.join(pkg));
-            ApgState { pkg, state, pid }
+            ApgState { pkg, label, state, pid }
         })
         .collect()
 }
@@ -529,7 +534,7 @@ mod tests {
 // APG 探测测试（文件级构造假 SVDIR，零设备依赖；temp_dir 惯例同 task 域测试）
 #[cfg(test)]
 mod apg_tests {
-    use super::apg_pair_probe;
+    use super::apg_live_probe;
 
     /// 造一个带唯一后缀的假 SVDIR（测毕删除），返回其路径。
     fn tmp_svroot(tag: &str) -> std::path::PathBuf {
@@ -556,7 +561,7 @@ mod apg_tests {
         let dir = tmp_svroot("states");
         fake_sv(&dir, "atlas_network", "run\n", Some(4242));
         fake_sv(&dir, "atlas_ex2", "down", None);
-        let got = apg_pair_probe(&dir);
+        let got = apg_live_probe(&dir);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].pkg, "atlas_network");
         assert_eq!(got[0].state, "run");
@@ -570,7 +575,7 @@ mod apg_tests {
     #[test]
     fn apg_probe_missing_dir_is_uninstalled() {
         let dir = tmp_svroot("missing");
-        let got = apg_pair_probe(&dir);
+        let got = apg_live_probe(&dir);
         assert!(got.iter().all(|s| s.state == "uninstalled" && s.pid.is_none()));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -581,21 +586,36 @@ mod apg_tests {
         let dir = tmp_svroot("badpid");
         fake_sv(&dir, "atlas_network", "run", None);
         std::fs::write(dir.join("atlas_network").join("supervise").join("pid"), "x").unwrap();
-        let got = apg_pair_probe(&dir);
+        let got = apg_live_probe(&dir);
         assert_eq!(got[0].state, "run");
         assert_eq!(got[0].pid, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 成员契约：前两位活体探测、后两位 coming_soon 占位；快照仅含活体两位。
+    /// 成员契约：恰 5 位；前 2 位活体（pkg 目录名 = 真实 runit 名），后 3 位 coming_soon；
+    /// 显示名一律 CamelCase（前后端契约，快照仅含活体 2 位）。
     #[test]
     fn apg_family_membership() {
-        assert_eq!(super::APG_PKGS[0].0, "atlas_network");
-        assert_eq!(super::APG_PKGS[1].0, "atlas_ex2");
-        assert!(super::APG_PKGS[..2].iter().all(|(_, live)| *live));
-        assert!(super::APG_PKGS[2..].iter().all(|(_, live)| !*live));
-        let snap = apg_pair_probe(std::path::Path::new("/nonexistent-apg-root"));
-        assert_eq!(snap.len(), 2);
+        assert_eq!(super::APG_PKGS.len(), 5);
+        assert_eq!(super::APG_PKGS[0], ("atlas_network", true, "Network"));
+        assert_eq!(super::APG_PKGS[1], ("atlas_ex2", true, "Explorer2"));
+        assert!(super::APG_PKGS[..2].iter().all(|(_, live, _)| *live));
+        assert!(super::APG_PKGS[2..].iter().all(|(_, live, _)| !*live));
+        let labels: Vec<_> = super::APG_PKGS.iter().map(|(_, _, l)| *l).collect();
+        assert_eq!(labels, ["Network", "Explorer2", "AgentFLow", "MediaNode", "ExpertRAWPipeline"]);
+        let snap = apg_live_probe(std::path::Path::new("/nonexistent-apg-root"));
+        assert_eq!(snap.len(), 2, "活体探测只含 live=true 成员");
         assert!(snap.iter().all(|s| s.state == "uninstalled"));
+    }
+
+    /// 全量快照：5 行齐全、带 CamelCase label、未发布成员 coming_soon 且无 pid。
+    #[test]
+    fn apg_snapshot_carries_labels_and_coming_soon() {
+        let snap = super::apg_snapshot();
+        assert_eq!(snap.len(), 5);
+        assert!(snap.iter().all(|s| !s.label.is_empty()));
+        let soon: Vec<_> = snap.iter().filter(|s| s.state == "coming_soon").map(|s| s.pkg).collect();
+        assert_eq!(soon, ["agentflow", "medianode", "expert_raw_pipeline"]);
+        assert!(snap.iter().filter(|s| s.state == "coming_soon").all(|s| s.pid.is_none()));
     }
 }
