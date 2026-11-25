@@ -1009,7 +1009,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.22 -->
+    <!-- rev 2026-11-25.23 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3312,8 +3312,24 @@ function seedGate(key, label, hostSel, work, onOk) {
   });
   p.then(st => {
     if (bar) bar.remove();
-    if (st === "ok") { try { onOk(); } catch { /* 容忍：等首个 live tick 重绘 */ } }
+    if (st === "ok") {
+      try { onOk(); } catch { /* 容忍：等首个 live tick 重绘 */ }
+      // 临时诊断（rev .23 probe）：每图上屏种子点数（三档窗各多少），排查完撤除
+      try {
+        const bufs = { freq: H.freq, hot: H.hot, mem: H.mem, batt: HB };
+        const b = bufs[key];
+        const n5 = b.win(300000, 1510).length, n1h = b.win(3600000, 1510).length, n24 = b.win(86400000, 1510).length;
+        toast(label + " 历史 " + n5 + "/" + n1h + "/" + n24 + " 点（5m/1h/24h）");
+      } catch { /* 探针失败不碍渲染 */ }
+    }
     else toast(label + " 历史" + (st === "timeout" ? "加载超时（>5s）" : "不可用") + "，折线从实时开始", "err");
+    // 临时诊断：全局可查快照（控制台 window.DBG()）
+    window.DBG = () => ({ seeds: Object.assign({}, SEEDK), winIx: chartWinIx,
+      pts: { freq: [H.freq.win(300000,1510).length, H.freq.win(3600000,1510).length, H.freq.win(86400000,1510).length],
+             hot:   [H.hot.win(300000,1510).length,  H.hot.win(3600000,1510).length,  H.hot.win(86400000,1510).length],
+             mem:   [H.mem.win(300000,1510).length,  H.mem.win(3600000,1510).length,  H.mem.win(86400000,1510).length],
+             gpu:   [H.gpu.win(300000,1510).length,  H.gpu.win(3600000,1510).length,  H.gpu.win(86400000,1510).length],
+             batt:  [HB.win(300000,1510).length,     HB.win(3600000,1510).length,     HB.win(259200000,1510).length] } });
   });
   return p;
 }
