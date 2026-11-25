@@ -808,6 +808,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   padding:var(--md-sys-space100) var(--md-sys-space150)}
 .apn{font-weight:500;color:var(--acc);font-size:var(--md-sys-typescale-display-small-size);line-height:var(--md-sys-typescale-display-small-line-height)}
 .aps{font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant)}
+.apline{display:flex;align-items:baseline;gap:var(--md-sys-space50)}
+.aplist{margin-top:var(--md-sys-space25);font-size:var(--md-sys-typescale-label-small-size);line-height:var(--md-sys-typescale-label-small-line-height);color:var(--md-sys-color-on-surface-variant);word-break:break-word}
 .aprows{display:grid;gap:var(--md-sys-space75);min-width:0}
 .aprow{display:flex;align-items:center;gap:var(--md-sys-space100);min-width:0}
 .apd{width:8px;height:8px;flex:none;border-radius:var(--md-sys-shape-corner-full);background:var(--md-sys-color-outline)}
@@ -825,7 +827,6 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
    ⑦ 响应式（单列布局下仅保留壳层/表格/表盘适配）+ reduced-motion
    ============================================================ */
 @media(max-width:760px){
-  .apgrid{grid-template-columns:1fr}
   .shell{padding:var(--md-sys-space150) var(--md-sys-space100) var(--md-sys-space400)}
   .phead,.prow{grid-template-columns:1fr 84px 124px}   /* 窄屏三列 = 任务名 / 状态药丸 / 日志行（行内启停移除后第 7 列顶上操作位） */
   .phead>*:nth-child(2),.phead>*:nth-child(4),.phead>*:nth-child(5),.phead>*:nth-child(6),
@@ -835,6 +836,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   .gc .gn{font-size:24px}
   .gc .gn s{font-size:11px}
 }
+/* APG 左右分割专属断点（261125 用户指定）：仅 ≤360px 上下堆叠，361px 起保持左右 */
+@media(max-width:360px){.apgrid{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){
   /* 通配选择子同时命中 SVG 图元：D3 折线/柱状（.cbar/.tbar2/.ccap 及 svg 内一切
      transition/animation）一并压平为 .01ms，无需额外 svg 选择子 */
@@ -855,9 +858,9 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   <div class="grid">
     <!-- ====== APG：左 = 运行任务数（/task 同拍）| 右 = 包组四行（/system/apg 同拍） ====== -->
     <section class="card acc-task" id="card-apg">
-      <header class="ch"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="align-self:center"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg><h2>APG</h2><span class="hta">package group</span></header>
+      <header class="ch"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="align-self:center"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg><h2>APG</h2><span class="hta">atlas package group</span></header>
       <div class="apgrid">
-        <div class="apleft"><div class="apn num" id="apgRunN">0</div><div class="aps" id="apgRunTot">of 0 configured</div></div>
+        <div class="apleft"><div class="apline"><span class="apn num" id="apgRunN">0</span><span class="aps">Task is running</span></div><div class="aplist" id="apgRunList"></div></div>
         <div class="aprows" id="apgRows"></div>
       </div>
     </section>
@@ -994,7 +997,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.14 -->
+    <!-- rev 2026-11-25.16 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -2557,8 +2560,12 @@ function renderTasks() {
   const jb = $("#jobsBadge");                         // 把手徽标 = running 数（0 隐藏）
   jb.textContent = String(runN);
   jb.classList.toggle("on", runN > 0);
-  $("#apgRunN").textContent = String(tasks.filter(t => PHASE_RUNNINGISH[t.phase]).length);   // APG 左半计数
-  $("#apgRunTot").textContent = "of " + tasks.length + " configured";
+  const apRun = tasks.filter(t => PHASE_RUNNINGISH[t.phase]);   // APG 左半：同谓词运行数 + 小字列名（无分母）
+  $("#apgRunN").textContent = String(apRun.length);
+  const apKey = apRun.map(t => String(t.name || t.id)).join("\0");
+  if (apKey !== apRunKey) { apRunKey = apKey; holdScroll(() => {   // 运行集合变化 → 列表重建经 holdScroll，视口不动
+    $("#apgRunList").replaceChildren(...apRun.map(t => el("div", "aps", String(t.name || t.id))));
+  }); }
 }
 async function tickTasks() {
   tickApg();   // APG 并拍
@@ -2608,6 +2615,7 @@ $("#updBtn").addEventListener("click", async () => {
 });
 
 /* ---------- APG 包组（并拍；失败留旧行，首拍静默；显示名以服务端 label 为权威） ---------- */
+let apRunKey = "";   // 左半运行任务列表指纹（防无谓重建）
 const APG_ST = { run: ["stR", "R", "RUN"], down: ["stW", "W", "DOWN"], alert: ["stW", "W", "ALERT"],
   uninstalled: ["", "nil", "NOT INSTALLED"], coming_soon: ["", "soon", "SOON"] };
 const apRowEls = {};
