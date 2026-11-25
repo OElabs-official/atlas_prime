@@ -354,6 +354,76 @@ pub fn status_hint() {
     }
 }
 
+// ---------------- APG 服务状态读（GET /system/apg 的数据源） ----------------
+
+/// APG（atlas_package_group）家族成员：前两位 SVDIR 在档则真实探测，后两位
+/// 尚未发布 = 恒 "coming_soon" 占位（前端灰显）。
+pub const APG_PKGS: [(&str, bool); 4] = [
+    ("atlas_network", true),
+    ("atlas_ex2", true),
+    ("agentflow", false),
+    ("medianode", false),
+];
+
+/// 单包 runit 状态（`GET /system/apg` 响应形状；序列化即对外契约）。
+#[derive(serde::Serialize)]
+pub struct ApgState {
+    pub pkg: &'static str,
+    /// run | down | alert | uninstalled | coming_soon
+    pub state: &'static str,
+    /// 仅 run 态携带（supervise/pid 文本解析）；其余为 None
+    pub pid: Option<u32>,
+}
+
+/// 读一个服务目录的 supervise/stat 文本（runit 语义：run/down/finish/alert；
+/// finish = 一次性服务已跑完 = 视同 down）。目录/文件缺失 = uninstalled。
+/// 纯读、零 fork、零常驻。
+fn sv_state(pkg_dir: &std::path::Path) -> (&'static str, Option<u32>) {
+    let Ok(text) = std::fs::read_to_string(pkg_dir.join("supervise").join("stat")) else {
+        return ("uninstalled", None);
+    };
+    let state = match text.trim() {
+        "run" => "run",
+        "alert" => "alert",
+        _ => "down", // down / finish / 其他脏值一律归 down
+    };
+    let pid = if state == "run" {
+        std::fs::read_to_string(pkg_dir.join("supervise").join("pid"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    } else {
+        None
+    };
+    (state, pid)
+}
+
+/// APG 快照：SVDIR 下逐包读 supervise/stat，未发布成员恒 coming_soon。
+pub fn apg_snapshot() -> Vec<ApgState> {
+    let root = svroot();
+    APG_PKGS
+        .iter()
+        .map(|(pkg, live)| {
+            if !*live {
+                return ApgState { pkg, state: "coming_soon", pid: None };
+            }
+            let (state, pid) = sv_state(&root.join(pkg));
+            ApgState { pkg, state, pid }
+        })
+        .collect()
+}
+
+/// 纯函数版（可测）：给定 svroot 快照 APG 前两位成员状态。
+fn apg_pair_probe(root: &std::path::Path) -> Vec<ApgState> {
+    APG_PKGS
+        .iter()
+        .filter(|(_, live)| *live)
+        .map(|(pkg, _)| {
+            let (state, pid) = sv_state(&root.join(pkg));
+            ApgState { pkg, state, pid }
+        })
+        .collect()
+}
+
 // ---------------- 测试 ----------------
 
 #[cfg(test)]
@@ -453,5 +523,79 @@ mod tests {
         let got = svroot();
         unsafe { env::remove_var("SVDIR") };
         assert_eq!(got, PathBuf::from("/env/svc"));
+    }
+}
+
+// APG 探测测试（文件级构造假 SVDIR，零设备依赖；temp_dir 惯例同 task 域测试）
+#[cfg(test)]
+mod apg_tests {
+    use super::apg_pair_probe;
+
+    /// 造一个带唯一后缀的假 SVDIR（测毕删除），返回其路径。
+    fn tmp_svroot(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "atlas_apg_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_sv(dir: &std::path::Path, pkg: &str, stat: &str, pid: Option<u32>) {
+        std::fs::create_dir_all(dir.join(pkg).join("supervise")).unwrap();
+        std::fs::write(dir.join(pkg).join("supervise").join("stat"), stat).unwrap();
+        if let Some(p) = pid {
+            std::fs::write(dir.join(pkg).join("supervise").join("pid"), p.to_string()).unwrap();
+        }
+    }
+
+    /// run 态报 run + pid；down/finish 归 down 且无 pid。
+    #[test]
+    fn apg_probe_maps_runit_states() {
+        let dir = tmp_svroot("states");
+        fake_sv(&dir, "atlas_network", "run\n", Some(4242));
+        fake_sv(&dir, "atlas_ex2", "down", None);
+        let got = apg_pair_probe(&dir);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].pkg, "atlas_network");
+        assert_eq!(got[0].state, "run");
+        assert_eq!(got[0].pid, Some(4242));
+        assert_eq!(got[1].state, "down");
+        assert_eq!(got[1].pid, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未注册包 = uninstalled（本机 atlas_network/atlas_ex2 常态即此路径）。
+    #[test]
+    fn apg_probe_missing_dir_is_uninstalled() {
+        let dir = tmp_svroot("missing");
+        let got = apg_pair_probe(&dir);
+        assert!(got.iter().all(|s| s.state == "uninstalled" && s.pid.is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// run 态但 pid 文件损坏 → state 仍 run，pid=None（不因附属文件坏掉状态）。
+    #[test]
+    fn apg_probe_tolerates_broken_pidfile() {
+        let dir = tmp_svroot("badpid");
+        fake_sv(&dir, "atlas_network", "run", None);
+        std::fs::write(dir.join("atlas_network").join("supervise").join("pid"), "x").unwrap();
+        let got = apg_pair_probe(&dir);
+        assert_eq!(got[0].state, "run");
+        assert_eq!(got[0].pid, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 成员契约：前两位活体探测、后两位 coming_soon 占位；快照仅含活体两位。
+    #[test]
+    fn apg_family_membership() {
+        assert_eq!(super::APG_PKGS[0].0, "atlas_network");
+        assert_eq!(super::APG_PKGS[1].0, "atlas_ex2");
+        assert!(super::APG_PKGS[..2].iter().all(|(_, live)| *live));
+        assert!(super::APG_PKGS[2..].iter().all(|(_, live)| !*live));
+        let snap = apg_pair_probe(std::path::Path::new("/nonexistent-apg-root"));
+        assert_eq!(snap.len(), 2);
+        assert!(snap.iter().all(|s| s.state == "uninstalled"));
     }
 }

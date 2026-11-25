@@ -160,6 +160,7 @@ impl Web {
                     .route("/system/ip", web::get().to(h_network))
                     .route("/system/cli/network", web::get().to(h_network))
                     .route("/system/cli/battery", web::get().to(h_cli_battery))
+                    .route("/system/apg", web::get().to(h_apg))
                     .route("/task", web::get().to(h_task_list))
                     .route("/task/update", web::post().to(h_task_update))
                     .route("/task/run/{id}", web::post().to(h_task_run))
@@ -281,6 +282,18 @@ impl serde::Serialize for IpWithSpeed {
 async fn h_cli_battery() -> HttpResponse {
     respond("/system/cli/battery", true, || {
         serde_json::to_vec(&battery::Battery::get())
+    })
+    .await
+}
+
+/// `GET /system/apg`（rev 2026-11-25.13）：APG 家族 runit 状态快照——
+/// atlas_network / atlas_ex2 读 SVDIR 下 supervise/stat+pid（纯文件读、零 fork，
+/// 走普通桶即可）；agentflow / medianode = coming_soon 占位。响应
+/// `{"services":[{"pkg","state","pid"}]}`，state ∈ run|down|alert|uninstalled|
+/// coming_soon。前端 APG 卡数据源；本机未装的包如实报 uninstalled。
+async fn h_apg() -> HttpResponse {
+    respond("/system/apg", false, || {
+        serde_json::to_vec(&crate::v1::service::apg_snapshot())
     })
     .await
 }

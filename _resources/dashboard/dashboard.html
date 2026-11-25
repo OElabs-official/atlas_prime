@@ -35,14 +35,18 @@
                                  modem,camera,aoss,ddr,pmic,battery,radio,other}
      GET  /system/mem            {total_mem_mb,used_mem_mb,avail_mem_mb,
                                   total_swap_mb,used_swap_mb}
-     GET  /system/gpu            {available:bool,load_pct:num|null,freq_mhz:num
-                                  |null,max_mhz:num|null,source:str|null,
-                                  reason:str|null}（available!=true 或端点缺席
-                                  → GPU 卡整卡隐藏、零告警）
+      GET  /system/gpu            {available:bool,load_pct:num|null,freq_mhz:num
+                                   |null,max_mhz:num|null,source:str|null,
+                                   reason:str|null}（首次成功前 available!=true
+                                   或端点缺席 → GPU 卡整卡隐藏、零告警；本会话内
+                                   一旦成功过即 sticky 常驻，后续失败仅冻结末值
+                                   + .stale 暗淡，不再隐藏）
      GET  /system/disk           {disks:[{device,fs,mount_point,total_mb,
                                  avail_mb,used_mb}], dirs:[str]}
-    GET  /system/ip             {lan:[[nic,addr]],public_v4:str|null,
-                                 public_v6:[str]}（回环地址本面板不显示）
+     GET  /system/ip             {lan:[[nic,addr]],public_v4:str|null,
+                                  public_v6:[str]}（回环地址本面板不显示；公网
+                                  v4/v6 归折叠区，默认折叠 + 卡头按钮展开，选择
+                                  持久化 localStorage["atlas-pubip"]；LAN 行不变）
     GET  /system/cli/network    /system/ip 形状 + speed:{[组]:{rx_bps:f64,
                                  tx_bps:f64}}（字节/秒瞬时速率，分组级：
                                  wifi/cellular/有流量的其他网卡名）；speed 可为
@@ -51,6 +55,8 @@
     GET  /system/cli/battery    {present,technology,health,plugged,status,
                                  percentage,voltage(毫伏),current(微安,负=放电),
                                  current_average;其余键本面板忽略}
+     GET  /system/apg            {services:[{pkg,state,pid}]} —— APG 包组恰 4 行，随 TASKS 60s
+                                  并拍；run|down|alert|uninstalled / coming_soon
     GET  /task                  [{id,name,group,command,phase,pid,started_at,
                                  uptime_ms,restarts,last_exit,log_lines,
                                  log_dropped}]
@@ -91,20 +97,28 @@
   样本（服务端 120s 轮次落库），先播种后续采 = 时间序天然不破；回填失败仅
   一条 snackbar，图表从实时开始。GPU 的 kind=gpu 种子延迟到 /system/gpu 首次
   可用才拉（不可用机器 = 零请求、零历史成本）。
-  采样契约：
-    快速卡 THERMALS / CPU / MEM / GPU：默认 1 fps，双击在 1⇄5 fps 间切换（定时器重建
-    + 立即补拍；快速四连 5fps 合计 20 req/s ≤ 共享 20/s 桶）。折线历史窗固定 5min。
-    BATTERY：默认 5s 节奏，双击在 5s⇄1s 间切换并提示（服务器有 1/s CLI 桶 +
-    缓存 HIT 兜底，1s 安全）。折线窗默认 24h，图上水平滑动切 72h（按时间修剪
-    + 总量封顶抽稀）。
-    慢速卡 STORAGE / TASKS：固定 60s 轮询，双击 = 一次手动立即刷新。
-    NETWORK：5s 节奏拉 /system/cli/network（环+列表同源）；双击 = 一次立即抓取
-    （重排下一轮 5s）。IP 地址双击复制不上抛为整卡刷新。
-     CONSOLE = 交互式 PTY 终端（绑定 TASKS 任务、单活会话），不参与轮询；双击 = 一次重新 fit。
-    页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
-   失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
-   30s 节流一条；明暗主题跟随 OS（prefers-color-scheme，无手动开关，matchMedia
-   翻转时图表配色热重解析——canvas 环 + D3 SVG 折线/柱状一并重画）；绝不产生未捕获拒绝。
+   采样契约：
+     快速卡 THERMALS / CPU / MEM / GPU：默认 1 fps，双击在 1⇄5 fps 间切换（定时器重建
+     + 立即补拍；快速四连 5fps 合计 20 req/s ≤ 共享 20/s 桶）。折线历史窗固定 5min。
+     THERMALS 每组内传感器序 = 用户拖拽序（localStorage["atlas-thermal-order"]，键
+     = 组键|传感器原始名）：已存序者按存序、从未见过的传感器按名稳定排序追加末尾、
+     消失者自然脱落，数据刷新绝不重排；水平拖名称行（指针事件，触摸可用）改序、松手落库。
+     BATTERY：默认 5s 节奏，双击在 5s⇄1s 间切换并提示（服务器有 1/s CLI 桶 +
+     缓存 HIT 兜底，1s 安全）。折线窗默认 24h，图上水平滑动切 72h（按时间修剪
+     + 总量封顶抽稀）。
+     慢速卡 STORAGE / TASKS：固定 60s 轮询，双击 = 一次手动立即刷新。
+     NETWORK：5s 节奏拉 /system/cli/network（环+列表同源）；双击 = 一次立即抓取
+     （重排下一轮 5s）。IP 地址双击复制不上抛为整卡刷新。公网 v4/v6 行入 #pubIpList
+     折叠区（默认折叠，卡头「展开/收起」按钮 + localStorage["atlas-pubip"] 记忆）。
+      CONSOLE = 交互式 PTY 终端（绑定 TASKS 任务、单活会话），不参与轮询；双击 = 一次重新 fit。
+     页面隐藏时全部轮询停摆；双击命中 button/input/a/form/textarea 时不拦截。
+    视口不变量（261125）：周期性数据更新绝不移动视口。任何会改文档高度/容器滚动高度
+    的周期改动（卡显隐、#netRings 显隐、列表整体重建）一律经 holdScroll() 包裹：
+    记录 → 改 DOM → 被浏览器顺移的 window.scrollY 与容器 scrollTop 原地补回
+    （behavior:"instant"，绝不用 html{scroll-behavior:smooth} 演一段）。
+    失败礼仪：fetch 失败保留旧数据 + 卡片轻度暗淡；snackbar 为唯一反馈面，每面板
+    30s 节流一条；明暗主题跟随 OS（prefers-color-scheme，无手动开关，matchMedia
+    翻转时图表配色热重解析——canvas 环 + D3 SVG 折线/柱状一并重画）；绝不产生未捕获拒绝。
 作业抽屉（蓝图 ex2_v2 bottom-sheet 把手模式）：TASKS / CONSOLE 两卡移出 grid，
      入固定底抽屉 #jobs（surface-container-low 停靠面 + 顶缘 corner-extra-large 圆角
      + §3.29 handle 32×4@40%）；两档 closed 仅露 56px 把手（--jh ResizeObserver 实测、
@@ -471,12 +485,19 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
    条纹 = 轨道色横带 rect 组（原 mask 条纹的等价复刻，SVG 通用无 mask 兼容风险）） */
 .tgb{display:flex;flex-direction:column;gap:2px;height:70px}
 .tgb .tbars{flex:1;display:block;width:100%;min-width:0;min-height:0}
-.tlabs{display:grid;gap:var(--md-sys-space50);min-width:0}
 .tbar2{transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
-                    y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate)}
+                     y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate)}
 .tstrip rect{fill:var(--md-sys-color-surface-container)}
+.tlabs{display:grid;gap:var(--md-sys-space50);min-width:0;touch-action:pan-y}
+/* 传感器名称行 = 组内排序把手（261125）：水平拖拽改序（touch-action:pan-y 保纵向滚页），
+   拖起 = dragged 态淡出、目标槽 = hover 态状态层；均走 one-ink-many-alphas，不加彩边 */
 .tlabs .tlab{font-family:var(--d4-mono);font-size:9.5px;line-height:1.1;text-align:center;
-  color:var(--md-sys-color-on-surface-variant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  color:var(--md-sys-color-on-surface-variant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  cursor:grab;user-select:none;-webkit-user-select:none;
+  transition:opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+.tlabs .tlab.drag{cursor:grabbing;opacity:calc(1 - var(--md-sys-state-dragged-opacity));
+  background:color-mix(in srgb,var(--md-sys-color-on-surface) var(--md-sys-state-dragged-opacity),transparent);
+  border-radius:var(--md-sys-shape-corner-extra-small)}
 
 /* MEM 横向双轨（>80% 越界段以更响的 error 色锐利起笔） */
 .read .v.sm{font-size:calc(var(--md-sys-typescale-title-large-size) - 2px)}
@@ -508,12 +529,15 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .trow{position:relative;display:grid;align-items:center;gap:var(--md-sys-space100);
   padding:var(--md-sys-space100) var(--md-sys-space75);border-bottom:1px solid var(--md-sys-color-outline-variant)}
 .trow.th2{grid-template-columns:2fr 3fr}
-#netList{max-height:min(288px,36vh)}
-#netList .trow{padding:7px var(--md-sys-space75);line-height:1.3}
-#netList .trow .nm{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px);display:flex;align-items:baseline;gap:6px;min-width:0}
-#netList .trow .nm b{flex:0 0 auto}
-#netList .trow .nm small{font-size:calc(var(--md-sys-typescale-label-small-size) + 2px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#netList .trow .tval{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px)}
+/* 公网地址折叠区 #pubIpList 与 LAN 列表 #netList 同族同行式（261125 拆分：公网行
+   独立容器以便整体折叠；折叠 = 内联 display:none，与 #netRings 同法） */
+#netList,#pubIpList{max-height:min(288px,36vh)}
+#netList .trow,#pubIpList .trow{padding:7px var(--md-sys-space75);line-height:1.3}
+#netList .trow .nm,#pubIpList .trow .nm{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px);display:flex;align-items:baseline;gap:6px;min-width:0}
+#netList .trow .nm b,#pubIpList .trow .nm b{flex:0 0 auto}
+#netList .trow .nm small,#pubIpList .trow .nm small{font-size:calc(var(--md-sys-typescale-label-small-size) + 2px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#netList .trow .tval,#pubIpList .trow .tval{font-size:calc(var(--md-sys-typescale-body-small-size) + 2px)}
+#pubIpBtn[hidden]{display:none}                     /* .btn 的 display 盖过 UA [hidden]，显式压制（同 #stoFoldBtn） */
 /* NETWORK 分组双环行（与 MEM/BATT 表盘同盘径兄弟（--d4-gauge 统一 180/130px）：
    内=下载 外=上传 对数弧；space-evenly 左右均分 = 两组时对称落在 1/4、3/4 处，
    >2 组（USB 网卡等自组）flex-wrap 换行、每行仍均分；盘体定尺寸，本行无滚动
@@ -776,10 +800,30 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   box-shadow:inset 0 0 0 1px var(--md-sys-color-outline-variant)}
 .jobs .card+.card{margin-top:var(--md-sys-space100)}
 
+/* ⑧ APG 卡：零新色（直挂 .acc-task；药丸 = .ph + 既有色对）。行高固定 = 零视口扰动；零动效（RM 由 ⑦ 压平） */
+.apgrid{display:grid;grid-template-columns:1fr 1fr;gap:var(--md-sys-space150)}
+.apleft{min-width:0;background:var(--md-sys-color-surface-container);border-radius:var(--md-sys-shape-corner-small);
+  padding:var(--md-sys-space100) var(--md-sys-space150)}
+.apn{font-weight:500;color:var(--acc);font-size:var(--md-sys-typescale-display-small-size);line-height:var(--md-sys-typescale-display-small-line-height)}
+.aps{font-size:var(--md-sys-typescale-label-small-size);color:var(--md-sys-color-on-surface-variant)}
+.aprows{display:grid;gap:var(--md-sys-space75);min-width:0}
+.aprow{display:flex;align-items:center;gap:var(--md-sys-space100);min-width:0}
+.apd{width:8px;height:8px;flex:none;border-radius:var(--md-sys-shape-corner-full);background:var(--md-sys-color-outline)}
+.aprow.stR .apd{background:var(--d4-b3)} .aprow.stW .apd{background:var(--md-sys-color-tertiary)}
+.apn2,.apid{font-family:var(--d4-mono);font-size:var(--md-sys-typescale-label-small-size)}
+.apn2{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.apc{margin-left:auto;border:1px solid transparent}
+.apc.nil{background:transparent;border-color:var(--md-sys-color-outline-variant)}
+.apc.soon{background:transparent;border-style:dashed;border-color:var(--md-sys-color-outline)}
+.apc.R{background:var(--d4-b3c);color:var(--d4-b3oc)}
+.apc.W{background:var(--md-sys-color-tertiary-container);color:var(--md-sys-color-on-tertiary-container)}
+.apid{flex:none;color:var(--md-sys-color-on-surface-variant)}
+
 /* ============================================================
    ⑦ 响应式（单列布局下仅保留壳层/表格/表盘适配）+ reduced-motion
    ============================================================ */
 @media(max-width:760px){
+  .apgrid{grid-template-columns:1fr}
   .shell{padding:var(--md-sys-space150) var(--md-sys-space100) var(--md-sys-space400)}
   .phead,.prow{grid-template-columns:1fr 84px 124px}   /* 窄屏三列 = 任务名 / 状态药丸 / 日志行（行内启停移除后第 7 列顶上操作位） */
   .phead>*:nth-child(2),.phead>*:nth-child(4),.phead>*:nth-child(5),.phead>*:nth-child(6),
@@ -807,6 +851,15 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 
 <div class="shell">
   <div class="grid">
+    <!-- ====== APG：左 = 运行任务数（/task 同拍）| 右 = 包组四行（/system/apg 同拍） ====== -->
+    <section class="card acc-task" id="card-apg">
+      <header class="ch"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="align-self:center"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg><h2>APG</h2><span class="hta">package group</span></header>
+      <div class="apgrid">
+        <div class="apleft"><div class="apn num" id="apgRunN">0</div><div class="aps" id="apgRunTot">of 0 configured</div></div>
+        <div class="aprows" id="apgRows"></div>
+      </div>
+    </section>
+
     <!-- ====== CPU：峰值/峰核/60s 均值 + 归因着色折线（5min）+ 同族 hues 每核柱（1|5fps） ====== -->
     <section class="card acc-cpu" id="card-cpu">
       <header class="ch"><h2>CPU</h2></header>
@@ -821,7 +874,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
     <!-- ====== GPU：双环表盘（261125 对调：内=频率逆时针 0–1500MHz 满刻度、外=使用率 wavy
            动态环；netRings 同机件同盘径）+ 使用率/频率读数格 + 使用率面积图（memChart 同族）
            + 频率自缩放细线（读数与环同源）
-           （1|5fps · 双击切档；/system/gpu 缺席或 available!=true → 整卡隐藏、零告警） ====== -->
+           （1|5fps · 双击切档；/system/gpu 缺席或 available!=true → 首次成功前整卡隐藏、
+            零告警；本会话成功过一次即 sticky 常驻（失败冻结末值 + .stale，不隐藏不闪）） ====== -->
     <section class="card acc-gpu" id="card-gpu" style="display:none">
       <header class="ch"><h2>GPU</h2></header>
       <div class="gwrap">
@@ -897,10 +951,12 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
     </section>
 
     <!-- ====== NETWORK：分组双环速率表盘（wifi/cellular/有流量其他网卡；内=下载
-           外=上传，对数 Mb/s；标签 WIFI/MOBILE/原样）+ 地址分桶列表
-           LAN/公网v4/公网v6（5s · 双击=刷新；speed 缺席 = 环行整体隐藏） ====== -->
+         外=上传，对数 Mb/s；标签 WIFI/MOBILE/原样）+ LAN 地址列表 + 公网地址折叠区
+         （公网 v4/v6 默认折叠，卡头按钮展开/收起，选择入 localStorage["atlas-pubip"]；
+         5s · 双击=刷新；speed 缺席 = 环行整体隐藏） ====== -->
     <section class="card acc-net" id="card-net">
-      <header class="ch"><h2>NETWORK</h2></header>
+      <header class="ch"><h2>NETWORK</h2>
+        <span class="hctl"><button class="btn btn-text btn-sm" id="pubIpBtn" type="button" aria-expanded="false" aria-controls="pubIpList" hidden>展开</button></span></header>
       <div id="netRings" style="display:none">
         <div class="netrings" id="netRingsRow"></div>
         <div class="legend">
@@ -909,9 +965,12 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
         </div>
       </div>
       <div class="tlist scroll" id="netList"></div>
+      <div class="tlist scroll" id="pubIpList" style="display:none"></div>
     </section>
 
-    <!-- ====== THERMALS：固定分组序竖条矩阵 + 全域最高温（1|5fps） ====== -->
+    <!-- ====== THERMALS：固定分组序竖条矩阵 + 全域最高温（1|5fps）；组内传感器序 =
+         用户拖拽序（localStorage["atlas-thermal-order"]，新传感器按名追加末尾、
+         刷新绝不重排；水平拖名称行改序、松手落库） ====== -->
     <section class="card acc-therm" id="card-thermal">
       <header class="ch"><h2>THERMALS</h2></header>
       <div class="chartbox h84" style="margin-top:0"><div class="lh" id="hotChart" role="img" aria-label="全域最高温 5 分钟折线（20–90 °C）"></div></div>
@@ -933,7 +992,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.11 -->
+    <!-- rev 2026-11-25.13 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1017,6 +1076,28 @@ const el = (tag, cls, text) => {
   return n;
 };
 const unit = u => { const s = document.createElement("s"); s.textContent = u; return s; };
+
+/* ---------- 视口稳定（261125 修复①：周期性刷新绝不移动视口） ----------
+   症状：滚到页底后下一拍跳回 NETWORK 一带（「滚动弹跳」）。根因 = 周期路径里改文档
+   高度的 DOM 改动——GPU 卡在 1fps 路径上 display:none ⇄ "" 往复（tickGpu 原以
+   available!=true 立即自隐，su 桥 10s TTL 下一旦抖动即整卡高度进出流），加上
+   #netRings 显隐与列表整体重建改变 scrollHeight：浏览器把 scrollTop 钳到新上限
+   （内容顺移），配合 html{scroll-behavior:smooth} 便成可见跳屏。
+   对策：凡此类改动一律经 holdScroll(fn, box) 包裹——先记 window.scrollY（可选：容器
+   自身 scrollTop），跑完 DOM 改动后比对，被顺移即原地补回；behavior:"instant" 显式绕开
+   平滑滚动（该枚举缺席时退化为 auto，最坏是演一段平滑、位置仍正确）。
+   代价 = 一次强制布局读取，只在显隐切换/列表重建点发生，不在纯读数路径。 */
+function scrollSnap(box) { return { y: window.scrollY, x: window.scrollX, sy: box ? box.scrollTop : 0 }; }
+function scrollBack(s, box) {
+  if (box && box.scrollTop !== s.sy) box.scrollTop = s.sy;
+  if (window.scrollY !== s.y) { try { window.scrollTo({ top: s.y, left: s.x, behavior: "instant" }); } catch { window.scrollTo(s.x, s.y); } }
+}
+function holdScroll(fn, box) { const s = scrollSnap(box); const r = fn(); scrollBack(s, box); return r; }
+/* 显隐切换专用：仅当真翻转时才付视口守恒的代价（同值写回 = 零布局读） */
+function showBox(box, on) {
+  if ((box.style.display === "none") === !on) return;
+  holdScroll(() => { box.style.display = on ? "" : "none"; });
+}
 
 /* ---------- 网络层（所有拒绝都在调用点消化，绝不裸抛） ---------- */
 async function getJSON(path) {
@@ -1349,6 +1430,7 @@ const cardMeta = {
   sto:   { sel: "#card-sto",     label: "STORAGE" },
   proc:  { sel: "#procZone",     label: "PROCESS" },
   task:  { sel: "#card-task",    label: "TASKS" },
+  apg:   { sel: "#card-apg",     label: "APG" },
   cons:  { sel: "#card-cons",    label: "CONSOLE" }
 };
 for (const k in cardMeta) cardMeta[k].elm = $(cardMeta[k].sel);
@@ -1597,14 +1679,117 @@ function thermBarColor(t) {
   const x = Math.min(1, Math.max(0, (t - 20) / 60));   // 20°C..80°C 全量程
   return "hsl(" + (210 - 210 * x).toFixed(0) + " " + (55 + 35 * x).toFixed(0) + "% " + (58 - 6 * x).toFixed(0) + "%)";
 }
+/* ---------- 组内传感器序（261125 修复②：顺序稳定 + 用户序持久化） ----------
+   症状：1fps 重建按 payload 序排，用户排好的序每拍被冲、同组行来回跳。
+   持久化 = localStorage["atlas-thermal-order"]：扁平 id 数组，id = 组键 + "|" + 传感器
+   原始名（不用 shortThermName 短名：它剥前缀/截断/按位兜底，跨轮次不稳）。
+   渲染规则（顺序感知 + 稳定，数据刷新绝不重排）：
+   ① 已存序者按存序原样保留；② 从未见过的传感器按名稳定排序追加到本组末尾；
+   ③ 消失的传感器自然脱落（不占位、不补空）；④ 同 id 重复 → 保 payload 序（sort 稳定）。
+   落库时机 = 首轮基线固化（一次性，用户未拖拽也不再重排）+ 拖拽松手（用户意图）；
+   其余数据 tick 只读不写。 */
+const THERM_ORDER_KEY = "atlas-thermal-order";
+let thermOrder = [];
+try {
+  const raw = JSON.parse(localStorage.getItem(THERM_ORDER_KEY) || "[]");
+  if (Array.isArray(raw)) thermOrder = raw.filter(x => typeof x === "string");
+} catch { /* 无痕模式 / 脏值 = 无存序（回落 payload 序） */ }
+let thermRank = new Map(thermOrder.map((id, i) => [id, i]));
+function setThermOrder(ids) {
+  thermOrder = ids;
+  thermRank = new Map(ids.map((id, i) => [id, i]));      // 重复 id 后写覆盖（本场景无重复）
+  try { localStorage.setItem(THERM_ORDER_KEY, JSON.stringify(ids)); } catch { /* 无痕容忍 */ }
+}
+const thermSid = (ckey, p) => ckey + "|" + (typeof p[1] === "string" ? p[1] : String(p[1]));
+function orderThermPairs(ckey, pairs) {
+  if (!thermRank.size) return pairs;                     // 首轮无存序 = payload 序（观感不变）
+  const saved = [], fresh = [];
+  for (const p of pairs) (thermRank.has(thermSid(ckey, p)) ? saved : fresh).push(p);
+  saved.sort((a, b) => thermRank.get(thermSid(ckey, a)) - thermRank.get(thermSid(ckey, b)));
+  fresh.sort((a, b) => String(a[1]).localeCompare(String(b[1])));   // 新传感器：按名确定性追加末尾
+  return saved.concat(fresh);
+}
+/* ---------- 组内拖拽排序（261125）：指针事件链路（HTML5 DnD 在 Android 触摸下不可用）。
+   水平意向 ≥8px 且横向占优才起拖（纵向让位滚页，.tlabs 已 touch-action:pan-y）；
+   拖拽期整卡免重建（否则 1fps 补拍会拔掉被抓节点、手势中断），拖动只走 transform；
+   松手按指针 x 命中最近槽位 → 组内移序 → 全量存序落库 → 一次重渲染。 ---------- */
+let thermDrag = null;              // {lab,box,ckey,sid,pid,x0,y0,dx,on,rects}
+function thermGroupSids(box) {
+  return Array.from(box.children).map(n => n.dataset.sid).filter(Boolean);
+}
+function thermNearestSlot(rects, x) {                    // 起拖时槽位坐标 → 最近中心
+  let best = 0, bd = Infinity;
+  for (const [i, r] of rects.entries()) {
+    const d = Math.abs(x - (r.left + r.right) / 2);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+function thermFlatOrder(repl, sids) {                   // DOM 现状 → 扁平全序（repl 组改用给定新序）
+  const ids = [];
+  for (const g of $("#thermList").children) {
+    const labs = g.querySelector(".tlabs");
+    if (!labs) continue;
+    if (labs === repl) { for (const s of sids) ids.push(s); continue; }
+    for (const n of labs.children) if (n.dataset.sid) ids.push(n.dataset.sid);
+  }
+  return ids;
+}
+$("#thermList").addEventListener("pointerdown", ev => {
+  if (!ev.isPrimary || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+  const lab = ev.target instanceof Element ? ev.target.closest(".tlab") : null;
+  if (!lab || !lab.dataset.sid) return;
+  const box = lab.parentElement;
+  thermDrag = {
+    lab, box, ckey: box.dataset.ckey || "", sid: lab.dataset.sid, pid: ev.pointerId,
+    x0: ev.clientX, y0: ev.clientY, dx: 0, on: false, rects: Array.from(box.children).map(n => n.getBoundingClientRect()),
+  };
+});
+addEventListener("pointermove", ev => {
+  const dr = thermDrag;
+  if (!dr || ev.pointerId !== dr.pid) return;
+  const dx = ev.clientX - dr.x0;
+  if (!dr.on) {
+    if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(ev.clientY - dr.y0)) return;   // 闸门 + 纵向让位
+    dr.on = true; dr.lab.classList.add("drag");
+    try { dr.lab.setPointerCapture(dr.pid); } catch { /* 抓取失败仍跟指针 */ }
+  }
+  dr.dx = dx;
+  dr.lab.style.transform = "translateX(" + dx + "px)";   // transform-only（合成器友好，不动布局）
+});
+addEventListener("pointerup", ev => {
+  const dr = thermDrag;
+  if (!dr || ev.pointerId !== dr.pid) return;
+  thermDrag = null;
+  dr.lab.classList.remove("drag");
+  dr.lab.style.transform = "";
+  if (!dr.on) return;
+  const sids = thermGroupSids(dr.box);
+  const from = sids.indexOf(dr.sid);
+  const to = thermNearestSlot(dr.rects, ev.clientX);
+  if (from >= 0 && to !== from) {
+    sids.splice(from, 1);
+    sids.splice(to > from ? to - 1 : to, 0, dr.sid);
+    setThermOrder(thermFlatOrder(dr.box, sids));         // 组内新序 → 扁平全序落库
+  }
+  const d = lastData.thermal;
+  if (d) renderTherm(d, { noHist: true });               // 立即按新序重画（免历史补点）
+});
+addEventListener("pointercancel", () => {
+  if (!thermDrag) return;
+  thermDrag.lab.classList.remove("drag");
+  thermDrag.lab.style.transform = "";
+  thermDrag = null;
+});
 function renderTherm(d, o) {
   const opts = o || {};
   const cats = [];
-  // 固定分组序 = THERM_GROUPS 声明序（cpu_core→…→other），仅渲染非空组，绝不重排
+  // 固定分组序 = THERM_GROUPS 声明序（cpu_core→…→other），仅渲染非空组，绝不重排；
+  // 组内序 = 用户存序优先（orderThermPairs），payload 序只在首轮无存序时生效
   for (const [key, label] of THERM_GROUPS) {
     const arr = Array.isArray(d[key]) ? d[key] : null;
     if (!arr) continue;
-    const pairs = arr.filter(p => Array.isArray(p) && typeof p[0] === "number" && Number.isFinite(p[0]));
+    const pairs = orderThermPairs(key, arr.filter(p => Array.isArray(p) && typeof p[0] === "number" && Number.isFinite(p[0])));
     if (!pairs.length) continue;
     let mx = -Infinity;
     for (const p of pairs) if (p[0] > mx) mx = p[0];
@@ -1616,7 +1801,9 @@ function renderTherm(d, o) {
   if (!opts.noHist) H.hot.push(hot);
   const gl = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
   drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }], { min: 20, max: 90, gridLines: gl, axis: true });
+  if (thermDrag && thermDrag.on) return;                 // 拖拽中：本轮免重建（最高温折线照更新）
   const list = $("#thermList");
+  const snap = scrollSnap(list);                         // 重建不改视口 / 列表内滚动位
   list.textContent = "";
   for (const c of cats) {
     const g = el("div", "tgrp");
@@ -1633,7 +1820,12 @@ function renderTherm(d, o) {
     bars.appendChild(svg);
     const labs = el("div", "tlabs");
     labs.style.gridTemplateColumns = "repeat(" + c.pairs.length + ",1fr)";
-    c.pairs.forEach((p, i) => labs.appendChild(el("span", "tlab", shortThermName(p[1], i))));
+    labs.dataset.ckey = c.key;                                        // 拖拽：组键（落库时定位组内片段）
+    c.pairs.forEach((p, i) => {
+      const t = el("span", "tlab", shortThermName(p[1], i));
+      t.dataset.sid = thermSid(c.key, p);                             // 拖拽：存序主键
+      labs.appendChild(t);
+    });
     bars.appendChild(labs);
     g.append(head, bars);
     list.appendChild(g);
@@ -1644,6 +1836,10 @@ function renderTherm(d, o) {
       i => shortThermName(c.pairs[i][1], i) + " · " + f1(c.pairs[i][0]) + " °C", thermPrev.get(c.key) || []);
     thermPrev.set(c.key, vals);
   }
+  scrollBack(snap, list);
+  // 首轮基线固化：无存序时把当轮所见序写为存序 → 即使用户从不拖拽，此后刷新也零重排
+  // （无痕/配额异常时 setThermOrder 仍更新内存 thermRank = 本会话内照样稳定）
+  if (!thermRank.size) setThermOrder(thermFlatOrder(null, null));
 }
 const thermPrev = new Map();   // 组键→上轮温度
 async function tickTherm() {
@@ -1721,10 +1917,13 @@ async function tickMem() {
 /* ---------- GPU（双环表盘 = netRings 机件复用，见下方 drawGpuRing；面积图 = memChart 同族；
     频率细线 = tf 自缩放叠加，battChart 功率线同法）
    端点契约 {available,load_pct,freq_mhz,max_mhz,source,reason}：拉取失败或 available!=true
-   → 整卡 display:none（网格自然回流）、零告警零历史请求；恢复可用即复现续采。
+   → 首次成功前整卡 display:none（网格自然回流）、零告警零历史请求。本会话内一旦成功过
+   即 sticky-once-succeeded（261125 修复④）：卡常驻不再隐藏，末值冻结 + .stale 暗淡标
+   新鲜度（零告警不变、无闪烁）；此前行为逐字保留。
    历史种子（kind=gpu：k=load_pct|freq_mhz）延迟到首次可用才拉——缺席机零成本。
    峰频标尺 gpuMax：live max_mhz 优先，缺席退化为序列最大值。空值点顺推上一已知值。 */
 let gpuSeeded = false, gpuMax = 0;
+let gpuSeen = false;                    // sticky 旗标：本会话是否已成功取到过一次 available:true
 let gpuFill = { l: 0, f: 0 };
 /* 双环表盘（netRings 机件复用、零新抽象）：同盘径同几何比例（k=R/60）兄弟。
    （261125 内外对调 + 外环 wavy 化）内=频率 LINEAR 0..1500MHz 满刻度逆时针（C.cpu；
@@ -1830,9 +2029,16 @@ async function seedGpu() {
 async function tickGpu() {
   let d = null;
   try { d = await getJSON("/system/gpu"); } catch { d = null; }
-  if (!d || d.available !== true) { cardMeta.gpu.elm.style.display = "none"; return; }
-  cardMeta.gpu.elm.style.display = "";
-  if (!gpuSeeded) { gpuSeeded = true; await seedGpu(); }            // 种子必早于 live 点 → 时序不破
+  if (!d || d.available !== true) {
+    /* 首次成功前维持自隐（缺席机零成本、零告警）；本会话已成功过 → sticky 常驻：
+       卡不动、末值冻结、仅加 .stale 暗淡（= 全站 stale 新鲜度约定，纯 opacity 不改布局），
+       故 /system/gpu 抖动不再让整卡高度进出流 = 页底视口不再被弹跳（修复①④） */
+    if (!gpuSeen) cardMeta.gpu.elm.style.display = "none";
+    else cardMeta.gpu.elm.classList.add("stale");
+    return;
+  }
+  if (!gpuSeen) { gpuSeen = true; showBox(cardMeta.gpu.elm, true); }   // 首次现身：入流但视口不动
+  if (!gpuSeeded) { gpuSeeded = true; await seedGpu(); }               // 种子必早于 live 点 → 时序不破
   lastData.gpu = d;
   renderGpu(d);
   okPanel("gpu");
@@ -1975,8 +2181,9 @@ function renderNetRings(d) {
   const keys = (sp && typeof sp === "object") ? Object.keys(sp).filter(k => sp[k] && typeof sp[k] === "object") : [];
   const rank = k => k === "wifi" ? 0 : k === "cellular" ? 1 : 2;
   keys.sort((a, b) => rank(a) - rank(b));
-  if (!keys.length) { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
+  if (!keys.length) { showBox(wrap, false); return; }     // 显隐经 showBox：真翻转才守恒视口
+  showBox(wrap, true);
+  const snap = scrollSnap();                              // 环格数增减同样改文档高度 → 一并守恒
   const box = $("#netRingsRow");
   box.textContent = "";
   const mbpsTxt = v => !(v >= N_LOG0) ? "·" : v >= 100 ? String(Math.round(v)) : f1(v);
@@ -1993,12 +2200,29 @@ function renderNetRings(d) {
     box.appendChild(cell);
     drawNetRing(cv, dl, ul);
   }
+  scrollBack(snap);
+}
+/* ---------- 公网地址折叠区（261125 修复③）：公网 v4/v6 行独立容器 #pubIpList，默认折叠，
+   卡头按钮展开/收起；选择入 localStorage["atlas-pubip"]（open/closed，脏值/缺席 = 折叠）。
+   LAN 行行为逐字不变。折叠态下整区 display:none → 公网 v4 在「地址 ⇄ 不可达」间抖动
+   不再改变文档高度（= 少一处周期路径的视口顺移源）。 ---------- */
+const PUBIP_KEY = "atlas-pubip";
+let pubIpOpen = false;
+try { pubIpOpen = localStorage.getItem(PUBIP_KEY) === "open"; } catch { /* 无痕 = 默认折叠 */ }
+function applyPubIp(n) {                                   // n = 公网行数（含「不可达」占位行）
+  const btn = $("#pubIpBtn");
+  showBox($("#pubIpList"), pubIpOpen);
+  btn.hidden = !n;
+  btn.textContent = pubIpOpen ? "收起" : "展开 " + (n || 0) + " 项";
+  btn.setAttribute("aria-expanded", pubIpOpen ? "true" : "false");
 }
 function renderNet(d) {
   renderNetRings(d);
-  const list = $("#netList");
+  const list = $("#netList"), pub = $("#pubIpList");
+  const snap = scrollSnap(list);                           // 重建不改视口 / 列表内滚动位
   list.textContent = "";
-  const row = (tag, sub, val, cls) => {
+  pub.textContent = "";
+  const row = box => (tag, sub, val, cls) => {
     const r = el("div", "trow th2");
     const nm = el("div", "nm");
     nm.append(el("b", null, tag));
@@ -2007,19 +2231,24 @@ function renderNet(d) {
     tv.textContent = val;
     if (!cls) tv.dataset.ip = val;   // 可复制（“不可达”等告警态不带）
     r.append(nm, tv);
-    list.appendChild(r);
+    box.appendChild(r);
   };
+  const rowLan = row(list), rowPub = row(pub);
   const pairs = arr => Array.isArray(arr) ? arr : [];
-  let seen = 0;
+  let seen = 0, npub = 0;
   for (const p of pairs(d.lan)) {
-    if (Array.isArray(p)) { row("LAN", String(p[0]), String(p[1])); seen++; }
+    if (Array.isArray(p)) { rowLan("LAN", String(p[0]), String(p[1])); seen++; }
   }
-  if (typeof d.public_v4 === "string" && d.public_v4) { row("公网v4", null, d.public_v4); seen++; }
-  else row("公网v4", null, "不可达", "warn");
-  for (const addr of pairs(d.public_v6)) { row("公网v6", null, String(addr)); seen++; }
+  if (typeof d.public_v4 === "string" && d.public_v4) { rowPub("公网v4", null, d.public_v4); seen++; npub++; }
+  else { rowPub("公网v4", null, "不可达", "warn"); npub++; }
+  for (const addr of pairs(d.public_v6)) { rowPub("公网v6", null, String(addr)); seen++; npub++; }
   if (!seen) throw new Error("no addresses");
+  applyPubIp(npub);
+  scrollBack(snap, list);
 }
-/* 双击 IP 地址 → 复制到剪贴板（clipboard 不可用时经隐藏 textarea 兜底；http 非安全上下文常见） */
+/* 双击 IP 地址 → 复制到剪贴板（clipboard 不可用时经隐藏 textarea 兜底；http 非安全上下文常见）
+   监听挂在卡上（LAN 列表 + 公网折叠区两处）；stopImmediatePropagation = 同卡 wireDbl 不再
+   把复制上抛成整卡手动刷新（原实现挂 #netList 靠冒泡截断，两列表后改同元素立即停） */
 function copyText(t) {
   if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t);
   return new Promise((res, rej) => {
@@ -2030,13 +2259,19 @@ function copyText(t) {
     ta.remove(); ok ? res() : rej(new Error("copy failed"));
   });
 }
-$("#netList").addEventListener("dblclick", ev => {
+$("#card-net").addEventListener("dblclick", ev => {
   const t = ev.target.closest("[data-ip]");
   if (!t) return;
-  ev.stopPropagation();   // 复制不上抛成整卡手动刷新
+  ev.stopImmediatePropagation();   // 复制不上抛成整卡手动刷新
   const ip = t.dataset.ip;
   copyText(ip).then(() => toast("已复制 " + ip)).catch(() => toast("复制失败（非安全上下文）", "err"));
 });
+$("#pubIpBtn").addEventListener("click", () => {           // 公网区展开/收起（选择持久化，默认折叠）
+  pubIpOpen = !pubIpOpen;
+  try { localStorage.setItem(PUBIP_KEY, pubIpOpen ? "open" : "closed"); } catch { /* 无痕容忍 */ }
+  holdScroll(() => applyPubIp($("#pubIpList").children.length));   // 折叠区进出流不改视口
+});
+applyPubIp(0);                                     // 启动即按存序落位（首轮数据前不闪错态）
 async function tickNet() {
   // 5s 单源驱动环+列表；旧版无 cli/network 端点时回落 /system/ip（列表照旧、环缺席）
   let d = null;
@@ -2320,8 +2555,11 @@ function renderTasks() {
   const jb = $("#jobsBadge");                         // 把手徽标 = running 数（0 隐藏）
   jb.textContent = String(runN);
   jb.classList.toggle("on", runN > 0);
+  $("#apgRunN").textContent = String(tasks.filter(t => PHASE_RUNNINGISH[t.phase]).length);   // APG 左半计数
+  $("#apgRunTot").textContent = "of " + tasks.length + " configured";
 }
 async function tickTasks() {
+  tickApg();   // APG 并拍
   try {
     const [d, sess] = await Promise.all([             // 并采（走本卡现有定时器，零第二循环）：/task 失败 = 整拍失败
       getJSON("/task"),
@@ -2366,6 +2604,34 @@ $("#updBtn").addEventListener("click", async () => {
   } catch (e) { toast("重扫失败：" + e.message, "err"); failPanel("task"); }
   finally { b.disabled = false; }
 });
+
+/* ---------- APG 包组（并拍；失败留旧行，首拍静默） ---------- */
+const APG_ST = { run: ["stR", "R", "RUN"], down: ["stW", "W", "DOWN"], alert: ["stW", "W", "ALERT"],
+  uninstalled: ["", "nil", "NOT INSTALLED"], coming_soon: ["", "soon", "SOON"] };
+const apRowEls = {};
+for (const p of ["atlas_network", "atlas_ex2", "agentflow", "medianode"]) {
+  const c = el("span", "ph apc nil", "—"), i = el("span", "apid"), r = el("div", "aprow");
+  r.append(el("i", "apd"), el("span", "apn2", p), c, i);
+  $("#apgRows").appendChild(r);
+  apRowEls[p] = { r, c, i };
+}
+function renderApg(svcs) {
+  for (const s of svcs) {
+    const e = apRowEls[String(s.pkg)]; if (!e) continue;
+    const m = APG_ST[String(s.state)] || ["", "nil", "—"];
+    e.r.className = m[0] ? "aprow " + m[0] : "aprow";
+    e.c.className = "ph apc " + m[1]; e.c.textContent = m[2];
+    e.i.textContent = (s.state === "run" && Number(s.pid) > 0) ? "#" + s.pid : "";
+  }
+}
+let apgGot = false;
+async function tickApg() {
+  try {
+    const d = await getJSON("/system/apg");
+    if (!Array.isArray(d && d.services)) throw new Error("no services");
+    renderApg(d.services); apgGot = true; okPanel("apg");
+  } catch { apgGot ? failPanel("apg") : cardMeta.apg.elm.classList.add("stale"); }
+}
 
 /* ---------- CONSOLE（xterm.js PTY 终端：进程持久化会话 / 自动接入 / 镜像共享 / 一次性令牌） ----------
    后端契约（冻结，逐字消费）：POST /tui/session {"id"} → 200 {"token","mode":"spawn"|"attach"}
@@ -3094,6 +3360,7 @@ $("#stoFoldBtn").addEventListener("click", () => {             // STORAGE 卡展
   fold.setAttribute("aria-expanded", String(stoExpanded));
 });
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
+wireDbl("#card-apg", tickApg);
 wireDbl("#card-cons", () => { safeFit(activeRec()); });   // 双击 = 对活动会话一次重 fit（无会话 = 安全 no-op，终端卡不参与刷语义）
 function tickAll() {
   tickCpu(); tickTherm(); tickMem(); tickGpu(); tickBatt(); tickNet(); tickSto(); tickProc(); tickTasks();
