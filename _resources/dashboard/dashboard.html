@@ -1013,7 +1013,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.24 -->
+    <!-- rev 2026-11-25.25 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3478,7 +3478,8 @@ const gates = {
     async () => { const [m, s] = await Promise.all([
         getJSON("/db/history?kind=mem&limit=5000&fmt=arr"),
         getJSON("/db/history?kind=swap&limit=5000&fmt=arr")]);
-      if (SEEDK.mem === "pending") seedMemPush(m, s); }, redrawMem),
+      // histRows 适配必须过（builder 吃 {t,k,v}，不是原始 [secs,k,v] 三元组）
+      if (SEEDK.mem === "pending") seedMemPush(histRows(m), histRows(s)); }, redrawMem),
   batt: seedGate("batt", "BATTERY", "#battChart",
     async () => { const rows = histRows(await getJSON("/db/history?kind=battery&limit=4500&fmt=arr"));
       if (SEEDK.batt === "pending") seedBattPush(rows); }, drawBattChart),
