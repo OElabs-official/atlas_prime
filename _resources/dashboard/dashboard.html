@@ -997,7 +997,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.17 -->
+    <!-- rev 2026-11-25.18 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1259,7 +1259,11 @@ function drawLines(host, series, opts) {
       const g = d3.select(this);
       const cnt = s.v.length;
       const enough = cnt >= 2;
-      const X = i => padL + (i / Math.max(1, cnt - 1)) * iw;
+      /* x 标尺 = 固定槽数（opts.xCap，右锚定）：末点恒钉右缘、槽宽 = iw/(xCap-1)
+         恒定，线随点数增加向左生长；xCap 缺席 = 旧自适应（等距摊满 cnt-1，几何同式）。
+         点数超 xCap 时左端越入左边距（缓冲端已按同数修剪，实务不触发）。 */
+      const slot = o.xCap ? iw / (o.xCap - 1) : iw / Math.max(1, cnt - 1);
+      const X = i => (w - padR) - (cnt - 1 - i) * slot;
       const YS = s.tf ? (v => YN(s.tf(v))) : Y;
       const pts = enough ? s.v.map((v, i) => [X(i), YS(v)]) : [];
       const solid = Array.isArray(s.c) ? null : s.c;
@@ -1385,7 +1389,9 @@ function winHist(winMs, maxN) {
     get rows() { return a; }
   };
 }
-/* 快速三连折线窗 = 固定 5min（1fps→300 点 / 5fps→1500 点，上限 1510）；电池另有 HB 模块 */
+/* 快速三连折线窗 = 固定 5min（1fps→300 点 / 5fps→1500 点，上限 1510）；电池另有 HB 模块。
+   绘制 x 标尺与缓冲上限同数钉死（drawLines xCap=1510 / 电池 1200，右锚定）：
+   槽宽恒定，未满窗时线从右缘向左生长，1fps/5fps 点密度可比。 */
 const H = {
   freq: winHist(300000, 1510),
   hot:  winHist(300000, 1510),
@@ -1648,7 +1654,7 @@ function renderCpu(fr, o) {
   const cols = rows.map(r => coreColors[r.v.core] || C.cpu);
   const gl = [];
   for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
-  drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu }], { min: 0, max: 5, gridLines: gl, axis: true });
+  drawLines($("#cpuChart"), [{ v: vals, c: cols, ac: C.cpu }], { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510 });
 }
 async function tickCpu() {
   try {
@@ -1805,7 +1811,7 @@ function renderTherm(d, o) {
   for (const c of cats) hot = hot === null ? c.mx : Math.max(hot, c.mx);
   if (!opts.noHist) H.hot.push(hot);
   const gl = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
-  drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }], { min: 20, max: 90, gridLines: gl, axis: true });
+  drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }], { min: 20, max: 90, gridLines: gl, axis: true, xCap: 1510 });
   if (thermDrag && thermDrag.on) return;                 // 拖拽中：本轮免重建（最高温折线照更新）
   const list = $("#thermList");
   const snap = scrollSnap(list);                         // 重建不改视口 / 列表内滚动位
@@ -1907,7 +1913,7 @@ function renderMem(d, o) {
   drawLines($("#memChart"), [
     { v: rows.map(r => r.v.m), c: C.mem },
     { v: rows.map(r => r.v.s), c: C.task }
-  ], { min: 0, max: 100, gridLines: gl, axis: true });
+  ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510 });
 }
 async function tickMem() {
   try {
@@ -1994,7 +2000,7 @@ function drawGpuChart() {
     /* 频率线 = 色序角色 2（tertiary）：原借 C.cpu（--a-cpu 淡紫）与 C.gpu 淡蓝同为高亮度
        冷色、暗色下色相距仅 ~41° 不达「同图两线色相可辨」；mem/batt 双线图经核对无此问题 */
     { v: rows.map(r => r.v.f), c: C.tert, w: 1.1, tf: v => v / (smax || 1) }
-  ], { min: 0, max: 100, gridLines: gl, axis: true });
+  ], { min: 0, max: 100, gridLines: gl, axis: true, xCap: 1510 });
 }
 function renderGpu(d, o) {
   const opts = o || {};
@@ -2068,7 +2074,7 @@ function drawBattChart() {
     { v: rows.map(r => r.v.pct), c: C.pow },
     { v: rows.map(r => r.v.pow), c: C.net, tf: battPowTf }
   ], {
-    min: 0, max: 100, axis: true,
+    min: 0, max: 100, axis: true, xCap: 1200,   // x 固定 1200 槽 = 绘制端取样上限（HB.win 恒 ≤1200 点）
     gridLines: [{ v: 0, label: "0" }, { v: 50, label: "50", emph: true, color: C.onsv }, { v: 100, label: "100" }],
     rlab: [{ p: 1, t: "+128" }, { p: p8, t: "+8" }, { p: 1 - p8, t: "−8" }, { p: 0, t: "−128" }]
   });
@@ -3244,12 +3250,12 @@ function redrawHistCharts() {
     const rows = H.freq.rows;
     const gl = []; for (let g = 0; g <= 5; g++) gl.push({ v: g, label: String(g) });
     drawLines($("#cpuChart"), [{ v: rows.map(r => r.v.peak), c: rows.map(r => coreColors[r.v.core] || C.cpu), ac: C.cpu }],
-      { min: 0, max: 5, gridLines: gl, axis: true });
+      { min: 0, max: 5, gridLines: gl, axis: true, xCap: 1510 });
   } catch { /* 容忍：等首个 live tick 重绘 */ }
   try {
     const glT = [30, 45, 60, 75, 90].map(v => ({ v, label: v % 30 === 0 ? String(v) : null }));
     drawLines($("#hotChart"), [{ v: H.hot.rows.map(r => r.v), c: C.therm }],
-      { min: 20, max: 90, gridLines: glT, axis: true });
+      { min: 20, max: 90, gridLines: glT, axis: true, xCap: 1510 });
   } catch { /* 同上 */ }
   try {
     const glM = [0, 25, 50, 75, 100].map(v => ({ v, label: v % 50 === 0 || v === 100 ? String(v) : null }));
@@ -3257,7 +3263,7 @@ function redrawHistCharts() {
     drawLines($("#memChart"), [
       { v: H.mem.rows.map(r => r.v.m), c: C.mem },
       { v: H.mem.rows.map(r => r.v.s), c: C.task }
-    ], { min: 0, max: 100, gridLines: glM, axis: true });
+    ], { min: 0, max: 100, gridLines: glM, axis: true, xCap: 1510 });
   } catch { /* 同上 */ }
   try { drawGpuChart(); } catch { /* 同上 */ }
   try { drawBattChart(); } catch { /* 同上 */ }
