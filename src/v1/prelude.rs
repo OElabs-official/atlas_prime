@@ -1,4 +1,4 @@
-//! v1 通用数据底座（standard_dev.md 规范的 `mod prelude`）：
+//! v1 通用数据底座（_std_general.md 规范的 `mod prelude`）：
 //! 版本号、`org.oelabs.*` 标准路径（directories）、配置文件加载（std `OnceLock`——
 //! 本机 Termux std 构建无 `sync::OnceCell`，`OnceLock` 为等价超集，见各域同款注释）。
 //!

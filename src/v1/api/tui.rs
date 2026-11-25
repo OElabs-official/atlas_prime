@@ -330,31 +330,31 @@ pub async fn h_sessions() -> HttpResponse {
 
 // ---------------- /vendor 前端资产（内嵌，白名单五件） ----------------
 
-/// 白名单资产：名字 → 内嵌字节 → MIME。路径相对本文件上溯至仓库根 resources/vendor/。
+/// 白名单资产：名字 → 内嵌字节 → MIME。路径相对本文件上溯至仓库根 _resources/vendor/。
 const VENDOR: &[(&str, &[u8], &str)] = &[
     (
         "xterm.css",
-        include_bytes!("../../../resources/vendor/xterm.css"),
+        include_bytes!("../../../_resources/vendor/xterm.css"),
         "text/css; charset=utf-8",
     ),
     (
         "xterm.js",
-        include_bytes!("../../../resources/vendor/xterm.js"),
+        include_bytes!("../../../_resources/vendor/xterm.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-fit.js",
-        include_bytes!("../../../resources/vendor/addon-fit.js"),
+        include_bytes!("../../../_resources/vendor/addon-fit.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-webgl.js",
-        include_bytes!("../../../resources/vendor/addon-webgl.js"),
+        include_bytes!("../../../_resources/vendor/addon-webgl.js"),
         "text/javascript; charset=utf-8",
     ),
     (
         "addon-unicode-graphemes.js",
-        include_bytes!("../../../resources/vendor/addon-unicode-graphemes.js"),
+        include_bytes!("../../../_resources/vendor/addon-unicode-graphemes.js"),
         "text/javascript; charset=utf-8",
     ),
 ];

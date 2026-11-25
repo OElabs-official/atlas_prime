@@ -871,7 +871,7 @@ mod tests {
 
     /// 跨语言钉（audit task-24，GAP-6）：登记表每个 kind 字符串必须出现在内嵌面板
     /// [`DASHBOARD_HTML`](crate::v1::api::DASHBOARD_HTML)（`include_str!`
-    /// `resources/dashboard.html`，与 `contains("<!-- rev ")` 先例同一字节源）。
+    /// `_resources/dashboard/dashboard.html`，与 `contains("<!-- rev ")` 先例同一字节源）。
     /// 前端是 kind 列的主要消费方：登记了新 kind 而面板不认 = 数据静默沉底，
     /// 本测试把这次跨语言耦合变成可跑的断言。测试期单向只读 api 常量，
     /// 不构成运行期域间依赖（六域数据流不变）。

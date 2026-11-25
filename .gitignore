@@ -4,12 +4,16 @@
 *.log
 /idx.bak
 /idx.out
+# _std_general.md 0.2.3 工程文档结构（全部忽略，AGENTS.md 同忽略）
+/_cookbook
 /_docs
 /_drafts
+/_design
 /_research
 /_analyze
-/AGENTS.md
 /_issues
 /_index
-/_features
-
+/_done
+/_tmp
+/_a2a
+/AGENTS.md

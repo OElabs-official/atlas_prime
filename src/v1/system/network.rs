@@ -38,7 +38,7 @@
 //!   真实出口地址看 `public_v4`；接口直挂公网 IPv4（罕见）也并入 `lan` 桶展示；
 //! - `public_v4` 主源为**明文 HTTP 回显**（std 裸 TCP:80 GET，ipip/ifconfig/ip.sb
 //!   三站顺试）：语义是「当前网络路径上回显服务看到的源地址」——本机挂 SSR 时
-//!   实测为 VPS 出口 <redacted VPS egress>（代理视角），裸线路 IP 需旁路代理复测，
+//!   实测回显为**用户 VPS 出口**（代理视角，实测 IP 不留档），裸线路 IP 需旁路代理复测，
 //!   详见 [`probe_public_v4`] 的观测视角备忘；兜底走 UDP:53 DNS TXT（Google
 //!   `o-o.myaddr` 主、Cloudflare 备，扫描全部 TXT 记录取首个合法 IP——Google
 //!   会随机夹带 `edns0-client-subnet` 副记录）；
@@ -221,11 +221,11 @@ pub fn prewarm() {
 /// DNS TXT（Google 主、Cloudflare 备）兜底。
 ///
 /// ⚠️ 观测视角备忘（本机真机验证，2026-10；待用户以 SSR 开/关对照复测）：
-/// - 实测返回 `<redacted VPS egress>` 为**用户 VPS 出口**而非运营商手机号——本机跑着
+/// - 实测返回值为**用户 VPS 出口**而非运营商手机号（实测 IP 不留档）——本机跑着
 ///   SSR（tun/透明代理会接管 TCP:80），HTTP 回显看到的其实是 VPS 的出站点；
 /// - 对照组：DNS TXT 走被 Private DNS TLS 化的链路时，回声是解析器出口
 ///   （74.125/172.253 等 Google 段，每次轮换），响应内 edns0-client-subnet
-///   字段倒是暴露了真线路段（<carrier /24, redacted>，联通）；
+///   字段倒是暴露了真线路段（运营商 /24 段，不留档）；
 /// - 结论：`public_v4` 语义 =「当前网络路径上、回显服务看到的源地址」，挂了
 ///   代理时它就是代理出口（这往往正是想看的）；若想要裸线路 IP，需旁路 SSR
 ///   后复测，或改走 UDP 观测点（EDNS client-subnet 只能给到 /24 段）。

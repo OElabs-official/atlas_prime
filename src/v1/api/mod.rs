@@ -41,7 +41,7 @@
 //!   可选 `&fmt=arr`（增量契约）→ 同一序列的紧凑等价形 `[[ts_secs,"k",v],...]`
 //!   （ts 改 unix 秒数值）；缺省/未知 fmt 值 = 默认对象形，默认字节对外契约不变；
 //! - `GET /` → 302 重定向到 `/dashboard.html`；
-//! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改 resources/dashboard.html 重编）：
+//! - `GET /dashboard.html` → 面板前端（内嵌于二进制，改版 = 改 _resources/dashboard/dashboard.html 重编）：
 //!   数据目录（与 v1/db 同源）存在 dashboard.html → **存在即覆盖**，每次读盘（走阻塞池，
 //!   改动刷新即见，开发热替换；删文件回落内嵌）；否则直接回内嵌字节，**永不 404**。
 //!   不限流，响应带 `cache-control: no-cache` 杜绝浏览器启发式缓存；
@@ -444,8 +444,8 @@ async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
 
 // ---------------- 静态路由（面板，不过 Gate、不缓存） ----------------
 
-/// 面板前端内嵌于二进制随发布（UI 随二进制发布；改版 = 改 resources/dashboard.html 重编）。
-pub const DASHBOARD_HTML: &str = include_str!("../../../resources/dashboard.html");
+/// 面板前端内嵌于二进制随发布（UI 随二进制发布；改版 = 改 _resources/dashboard/dashboard.html 重编）。
+pub const DASHBOARD_HTML: &str = include_str!("../../../_resources/dashboard/dashboard.html");
 
 /// 数据目录下的 dashboard.html（开发热替换覆盖文件；解析与 v1/db 的 db_path 同源：v1::prelude 数据目录）
 fn dashboard_path() -> Option<PathBuf> {

@@ -2,7 +2,7 @@
 //! 状态提示，零常驻状态；取代原 resources/sv-install.sh）。
 //!
 //! --sv-install 流程：复制当前二进制到 $PREFIX/bin/atlas_prime（0755，就地重装则
-//! 跳过）→ 以内嵌资产（include_str!，源 resources/sv/atlas_prime/，与 api 内嵌
+//! 跳过）→ 以内嵌资产（include_str!，源 _resources/sv/atlas_prime/，与 api 内嵌
 //! dashboard 同法）落盘 $SVDIR/atlas_prime 的 run 与 log/run（0700）→ 预建 svlogd
 //! 日志目录（svlogd 不会自建目录，缺目录时 log/run 直接退出——设备 E2E 实证）→
 //! 全程不写 down 占位，调用 sv-enable 直接上线。
@@ -21,10 +21,10 @@ const PREFIX: &str = "/data/data/com.termux/files/usr";
 /// runit 服务名 = $SVDIR 下目录名 = 安装后的二进制名。
 const SV_NAME: &str = "atlas_prime";
 
-/// 内嵌主服务脚本（源 resources/sv/atlas_prime/run，落盘 0700）。
-pub const RUN_SCRIPT: &str = include_str!("../../resources/sv/atlas_prime/run");
-/// 内嵌日志服务脚本（源 resources/sv/atlas_prime/log/run，落盘 0700）。
-pub const LOG_RUN_SCRIPT: &str = include_str!("../../resources/sv/atlas_prime/log/run");
+/// 内嵌主服务脚本（源 _resources/sv/atlas_prime/run，落盘 0700）。
+pub const RUN_SCRIPT: &str = include_str!("../../_resources/sv/atlas_prime/run");
+/// 内嵌日志服务脚本（源 _resources/sv/atlas_prime/log/run，落盘 0700）。
+pub const LOG_RUN_SCRIPT: &str = include_str!("../../_resources/sv/atlas_prime/log/run");
 
 /// 安装布局条目：目录（body=None）或内嵌脚本（body=Some），附权限模式。
 pub struct Entry {

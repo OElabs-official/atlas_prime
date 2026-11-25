@@ -1,5 +1,5 @@
 //! v1: 采集/管理层根模块，按域分子目录：[`prelude`] 通用数据底座（版本号、
-//! org.oelabs.* 标准路径、配置加载；standard_dev.md 规范 mod），
+//! org.oelabs.* 标准路径、配置加载；_std_general.md 规范 mod），
 //! [`system`] 硬件/系统黑箱采集，[`task`] 任务监督器，
 //! [`api`] ntex HTTP API（路由 ↔ 模块一一对应），
 //! [`operator`] 操作器（程序内唯一自主驱动数据的模块：周期采样），
