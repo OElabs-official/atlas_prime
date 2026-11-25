@@ -21,9 +21,14 @@
     折线渐变面积 = charts.js §2 纪律：defs linearGradient 纵向、stop-color=系列色运行时解析值
     （明暗自动换色）、stop-opacity 28%→0（第二序列 18% 防双面积糊底）；实色序列面积
     curveMonotoneX 与线同滑，逐段归因序列直连 + 卡族主色单渐变（归因语义优先）。
-    STORAGE 用量条 = wavy 进度（md-wavy-linear determinate 适配：sin 波形 path JS 程序化
-    生成 λ=12/A=1.6，观察窗 clip 宽=使用%、右槽空轨 surface-container，平移循环走
-    --md-sys-motion-duration-extra-long4 + linear，reduced-motion 通配压平）。
+      STORAGE 用量条 = wavy 进度（md-wavy-linear determinate 适配：sin 波形 path JS 程序化
+      生成 λ=12/A=3.2（261125.5 全家族振幅翻倍），观察窗 clip 宽=使用%、右槽空轨 surface-container，平移循环走
+      --md-sys-motion-duration-extra-long4 + linear，reduced-motion 通配压平；261125.7 描边
+      = 同色系水平渐变 defs #wprog-grad / crit #wprog-grad-crit，stop var()+color-mix 明暗自动跟随）。
+      GPU/MEM/BATTERY 双环表盘外环 = wavy 极坐标版（JS 驱动 18px/s、RM 下相位冻结；
+      BATTERY 外环 261125.5 wavy 化——功率 log 映射分数铺波带、内外不对调）。
+      261125.7 三表盘内外环描边 = 同色系纵深渐变（弧扫包围盒对角、深端起值尖亮端 =
+      mix(color 66%, #fff)，每帧重建；NETWORK 双环历轮排除、仍单色）。
   数据面 = 本服务器封闭 API（同源、无鉴权、CORS 全开）：
     GET  /system/cpu            {"freq_ghz":[f32..]}
     GET  /system/thermal        {cpu_core:[[°C,type],..],cpu_cluster,gpu,dsp,
@@ -141,11 +146,13 @@
   --md-sys-motion-duration-medium1:250ms; --md-sys-motion-duration-medium2:300ms;
   --md-sys-motion-duration-medium4:400ms;
   --md-sys-motion-duration-long1:450ms;   --md-sys-motion-duration-long2:500ms;
+  --md-sys-motion-duration-extra-long1:700ms;
   --md-sys-motion-duration-extra-long4:1000ms;
   --md-sys-motion-easing-standard:cubic-bezier(0.2,0,0,1);
   --md-sys-motion-easing-emphasized:cubic-bezier(0.2,0,0,1);   /* 本轮补定义（charts.md 惯例值；修 .bg-mesh 静默回退） */
   --md-sys-motion-easing-standard-decelerate:cubic-bezier(0,0,0,1);
   --md-sys-motion-easing-emphasized-decelerate:cubic-bezier(0.05,0.7,0.1,1);
+  --md-sys-motion-easing-emphasized-accelerate:cubic-bezier(0.3,0,0.8,0.15);   /* 退场 261125.8 */
   --md-sys-motion-easing-linear:cubic-bezier(0,0,1,1);
   --d4-sweep:30s;
   --d4-gauge:180px;   /* 表盘统一盘径：MEM/BATT 表盘与 NET/GPU 双环共用同一画布盒（≤760px 降 130px） */
@@ -439,8 +446,12 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .cbar{transition:height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
                    y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
                    filter var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+.cbar.fall,.ccap.fall{transition-timing-function:var(--md-sys-motion-easing-emphasized-accelerate),var(--md-sys-motion-easing-emphasized-accelerate),var(--md-sys-motion-easing-standard);
+  transition-duration:var(--md-sys-motion-duration-extra-long1),var(--md-sys-motion-duration-extra-long1),var(--md-sys-motion-duration-short4)}
 .cbar.pk{filter:brightness(1.32) saturate(1.1)}      /* 峰值核高亮（原 .core.pk .f） */
-.ccap{fill:#fff;opacity:0;transition:opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
+.ccap{fill:#fff;opacity:0;transition:y var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
+  height var(--md-sys-motion-duration-long1) var(--md-sys-motion-easing-emphasized-decelerate),
+  opacity var(--md-sys-motion-duration-short4) var(--md-sys-motion-easing-standard)}
 .ccap.pk{opacity:.85}                                /* 峰值核白帽（原 .f::after） */
 .cglo{pointer-events:none}                           /* gloss 渐变层（白 22%→0，纯观感） */
 .corelabs .ghz{text-align:center;font-family:var(--d4-mono);font-variant-numeric:tabular-nums;
@@ -477,16 +488,19 @@ svg.ic{width:18px;height:18px;flex:none;fill:currentColor}
 .gc2.crit{color:var(--md-sys-color-error)}
 
 /* STORAGE 用量条 = wavy 进度（md-wavy-linear determinate 适配：波形 path 由 JS 程序化生成
-   （sin、λ=12/A=1.6，源码不粘字面 d），观察窗 clip 宽 = 使用%，右侧空槽直轨 = surface-container；
-   波形水平平移一波长循环（transform-only、合成器友好），duration 走 motion 令牌 + linear
-   （循环），reduced-motion 通配压平。高 8 = 轨厚 2 + 2A + 2 圆整） */
-.wprog{position:relative;height:8px;background:var(--md-sys-color-surface-container);
-  border-radius:var(--md-sys-shape-corner-full);overflow:hidden;color:var(--a-sto)}
-.wprog.crit{color:var(--md-sys-color-error)}
+   （sin、λ=12/A=3.2 = 261125.5 振幅翻倍，波带峰谷 0.8–7.2 贴满 8px 轨面、描边端点被本类
+   overflow:hidden 各修平 0.2px，源码不粘字面 d），观察窗 clip 宽 = 使用%，右侧空槽直轨 =
+   surface-container；波形水平平移一波长循环（transform-only、合成器友好），duration 走
+   motion 令牌 + linear（循环），reduced-motion 通配压平。高 8 = 轨厚带宽不变（波带内切）。
+   261125.7：stroke = #wprog-grad、crit = #wprog-grad-crit；stop var()+color-mix = tintLite 同公式。 */
+.wprog{position:relative;height:10px;background:var(--md-sys-color-surface-container);
+  border-radius:var(--md-sys-shape-corner-full);overflow:hidden}
 .wprog__clip{position:absolute;inset-block:0;left:0;width:var(--w,0%);overflow:hidden}
+.wprog__clip.fall{transition:width var(--md-sys-motion-duration-extra-long1) var(--md-sys-motion-easing-emphasized-accelerate)}
 .wprog__svg{display:block;height:100%;width:calc(100% + 24px);   /* 容器 + 2 波长：平移一周期后右缘无缝 */
-  animation:ap-wavy-travel var(--md-sys-motion-duration-extra-long4) linear infinite}
-.wprog__wave{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+  animation:ap-wavy-travel calc(var(--md-sys-motion-duration-extra-long4) / 1.5) linear infinite}
+.wprog__wave{fill:none;stroke:url(#wprog-grad);stroke-width:3;stroke-linecap:round}
+.wprog.crit .wprog__wave{stroke:url(#wprog-grad-crit)}
 @keyframes ap-wavy-travel{to{transform:translateX(-12px)}}       /* 一波长 λ=12px，Loop 无缝 */
 
 /* 网络行（label 列固定 72px，地址列吃满剩余 = 主导份额；hover 8% 状态层 + 1dp outline-variant 分隔） */
@@ -804,15 +818,15 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
       <div class="cores" id="cores" role="img" aria-label="每核实时频率柱状图（满量程 5 GHz）"></div>
     </section>
 
-    <!-- ====== GPU：双环表盘（内=使用率顺时针、外=频率逆时针，线性 0–1500MHz 满刻度；
-           netRings 同机件同盘径）+ 使用率/频率读数格 + 使用率面积图（memChart 同族）
+    <!-- ====== GPU：双环表盘（261125 对调：内=频率逆时针 0–1500MHz 满刻度、外=使用率 wavy
+           动态环；netRings 同机件同盘径）+ 使用率/频率读数格 + 使用率面积图（memChart 同族）
            + 频率自缩放细线（读数与环同源）
            （1|5fps · 双击切档；/system/gpu 缺席或 available!=true → 整卡隐藏、零告警） ====== -->
     <section class="card acc-gpu" id="card-gpu" style="display:none">
       <header class="ch"><h2>GPU</h2></header>
       <div class="gwrap">
         <div class="netring">
-          <div class="dg"><canvas id="gpuRing"></canvas>
+          <div class="dg"><canvas id="gpuRing" role="img" aria-label="GPU 双环表盘：内环=频率 0–1500 MHz 逆时针，外环=使用率 wavy 环顺时针"></canvas>
             <div class="gc"><div class="gn num">GPU</div></div>
           </div>
           <div class="lab">GPU</div>
@@ -831,12 +845,13 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
       </div>
     </section>
 
-        <!-- ====== MEMORY：MEM/SWAP 双横轨 + 80% 越界警示 + 双曲线（1|5fps）+ 卡尾 PROCESS 区
-               （自家进程 top-3 RSS 默认可见、其余点按展开/收起；双击 = mem + proc 双刷新） ====== -->
+        <!-- ====== MEMORY：MEM/SWAP 双层环（261125 对调：内=SWAP 逆时针平弧、外=MEM 用量 wavy
+               动态环）+ 80% 越界警示 + 双曲线（1|5fps）+ 卡尾 PROCESS 区（自家进程 top-3 RSS
+               默认可见、其余点按展开/收起；双击 = mem + proc 双刷新） ====== -->
     <section class="card acc-mem" id="card-mem">
       <header class="ch"><h2>MEMORY</h2></header>
       <div class="gwrap">
-        <div class="gauge"><canvas id="memRing"></canvas>
+        <div class="gauge"><canvas id="memRing" role="img" aria-label="内存双环表盘：内环=SWAP 使用率逆时针，外环=内存使用率 wavy 环顺时针"></canvas>
           <div class="gc"><div class="gc2 num" id="memPc">--G</div><div class="gc2 num" id="memSub">--G</div></div>
         </div>
         <div style="flex:1;min-width:0">
@@ -858,11 +873,12 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
       </div>
     </section>
 
-    <!-- ====== BATTERY：双层表盘（内=电量%，外=功率 log 弧）+ V/A/W 电气读值 + 双轴折线（默认 5s · 双击切 1s） ====== -->
+    <!-- ====== BATTERY：双层表盘（内=电量%，外=功率 wavy 环·log 映射，充电顺/放电逆）+ V/A/W
+           电气读值 + 双轴折线（默认 5s · 双击切 1s） ====== -->
     <section class="card acc-pow" id="card-batt">
       <header class="ch"><h2>BATTERY</h2></header>
       <div class="gwrap">
-        <div class="gauge"><canvas id="battRing"></canvas>
+        <div class="gauge"><canvas id="battRing" role="img" aria-label="电池双环表盘：内环=电量百分比，外环=功率 wavy 环（对数刻度，充电顺时针、放电逆时针）"></canvas>
           <div class="gc"><div class="gn num" id="battPct">--<s>W</s></div></div>
         </div>
         <div style="flex:1;min-width:0">
@@ -906,13 +922,18 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
     <section class="card acc-sto" id="card-sto">
       <header class="ch"><h2>STORAGE</h2>
         <span class="hctl"><button class="btn btn-text btn-sm" id="stoFoldBtn" type="button" aria-expanded="false" hidden>展开</button></span></header>
+      <!-- wavy 波带共用渐变（全行同族→定义一份；stop 走 var()+color-mix = CSS 上下文合法，明暗自动跟随；crit = error 族） -->
+      <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs>
+        <linearGradient id="wprog-grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" style="stop-color:color-mix(in srgb,var(--a-sto) 66%,#fff)"/><stop offset="1" style="stop-color:var(--a-sto)"/></linearGradient>
+        <linearGradient id="wprog-grad-crit" x1="0" y1="0" x2="1" y2="0"><stop offset="0" style="stop-color:color-mix(in srgb,var(--md-sys-color-error) 66%,#fff)"/><stop offset="1" style="stop-color:var(--md-sys-color-error)"/></linearGradient>
+      </defs></svg>
       <div class="tlist scroll short" id="diskList"></div>
     </section>
 
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.3 -->
+    <!-- rev 2026-11-25.11 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1062,6 +1083,28 @@ function hexHsl(hex) {
   }
   return { h, s: Math.min(100, s * 100), l: l * 100 };
 }
+/* 同色系提亮（渐变亮端）：逐通道向白 +34% = mix(color 66%, #fff) 等价，色相零漂移
+   （261125.9：0.2→0.34，梯度感按用户反馈加强；CSS 侧 color-mix 同公式同步） */
+function tintLite(hex) {
+  const c = hexRgb(hex) || [128, 128, 128];
+  return "rgb(" + c.map(v => Math.round(v + (255 - v) * 0.34)).join(",") + ")";
+}
+/* 环弧同色系纵深渐变（charts.js §2 tone 纪律的 canvas 对应物）：角域扫掠 bbox 对角线渐变，
+   起端（值小端）= 当帧档位色、末端（值尖）= tintLite(col)，对角按起角切向 x 选（顺/逆镜像）；
+   每绘即建零缓存 → 主题翻转下一帧自动换新色；退化弧回单色。 */
+function arcGrad(ctx, cx, cy, r, a0, a1, dir, col) {
+  const lo = Math.min(a0, a1), hi = Math.max(a0, a1), Q = Math.PI / 2;
+  const xs = [a0, a1], ys = [a0, a1];
+  for (let t = Math.ceil(lo / Q - 1e-9) * Q; t <= hi + 1e-9; t += Q)   // 跨轴极值入界（满圈自然得外接方 bbox）
+    (Math.round(t / Q) % 2 === 0 ? xs : ys).push(t);
+  const X = xs.map(a => cx + r * Math.cos(a)), Y = ys.map(a => cy + r * Math.sin(a));
+  const x0 = Math.min(...X), x1 = Math.max(...X), y0 = Math.min(...Y), y1 = Math.max(...Y);
+  if (x1 - x0 < 0.5 && y1 - y0 < 0.5) return col;                       // 退化微弧 → 单色
+  const right = (dir > 0 ? -Math.sin(a0) : Math.sin(a0)) >= 0;           // 起角切向 x（canvas y 向下）
+  const g = ctx.createLinearGradient(right ? x0 : x1, y0, right ? x1 : x0, y1);
+  g.addColorStop(0, col); g.addColorStop(1, tintLite(col));
+  return g;
+}
 function setupCanvas(cv) {
   const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
   const w = cv.clientWidth || 120, h = cv.clientHeight || 24;
@@ -1196,9 +1239,12 @@ function drawLines(host, series, opts) {
 }
 
 /* ---------- 电池双层表盘 ----------
-   内层 = 电量 %（0..100 线性环）；外层 = |功率| W，对数刻度 0.25..128W 映射整圈 360°：
-   angle(P) = log2(min(P,128)/0.25) / log2(128/0.25) × 360°，自 12 点起——充电顺时针、
-   放电逆时针；|P|<0.25W 不画弧。1/8/32/128W 处画淡对数刻度线。功率色 = C.net（与折线同源）。 */
+   内层 = 电量 %（0..100 线性环，画法零改动）；外层 = |功率| W 的 wavy determinate 波带
+   （261125.5 wavy 化，与 GPU/MEM 外环同族、共享驱动器）：对数刻度 0.25..128W 映射整圈
+   360°不变——angle(P) = log2(min(P,128)/0.25) / log2(128/0.25) × 360°，自 12 点起，
+   充电顺时针、放电逆时针（弧向 = 充电态视觉标记，语义随原画法）；|P|<0.25W 不铺波带。
+   1/8/32/128W 处画淡对数刻度线（先绘、波带覆上 = 与 rev.4 平弧覆刻度同层序）。
+   功率色 = C.net（与折线同源）。 */
 const P_LOG0 = 0.25, P_LOGMAX = 128, P_LOGSPAN = Math.log2(P_LOGMAX / P_LOG0); // = 9 bit
 function powFrac(wabs) { return Math.min(1, Math.max(0, Math.log2(Math.min(Math.max(wabs, P_LOG0), P_LOGMAX) / P_LOG0) / P_LOGSPAN)); }
 function drawRing(cv, pct, color, powW, charging) {
@@ -1221,26 +1267,24 @@ function drawRing(cv, pct, color, powW, charging) {
     ctx.lineTo(cx + Math.cos(a) * (rOut + 4 * k), cy + Math.sin(a) * (rOut + 4 * k));
     ctx.stroke();
   }
-  // 外层功率弧：方向 = 流向（充电顺时针 / 放电逆时针）
-  const wabs = Math.abs(powW || 0);
+  // 外层功率 wavy 波带（261125.5 wavy 化）：铺角跨度/方向/起角与原 log 弧逐字同映射——
+  // span=powFrac(|P|)·360°、自 12 点、充电顺 / 放电逆（方向即充电态标记，原画法无呼吸/箭头）；
+  // |P|<0.25W 不铺 = 原「不画弧」；只换画法，映射公式零改动。
+  const wabs = arcVal("batt.pow", Math.abs(powW || 0));
   if (wabs >= P_LOG0) {
     const span = powFrac(wabs) * Math.PI * 2;
-    const dir = charging ? 1 : -1;
-    ctx.lineWidth = 5 * k; ctx.lineCap = "round"; ctx.strokeStyle = C.net;
-    ctx.beginPath();
-    ctx.arc(cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 + dir * span, dir < 0);
-    ctx.stroke();
+    wavyArc(ctx, cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 + (charging ? span : -span), k, C.net);
   }
-  // 内层电量环
   ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk; ctx.lineCap = "round";
   ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();
-  const p = Math.min(100, Math.max(0, pct)) / 100;
+  const p = arcVal("batt.pct", Math.min(100, Math.max(0, pct))) / 100;
   if (p > 0) {
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = arcGrad(ctx, cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2, 1, color);
     ctx.beginPath();
     ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2);
     ctx.stroke();
   }
+  wavyReg(cv, () => drawRing(cv, pct, color, powW, charging));  // wavy 重绘登记（幂等，与 GPU/MEM 共享驱动器）
 }
 
 /* ---------- 时间窗历史环形缓冲（fps 切换时按时间窗自然伸缩） ---------- */
@@ -1442,27 +1486,35 @@ function drawBarSet(svg, W, H, n) {
     if (!t) { t = document.createElementNS(SVG_NS, "title"); this.appendChild(t); }
     tmap.set(i, t);
   });
+  svg.isFresh = true;
   return {
     W, H, n,
-    update(vals, colOf, maxV, pkIdx, tipOf) {
+    update(vals, colOf, maxV, pkIdx, tipOf, prev) {
+      const pv = prev || [];
       const hOf = i => Math.min(1, Math.max(0, (vals[i] || 0) / (maxV || 1))) * H;
+      const hPr = i => Math.min(1, Math.max(0, (pv[i] || 0) / (maxV || 1))) * H;
+      const fl = i => i < pv.length && Number.isFinite(pv[i]) && (vals[i] || 0) < pv[i];
+      const fresh = svg.isFresh; svg.isFresh = false;
+      const v0 = i => (fresh && fl(i)) ? hPr(i) : hOf(i);
+      const geo = f => {
+        bars.each(function (id, i) { const v = f(i); d3.select(this).attr("y", H - v).attr("height", v); });
+        d3s.selectAll("rect.cglo").each(function (id, i) { const v = f(i); d3.select(this).attr("y", H - v).attr("height", v); });
+        caps.each(function (id, i) { const v = f(i); d3.select(this).attr("y", H - v).attr("height", v > 1.5 ? 2 : 0); });
+      };
+      geo(v0);
       bars.each(function (id, i) {
-        const v = hOf(i);
-        d3.select(this).attr("y", H - v).attr("height", v).attr("fill", colOf(i));
+        this.classList.toggle("fall", fl(i));
+        d3.select(this).attr("fill", colOf(i));
         this.classList.toggle("pk", i === pkIdx);
       });
-      d3s.selectAll("rect.cglo").each(function (id, i) { const v = hOf(i); d3.select(this).attr("y", H - v).attr("height", v); });
-      caps.each(function (id, i) {
-        const v = hOf(i);
-        d3.select(this).attr("y", H - v).attr("height", v > 1.5 ? 2 : 0);
-        this.classList.toggle("pk", i === pkIdx);
-      });
+      caps.each(function (id, i) { this.classList.toggle("fall", fl(i)); this.classList.toggle("pk", i === pkIdx); });
       if (tipOf) tmap.forEach((t, i) => { t.textContent = tipOf(i); });
+      if (fresh) requestAnimationFrame(() => { if (svg.isConnected) geo(hOf); });
     }
   };
 }
-/* 每核柱刷新（D3 数据连接；槽位几何随容器宽/核数重建，柱高每 tick 走 CSS transition） */
-let coreBarSet = null;
+/* 每核柱刷新（D3；几何随容器宽/核数重建，柱高走 CSS transition；corePrev=方向感知缓存） */
+let coreBarSet = null, corePrev = [];
 function updateCoreBars(fr, pkIdx) {
   const box = $("#cores");
   const svg = box.querySelector("svg.corebars");
@@ -1475,7 +1527,8 @@ function updateCoreBars(fr, pkIdx) {
     coreBarSet = { svg, n: fr.length, set };
   }
   coreBarSet.set.update(fr, i => coreColors[i] || C.cpu, 5, pkIdx,
-    i => "core" + i + " · " + f2(fr[i] || 0) + " GHz");
+    i => "core" + i + " · " + f2(fr[i] || 0) + " GHz", corePrev);
+  corePrev = fr.slice();
 }
 function renderCpu(fr, o) {
   const opts = o || {};
@@ -1584,12 +1637,15 @@ function renderTherm(d, o) {
     bars.appendChild(labs);
     g.append(head, bars);
     list.appendChild(g);
-    // 每柱 SVG（D3 机件，与 CPU 每核柱同函数）：入册后再量画（同帧布局已可得宽度）
+    // 每柱 SVG（D3 机件，与 CPU 每核柱同函数）：入册后再量画。261125.8：thermPrev 组级喂 prev
     const set = drawBarSet(svg, bars.clientWidth || 240, svg.clientHeight || 55, c.pairs.length);
-    if (set) set.update(c.pairs.map(p => p[0]), i => thermBarColor(c.pairs[i][0]), 90, -1,
-      i => shortThermName(c.pairs[i][1], i) + " · " + f1(c.pairs[i][0]) + " °C");
+    const vals = c.pairs.map(p => p[0]);
+    if (set) set.update(vals, i => thermBarColor(c.pairs[i][0]), 90, -1,
+      i => shortThermName(c.pairs[i][1], i) + " · " + f1(c.pairs[i][0]) + " °C", thermPrev.get(c.key) || []);
+    thermPrev.set(c.key, vals);
   }
 }
+const thermPrev = new Map();   // 组键→上轮温度
 async function tickTherm() {
   try {
     const d = await getJSON("/system/thermal");
@@ -1601,7 +1657,10 @@ async function tickTherm() {
 }
 
 /* ---------- MEMORY（双层环 + 双曲线） ---------- */
-/* 双层环：内圈 = MEM 使用率（>80% 转 error），外圈 = SWAP 使用率（无交换分区只留轨道） */
+/* 双层环（261125 内外对调 + 外环 wavy 化）：外 = MEM 使用率（>80% 转 error，wavy
+   determinate：波带顺时针铺到用量角、窗静止于值端点、行进与 GPU 环共享驱动器）；
+   内 = SWAP 使用率（平弧画法不变，逆时针语言随语义迁内；无交换分区只留轨道）。
+   喂参与几何比例不动，仅内外归属对调。 */
 function drawMemGauge(cv, memPct, swapPct, memCol) {
   if (!cv || !cv.isConnected) return;
   const { ctx, w, h } = setupCanvas(cv);
@@ -1610,15 +1669,17 @@ function drawMemGauge(cv, memPct, swapPct, memCol) {
   const rOut = R - 5.5 * k, rIn = R - 17 * k;
   ctx.lineCap = "round";
   ctx.lineWidth = 5 * k; ctx.strokeStyle = C.trk;
-  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();
-  if (swapPct !== null) {
-    ctx.strokeStyle = C.task;
-    ctx.beginPath(); ctx.arc(cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 - Math.min(100, Math.max(0, swapPct)) / 100 * Math.PI * 2, true); ctx.stroke(); // 逆时针
-  }
+  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();   // 外轨（波带轨）
+  const am = arcVal("mem.out", Math.min(100, Math.max(0, memPct))) / 100 * Math.PI * 2;   // 显示层
+  if (am > 0) { wavyArc(ctx, cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 + am, k, memCol); }  // 外环 wavy 顺铺（memCol = 当帧档位色）
   ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk;
-  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = memCol;
-  ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + Math.min(100, Math.max(0, memPct)) / 100 * Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();    // 内轨（SWAP）
+  if (swapPct !== null) {
+    const sa = arcVal("mem.swap", Math.min(100, Math.max(0, swapPct))) / 100 * Math.PI * 2;
+    ctx.strokeStyle = arcGrad(ctx, cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 - sa, -1, C.task);
+    ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 - sa, true); ctx.stroke(); // 逆时针
+  }
+  wavyReg(cv, () => drawMemGauge(cv, memPct, swapPct, memCol));           // wavy 重绘登记（幂等）
 }
 function renderMem(d, o) {
   const opts = o || {};
@@ -1665,12 +1726,14 @@ async function tickMem() {
    峰频标尺 gpuMax：live max_mhz 优先，缺席退化为序列最大值。空值点顺推上一已知值。 */
 let gpuSeeded = false, gpuMax = 0;
 let gpuFill = { l: 0, f: 0 };
-/* 双环表盘（netRings 机件复用、零新抽象）：同盘径（--d4-gauge）同几何比例（k=R/60）兄弟。
-   内=使用率 0..100% 线性顺时针（C.gpu，与面积图同色）；外=频率 LINEAR 0..1500MHz 满刻度
-   逆时针（C.cpu；频率细线按图表色序改走角色 2 = C.tert，环/线色解耦、数据仍同源；>1500 钳顶），均自 12 点起。500/1000/1500MHz 淡刻度跨外轨
-   径向 = NET 环十年刻度 idiom（1500=满圈回起点，与电池环 128W 刻度同位）；小字标注压在内轨
-   中线、绘于双弧之后保证彩弧上可读。环每 tick 读 live payload 原值（与 chips 同源、与
-   gpuFill 顺推解耦）：load=null → 内轨仅轨道，freq=null → 外轨仅轨道+刻度。 */
+/* 双环表盘（netRings 机件复用、零新抽象）：同盘径同几何比例（k=R/60）兄弟。
+   （261125 内外对调 + 外环 wavy 化）内=频率 LINEAR 0..1500MHz 满刻度逆时针（C.cpu；
+   频率细线走 C.tert，环/线色解耦、数据同源；>1500 钳顶），500/1000/1500MHz 淡刻度
+   随频率迁内跨内轨径向 = NET 环十年刻度 idiom（1500=满圈回起点，电池环 128W 同位）；
+   小字标注改压外轨中线、绘于双环后。外=使用率 0..100% 顺时针 wavy determinate
+   （C.gpu，与面积图同色；行进与 MEM 环共享驱动器），均自 12 点起。环每 tick 读
+   live payload 原值（gpuFill 顺推解耦）：load=null → 外轨仅轨道，freq=null →
+   内轨仅轨道+刻度。 */
 const GPU_FMAX = 1500;
 function drawGpuRing(cv, load, mhz) {
   if (!cv || !cv.isConnected) return;
@@ -1679,43 +1742,43 @@ function drawGpuRing(cv, load, mhz) {
   const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2, k = R / 60;
   const rOut = R - 5.5 * k, rIn = R - 17 * k;     // 与 NET/MEM/BATT 盘同几何比例
   ctx.lineCap = "round";
-  // 外环轨道（频带）
   ctx.lineWidth = 5 * k; ctx.strokeStyle = C.trk;
-  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();
-  // 线性刻度：500 / 1000 / 1500 MHz（自顶部逆时针量角，跨外轨径向）
+  ctx.beginPath(); ctx.arc(cx, cy, rOut, 0, Math.PI * 2); ctx.stroke();   // 外轨（波带轨）
+  ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk;
+  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();    // 内轨（频带）
+  // 线性刻度：500 / 1000 / 1500 MHz（自顶部逆时针量角，跨内轨径向）
   ctx.strokeStyle = hexa(C.onsv, 0.5); ctx.lineWidth = 1; ctx.lineCap = "butt";
   for (const tp of [500, 1000, 1500]) {
     const a = -Math.PI / 2 - (tp / GPU_FMAX) * Math.PI * 2;
     ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(a) * (rOut - 4 * k), cy + Math.sin(a) * (rOut - 4 * k));
-    ctx.lineTo(cx + Math.cos(a) * (rOut + 4 * k), cy + Math.sin(a) * (rOut + 4 * k));
+    ctx.moveTo(cx + Math.cos(a) * (rIn - 4 * k), cy + Math.sin(a) * (rIn - 4 * k));
+    ctx.lineTo(cx + Math.cos(a) * (rIn + 4 * k), cy + Math.sin(a) * (rIn + 4 * k));
     ctx.stroke();
   }
-  // 外环频率弧：0..1500 线性（钳顶），逆时针（MEM swap / NET 上传同语言）；null → 仅轨道+刻度
+  // 内环频率弧：0..1500 钳顶逆时针（NET 同语言）；null → 仅轨道+刻度。MHz 走显示层
   if (mhz !== null) {
-    const af = Math.min(1, Math.max(0, mhz / GPU_FMAX)) * Math.PI * 2;
+    const af = arcVal("gpu.freq", Math.min(1, Math.max(0, mhz / GPU_FMAX))) * Math.PI * 2;
     if (af > 0) {
-      ctx.lineWidth = 5 * k; ctx.lineCap = "round"; ctx.strokeStyle = C.cpu;
-      ctx.beginPath(); ctx.arc(cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 - af, true); ctx.stroke();
+      ctx.lineWidth = 8 * k; ctx.lineCap = "round";
+      ctx.strokeStyle = arcGrad(ctx, cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 - af, -1, C.cpu);
+      ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 - af, true); ctx.stroke();
     }
   }
-  // 内环轨道 + 使用率弧：0..100% 线性顺时针；null → 仅轨道
-  ctx.lineWidth = 8 * k; ctx.strokeStyle = C.trk; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.arc(cx, cy, rIn, 0, Math.PI * 2); ctx.stroke();
+  // 外环使用率 wavy 波带顺铺；null → 仅轨道。load 走显示层
   if (load !== null) {
-    const al = Math.min(100, Math.max(0, load)) / 100 * Math.PI * 2;
+    const al = arcVal("gpu.load", Math.min(100, Math.max(0, load))) / 100 * Math.PI * 2;
     if (al > 0) {
-      ctx.strokeStyle = C.gpu;
-      ctx.beginPath(); ctx.arc(cx, cy, rIn, -Math.PI / 2, -Math.PI / 2 + al); ctx.stroke();
+      wavyArc(ctx, cx, cy, rOut, -Math.PI / 2, -Math.PI / 2 + al, k, C.gpu);
     }
   }
-  // 小字标注（绘于双弧后）：压内轨中线，9px mono = 环带刻度同级小字
+  // 小字标注（绘于双环后）：压外轨中线，9px mono = 环带刻度同级小字
   ctx.font = '9px "Maple Mono","Roboto Mono",monospace';
   ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = C.label;
   for (const tp of [500, 1000, 1500]) {
-    const a = -Math.PI / 2 - (tp / GPU_FMAX) * Math.PI * 2, rl = rIn + 0.5 * k;
+    const a = -Math.PI / 2 - (tp / GPU_FMAX) * Math.PI * 2, rl = rOut + 0.5 * k;
     ctx.fillText(String(tp), cx + Math.cos(a) * rl, cy + Math.sin(a) * rl);
   }
+  wavyReg(cv, () => drawGpuRing(cv, load, mhz));  // wavy 重绘登记（幂等）
 }
 function drawGpuChart() {
   const rows = H.gpu.rows;
@@ -1985,18 +2048,108 @@ async function tickNet() {
 }
 
 /* ---------- STORAGE（大字占用率居左；默认只列 >32 GiB 总容量分区，其余入剪裁壳折叠） ---------- */
-/* wavy 波形 path（参考 m3e wavy-linear λ40/A3 的观感，按 8px 小轨等比缩到 λ=12/A=1.6，
-   每 λ/4 采样一点 = 峰/谷/过零四点制，与参考 d 串步进语义同构）：宽 = 观察窗实测宽 + 2λ
-   （平移一周期右缘无缝）；renderSto 挂载后按 clientWidth 现测现填，resize/主题翻转经
-   redrawAll→renderSto 重测，源码零字面 d。 */
-const WAVY_L = 12, WAVY_A = 1.6, WAVY_H = 8;
+/* wavy 波形 path（参考 m3e wavy-linear λ40/A3 的观感等比缩放；261125.5 振幅翻倍 → λ=12/A=3.2；
+   261125.10：采样 λ/4 → **λ/10**（1.2px 步进），与参考 d 串 4px@λ40 同密度、与 wavyArc 同档；
+   261125.11：加粗——轨 8→10px、描边 2→3px、波域 WAVY_H 随轨 → 峰/谷 1.8–8.2，
+   ±1.5 描边全落 0–10 轨内 = **零削顶**（此前 2px@8px 轨被 overflow 各削 0.2px 的平顶消除）；
+   宽 = 观察窗实测宽 + 2λ（平移一周期右缘无缝）；renderSto 挂载后按 clientWidth 现测现填，
+   resize/主题翻转经 redrawAll→renderSto 重测，源码零字面 d。 */
+const WAVY_L = 12, WAVY_A = 3.2, WAVY_H = 10;
 function wavyD(w) {
   let d = "M0 " + WAVY_H / 2;
-  for (let x = WAVY_L / 4; x <= w; x += WAVY_L / 4)
+  for (let x = WAVY_L / 10; x <= w; x += WAVY_L / 10)
     d += "L" + x.toFixed(1) + " " + (WAVY_H / 2 - WAVY_A * Math.sin(x * 2 * Math.PI / WAVY_L)).toFixed(1);
   return d;
 }
+/* ---------- wavy 环相位驱动器（GPU/MEM/BATTERY 外环共享；wavyD 的极坐标兄弟） ----------
+   谁驱动：单一 setInterval 按 performance.now() 差推相位，波峰行进 WAVY_SPEED=12 弧长
+   px/s（STORAGE ap-wavy-travel 同族；窗静止于值 + 波形行进 = md-wavy-travel 极坐标版）。
+   何时停：document.hidden（回前台续相不跳变）；卡不可见（GPU 隐藏 → offsetParent null）
+   该盘不跑；reduced-motion = 相位冻结静态波（初始帧完整；canvas JS 判断、CSS 压平不到）。
+   幂等：句柄全局唯一，redrawAll→wavyReg→wavyArm 复判启停、永不叠挂。相位 = 全局变量、
+   重绘闭包读现值不重置 → 双击切窗/HB 回填/主题翻转重绘全链相位连续不闪断。 */
+const WAVY_SPEED = 18;   // 行进速度（弧长 px/s；261125.6 全体提速 50%，与 STORAGE 线性波同值同族）
+const WAVY_MS = 100;     // 推进节拍 = 1.8px/帧 @18px/s，小盘连续即够
+const WAVY_AR = 3.2;     // 径向波幅 @k=1（261125.5 与 WAVY_A 同步翻倍，×k 随盘径等比）
+const WAVY_W = 3;        // 波形线宽（×k）；波带总厚 9.4k：画布边外余 0.8k、内环带缝隙 2.8k
+let wavyPhase = 0, wavyTimer = null, wavyLast = 0;
+const wavyBound = new Map();                     // canvas → 重绘闭包（draw* 调用即覆盖最新参数）
+function wavyArc(ctx, cx, cy, r, a0, a1, k, col) {
+  // 角域 a0→a1（a1>a0 顺时针、a1<a0 逆时针 = BATTERY 放电向，铺波沿行进方向量弧长）：
+  // λ/4 弧长采样铺波峰 r(θ)=r+A·sin((|θ−a0|·r−wavyPhase)·2π/λ)；窗静止于值端点 = determinate、零字面 d。
+  // col（261125.7）：描边 = arcGrad 渐变（端点 = 当帧档位色，每帧重建）。
+  const dir = a1 >= a0 ? 1 : -1;
+  const st = dir * WAVY_L * 0.1 / r, wa = 2 * Math.PI / WAVY_L;   // 采样密度 λ/10 = template md-wavy-linear 同档（261125.9 平滑化）
+  ctx.lineWidth = WAVY_W * k; ctx.lineCap = "round";
+  ctx.strokeStyle = arcGrad(ctx, cx, cy, r, a0, a1, dir, col);
+  ctx.beginPath();
+  let first = true;
+  for (let a = a0; ; a += st) {
+    const aa = dir > 0 ? Math.min(a, a1) : Math.max(a, a1);
+    const rr = r + WAVY_AR * k * Math.sin((Math.abs(aa - a0) * r - wavyPhase) * wa);
+    const x = cx + Math.cos(aa) * rr, y = cy + Math.sin(aa) * rr;
+    if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+    if (dir > 0 ? a >= a1 : a <= a1) break;
+  }
+  ctx.stroke();
+}
+function wavyReg(cv, redraw) { wavyBound.set(cv, redraw); wavyArm(); }
+function wavyArm() {
+  let vis = false;
+  for (const cv of wavyBound.keys()) if (cv.isConnected && cv.offsetParent) { vis = true; break; }
+  const run = vis && !document.hidden && !mqWavyRm.matches;
+  if (run && wavyTimer === null) { wavyLast = performance.now(); wavyTimer = setInterval(wavyTick, WAVY_MS); }
+  else if (!run && wavyTimer !== null) { clearInterval(wavyTimer); wavyTimer = null; }
+}
+function wavyTick() {
+  if (document.hidden || mqWavyRm.matches) { settleArcs(); wavyArm(); return; }   // 隐藏/RM 立即落位
+  const now = performance.now();
+  wavyPhase += WAVY_SPEED * Math.min(2000, now - wavyLast) / 1000; wavyLast = now;   // 封顶：回补不跳相
+  arcsEase(now);                                  // 261125.8 回落推进
+  for (const [cv, redraw] of wavyBound) {
+    if (!cv.isConnected) { wavyBound.delete(cv); continue; }
+    if (cv.offsetParent) redraw();                                       // 卡不可见 → 该盘不跑
+  }
+  wavyArm();                                                             // 全不可见 → 停机
+}
+const mqWavyRm = window.matchMedia("(prefers-reduced-motion: reduce)");
+mqWavyRm.addEventListener("change", () => { settleArcs(); wavyArm(); redrawAll(); });
+document.addEventListener("visibilitychange", wavyArm);                  // 隐藏停/前台判
+/* ---------- 环弧回落双层状态（261125.8，GPU/MEM/BATTERY 六层弧共享，详见 _done） ----------
+   draw* 喂目标值 → arcVal 返回显示值：下降自显示值起 ARC_FALL_MS、emphasized-accelerate 回落
+   （不反弹，更低目标自重启）；上升/等值直跟=现行为（对称补间改点=直跟分支）；收敛常驻回
+   wavy-only；端点色每帧走 arcGrad 既有链。 */
+const ARC_FALL_MS = 700;   // = extra-long1
+const arcAnim = new Map();
+function easeExitAcc(x) {   // cubic-bezier(.3,0,.8,.15) Newton 解
+  let t = x;
+  for (let i = 0; i < 5; i++) {
+    const u = 1 - t, bx = u * u * t * 0.9 + u * t * t * 2.4 + t * t * t - x;
+    const d = u * u * 0.9 + u * t * 3 + t * t * 0.6;
+    if (d < 1e-6) break;
+    t = Math.min(1, Math.max(0, t - bx / d));
+    if (Math.abs(bx) < 1e-5) break;
+  }
+  const u = 1 - t;
+  return u * t * t * 0.45 + t * t * t;
+}
+function arcVal(key, tgt) {
+  const e = arcAnim.get(key);
+  if (!e) { arcAnim.set(key, { cur: tgt, tgt, from: tgt, t0: 0 }); return tgt; }
+  if (tgt >= e.cur || mqWavyRm.matches) { e.cur = e.tgt = e.from = tgt; return tgt; }   // 升/等/RM：直跟
+  if (tgt !== e.tgt) { e.from = e.cur; e.tgt = tgt; e.t0 = performance.now(); }   // 更低目标自显示值重启
+  return e.cur;
+}
+function arcsEase(now) {
+  for (const e of arcAnim.values()) {
+    if (e.cur === e.tgt) continue;
+    const f = (now - e.t0) / ARC_FALL_MS;
+    e.cur = f >= 1 ? e.tgt : e.from + (e.tgt - e.from) * easeExitAcc(f);
+  }
+}
+function settleArcs() { for (const e of arcAnim.values()) if (e.cur !== e.tgt) e.cur = e.tgt = e.from = e.tgt; }
 let stoExpanded = false;                                  // 卡折叠旗标（模块作用域：60s 刷新 + 主题重渲染保态；只驱动 .open 类）
+const stoPrev = new Map();   // mount→上轮pct
 function renderSto(d) {
   const disks = d && Array.isArray(d.disks) ? d.disks : [];
   const fold = $("#stoFoldBtn");
@@ -2006,6 +2159,7 @@ function renderSto(d) {
   list.classList.toggle("open", stoExpanded);             // 剪裁态由旗标复位到类（重建节点不触发过渡，直达目标态）
   const keep = [];                                        // 过滤伪挂载噪声（<64MB）照旧
   for (const k of disks) { if ((Number(k.total_mb) || 0) >= 64) keep.push(k); }
+  const stoWaf = [];   // [clip,新宽%]
   const rowOf = (k) => {                                  // 行标记与折叠前逐字节同构（行内零视觉变化）
     const total = Number(k.total_mb) || 0, used = Number(k.used_mb) || 0, avail = Number(k.avail_mb) || 0;
     const pct = (used / total) * 100;
@@ -2022,8 +2176,12 @@ function renderSto(d) {
     wp.setAttribute("aria-valuenow", String(Math.round(pct)));
     wp.setAttribute("aria-valuemin", "0");
     wp.setAttribute("aria-valuemax", "100");
-    wp.style.setProperty("--w", Math.min(100, pct) + "%");
+    // 261125.8：下降行首帧上轮宽起笔 + .fall、rAF 刷新宽吃过渡；增长直落；d 按起笔宽测不露白
+    const mm = String(k.mount_point || "?"), prev = stoPrev.get(mm), fell = prev !== undefined && pct < prev;
     wp.innerHTML = '<div class="wprog__clip"><svg class="wprog__svg" aria-hidden="true" focusable="false"><path class="wprog__wave"></path></svg></div>';
+    wp.firstChild.style.setProperty("--w", (fell ? Math.min(100, prev) : Math.min(100, pct)) + "%");
+    if (fell) { wp.firstChild.classList.add("fall"); stoWaf.push([wp.firstChild, Math.min(100, pct)]); }
+    stoPrev.set(mm, pct);
     info.append(nm, wp);
     r.append(big, info);
     return r;
@@ -2041,6 +2199,9 @@ function renderSto(d) {
   }
   for (const wp of list.querySelectorAll(".wprog"))       // 已挂载 → 实测 clip 宽现填波形 d（剪裁壳内行同填；宽 0 退 480 假设，60s 重渲染自愈）
     wp.querySelector(".wprog__wave").setAttribute("d", wavyD((wp.firstChild.clientWidth || 480) + 2 * WAVY_L));
+  if (stoWaf.length) requestAnimationFrame(() => {
+    for (const [clip, w] of stoWaf) if (clip.isConnected) clip.style.setProperty("--w", w + "%");
+  });
   // 展开/收起按钮：无 remainder 或无 qualifiers 整体隐（剪裁壳也不产出，防空卡错觉）；折叠 →「展开其余 N 个分区」，展开 →「收起」
   fold.hidden = !qual.length || !restRows.length;
   fold.textContent = stoExpanded ? "收起" : "展开其余 " + restRows.length + " 个分区";
