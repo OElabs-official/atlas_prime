@@ -1013,7 +1013,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.29 -->
+    <!-- rev 2026-11-25.30 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1349,8 +1349,9 @@ function drawLines(host, series, opts) {
          序列走调用点 ac（卡族主色单渐变，面积不逐段）；实色序列面积与线同走 curveMonotoneX，
          逐段序列保持折线直连（数据归因语义优先，取舍已登记）。 */
       const ac = solid || s.ac || null;
-      /* 来源分段（sd 标记）：两端皆播种 = 种段 → 行进中的 wavy 波（波带绘制、无面积、免滑入）；
-         live 段与「种→live」过渡段 = 现状（实线/逐段色归因/渐变面积/滑入动画）。
+      /* 来源分段（sd 标记）：任一端为播种 = 种段（含「库→live」最后一段接缝）→ 行进中的
+         wavy 波（波带绘制、无面积、免滑入；接缝永久属两源交界，后续 live 点不洗白）；
+         两端皆 live = 现状（实线/逐段色归因/渐变面积/滑入动画）。
          sd 缺席（battery 等）→ 全 live，画风零变化。 */
       const sdOn = Array.isArray(s.sd) && s.sd.length === cnt;
       const runs = [];
@@ -1361,7 +1362,7 @@ function drawLines(host, series, opts) {
         const flushD = () => { if (dRun) { if (dRun.seg.length > 1) { dRun.d = lineS(dRun.seg); dashes.push(dRun); } dRun = null; } };
         for (let i = 0; i < cnt - 1; i++) {
           const col = solid !== null ? solid : (s.c[i] || C.cpu);
-          if (sdOn && sd[i] && sd[i + 1]) {
+          if (sdOn && (sd[i] || sd[i + 1])) {
             flushRun();
             if (!dRun) dRun = { c: col, seg: [pts[i], pts[i + 1]] };
             else dRun.seg.push(pts[i + 1]);
