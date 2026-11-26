@@ -1017,7 +1017,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.34 -->
+    <!-- rev 2026-11-25.35 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3443,7 +3443,8 @@ function seedGate(key, label, hostSel, work, onOk) {
 }
 /* ===== 悬浮历史卡（rev .34）：卡头「历史」→ 按日翻页，每次查询一日 =====
    数据源唯一 = /db/history 增量窗参（from/to unix 秒半开 [from,to)，limit 30000）；
-   换日/开卡各发一次，迟到的日响应按 seq 作废。绘制复用 drawLines 时间标尺：
+   翻到哪页取哪页（会话缓存命中零请求），渲完才单向预取邻页一天；
+   迟到的日响应按 seq 作废。绘制复用 drawLines 时间标尺：
    过去日 nowAt=日末、winMs=86400000；今天 nowAt=此刻、winMs=已历时（≥5min 防零宽）。
    全天真库数据 → 无 sd = 纯实线 + 渐变面积，无波带。fixed 层 = 视口不变量零接触。 */
 const HISTV = {
@@ -3453,12 +3454,12 @@ const HISTV = {
   gpu: { kinds: ["gpu"], title: "GPU 负载/频率 · 历史", unit: "%", y: [0, 100], gl: [0, 25, 50, 75, 100] },
   batt: { kinds: ["battery"], title: "电量/功率 · 历史", unit: "%", y: [0, 100], gl: [0, 25, 50, 75, 100] }
 };
-const HIST = { k: null, day: 0, seq: 0 };
+const HIST = { k: null, day: 0, seq: 0, cache: new Map() };   // cache: kind|dayMs → datas（会话级，开卡清零）
 const histTodayMs = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const histDateStr = ms => { const d = new Date(ms), p = n => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
 function histOpen(k) {
-  HIST.k = k; HIST.day = histTodayMs();
+  HIST.k = k; HIST.day = histTodayMs(); HIST.cache = new Map();   // 重开 = 全新会话，杜绝陈旧重影
   $("#histTitle").textContent = HISTV[k].title;
   $("#histPop").hidden = false;
   histShift(0);
@@ -3469,19 +3470,33 @@ function histEmpty(msg) {
   if (!host.querySelector(".hempty")) host.appendChild(el("div", "hempty", msg));
   $("#histLegend").innerHTML = ""; $("#histStat").innerHTML = "";
 }
+function histFetchDay(dayMs) {                       // 单日取数：缓存命中零请求
+  const key = HIST.k + "|" + dayMs;
+  if (dayMs !== histTodayMs() && HIST.cache.has(key)) return Promise.resolve(HIST.cache.get(key));
+  const from = Math.floor(dayMs / 1000), to = from + 86400;
+  return Promise.all(HISTV[HIST.k].kinds.map(kd =>
+    getJSON("/db/history?kind=" + kd + "&from=" + from + "&to=" + to + "&limit=30000&fmt=arr").then(histRows).catch(() => [])
+  )).then(datas => {
+    HIST.cache.set(key, datas);
+    if (HIST.cache.size > 8) HIST.cache.delete(HIST.cache.keys().next().value);   // 环形逐出（8 日 ≈ 两屏往返）
+    return datas;
+  });
+}
 function histShift(delta) {                          // ±1 天翻页 / 0 当日重载
   if (!HIST.k) return;
   if (delta) { const d = new Date(HIST.day); d.setDate(d.getDate() + delta); HIST.day = d.getTime(); }
   const today = histTodayMs();
   $("#histDate").textContent = histDateStr(HIST.day) + (HIST.day === today ? " · 今天" : HIST.day > today ? " · 未来" : "");
   $("#histNext").disabled = HIST.day >= today;
-  const my = ++HIST.seq, from = Math.floor(HIST.day / 1000), to = from + 86400;
+  const my = ++HIST.seq;
   $("#histBar").hidden = false;
-  Promise.all(HISTV[HIST.k].kinds.map(kd =>
-    getJSON("/db/history?kind=" + kd + "&from=" + from + "&to=" + to + "&limit=30000&fmt=arr").then(histRows).catch(() => [])
-  )).then(datas => {
+  histFetchDay(HIST.day).then(datas => {
     if (my !== HIST.seq) return;                     // 迟到的换日响应 = 丢弃
     histRender(datas);
+    // 邻页预取（fire-and-forget，渲后才发）：向未来翻 = 后一天，否则 = 前一天；
+    // 今天永不缓存故不作预取目标；失败静默（真翻到时再走正常失败路径）。
+    const nb = (delta > 0 && HIST.day + 86400000 < today) ? HIST.day + 86400000 : HIST.day - 86400000;
+    if (nb >= 0 && nb !== today) histFetchDay(nb).catch(() => {});
   }, () => { if (my === HIST.seq) histEmpty("查询失败，翻页重试"); });
 }
 function histStats(vals, unit) {                     // 主序列摘要（点数/最值/均值）
