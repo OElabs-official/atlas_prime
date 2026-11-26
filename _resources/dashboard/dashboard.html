@@ -867,11 +867,11 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 #histPop{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center}
 #histPop[hidden]{display:none}
 #histPop .hb{position:absolute;inset:0;background:rgba(0,0,0,.52);backdrop-filter:blur(2px)}
-#histPop .hcard{position:relative;width:min(880px,94vw);background:var(--md-sys-color-surface-container-high);border:1px solid var(--md-sys-color-outline-variant);border-radius:16px;padding:12px 14px 10px;box-shadow:0 12px 40px rgba(0,0,0,.45)}
+#histPop .hcard{position:relative;width:min(1280px,96vw);max-height:92vh;display:flex;flex-direction:column;background:var(--md-sys-color-surface-container-high);border:1px solid var(--md-sys-color-outline-variant);border-radius:16px;padding:12px 14px 10px;box-shadow:0 12px 40px rgba(0,0,0,.45)}
 #histPop .hd{font-size:13px;color:var(--md-sys-color-on-surface-variant);min-width:118px;text-align:center}
 #histPop .hstat{font-size:11px;color:var(--md-sys-color-on-surface-variant);padding:4px 2px 0;display:flex;gap:10px;flex-wrap:wrap}
 #histPop .hempty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--md-sys-color-on-surface-variant)}
-#histPop .hbody{max-height:62vh;overflow-y:auto}
+#histPop .hbody{flex:1;min-height:120px;overflow-y:auto}                     /* 卡高 92vh 内滚动体吃满剩余，宽屏多列小图 */
 #histPop .hrow{display:flex;align-items:center;gap:8px;padding:3px 0}
 #histPop .hlab{flex:none;width:132px;display:flex;flex-direction:column;gap:1px;font-size:11px;color:var(--md-sys-color-on-surface)}
 #histPop .hlab i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:-1px}
@@ -1023,7 +1023,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.38 -->
+    <!-- rev 2026-11-25.39 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
