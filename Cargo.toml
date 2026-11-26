@@ -1,6 +1,6 @@
 [package]
 name = "atlas_prime"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2024"
 description = "Termux headless system-monitor daemon (runit-ready)"
 
