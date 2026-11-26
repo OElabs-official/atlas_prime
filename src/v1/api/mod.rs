@@ -32,7 +32,7 @@
 //! - `GET  /task` 状态列表 / `POST /task/update` 重扫配置；
 //! - `POST /task/run/{id}` `POST /task/stop/{id}` `GET /task/output/{id}`
 //!   `POST /task/input/{id}`（JSON `{"line": "..."}`）；
-//! - `GET /db/history?kind=&key=&limit=` —— sqlite 历史行（`kind` 必填：
+//! - `GET /db/history?kind=&key=&limit=[&from=&to=]` —— sqlite 历史行（`kind` 必填：
 //!   cpu_freq/temp/mem/swap/battery/disk/net；`key` 省略 = 该 kind 全键；`limit` 默认 300，钳位 1..=5000）。
 //!   `net` 的 key = `<组>.rx_bps` / `<组>.tx_bps`（组 = wifi/cellular/有流量的
 //!   其他网卡名；bytes/s，1Hz，≈8h 回溯；旧 per-iface 键已退役，随窗口自然出清）。
@@ -379,6 +379,16 @@ struct HistIn {
     limit: Option<u32>,
     /// 可选编码选择：仅精确 `arr` 启用紧凑数组形；缺省/未知/畸形值一律回落默认。
     fmt: Option<String>,
+    /// 可选时间窗（unix 秒，半开 `[from, to)`，悬浮历史卡按日翻页）：成对且
+    /// `from < to` 且窗深 ≤ 3 天才生效；其余（缺省/单边/倒挂/超深/非数）回落截尾语义。
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
+/// 时间窗参数判定（防御式：任何畸形 = 无窗回落，与 fmt 回落同纪律）。
+fn hist_range(q: &HistIn) -> Option<(i64, i64)> {
+    let (from, to) = (q.from?, q.to?);
+    (from < to && to - from <= 259_200).then_some((from, to))
 }
 
 /// fmt → 编码门控（计划原文：unknown fmt value → default behavior）：
@@ -423,7 +433,7 @@ fn hist_body_arr(rows: &[crate::v1::db::Record]) -> String {
     s
 }
 
-/// `GET /db/history?kind=&key=&limit=[&fmt=arr]` → 按时间升序。默认
+/// `GET /db/history?kind=&key=&limit=[&fmt=arr][&from=&to=]` → 按时间升序。默认
 /// `[{t:<RFC3339>,k,v}]`（`t` = db TEXT 列原文，外部契约）；`fmt=arr` 回落前缀外
 /// 唯一形态 `[[ts_secs,"k",v],...]`（紧凑、同一序列的等价编码）；未知 fmt 值 = 默认。
 /// 内部按 `ts_secs`（unix 秒投影）排序——迁移后全行统一 RFC3339 格式，字典序即时间序，二者等价。
@@ -431,11 +441,23 @@ fn hist_body_arr(rows: &[crate::v1::db::Record]) -> String {
 async fn h_db_history(q: web::types::Query<HistIn>) -> HttpResponse {
     let kind = q.kind.clone();
     let key = q.key.clone();
-    let limit = q.limit.unwrap_or(300).clamp(1, 5000);
+    let range = hist_range(&q);
+    // 窗查询单窗可达数日行量，limit 钳位放宽到 30000；截尾语义维持 5000 老契约。
+    let limit = q
+        .limit
+        .unwrap_or(300)
+        .clamp(1, if range.is_some() { 30_000 } else { 5_000 });
     let as_arr = fmt_wants_arr(q.fmt.as_deref());
-    match web::block(move || Ok::<_, std::io::Error>(Db::history(&kind, key.as_deref(), limit)))
-        .await
-    {
+    let produce = {
+        let (kind, key) = (kind.clone(), key.clone());
+        move || -> Result<Vec<_>, std::io::Error> {
+            Ok(match range {
+                Some((from, to)) => Db::history_between(&kind, key.as_deref(), from, to, limit),
+                None => Db::history(&kind, key.as_deref(), limit),
+            })
+        }
+    };
+    match web::block(move || produce()).await {
         Ok(mut rows) => {
             rows.sort_by_key(|r| r.ts_secs); // 黑箱回新→旧，面板按旧→新吃
             let body = if as_arr {
@@ -987,6 +1009,18 @@ mod tests {
         assert!(tasks.contains("200 OK"), "{tasks}");
         // 先落一轮，保证 /db/history 必有行可验
         let _ = crate::v1::operator::Operator::sample_now();
+        // 增量时间窗（悬浮历史卡）：半开空窗 = 空数组；全域窗 ≥ 截尾基线
+        let w_empty = get("/db/history?kind=mem&key=used&from=1&to=2&limit=30000");
+        let w_body = w_empty.split_once("\r\n\r\n").map_or("", |p| p.1);
+        assert_eq!(w_body, "[]", "空窗应回空数组: {w_body}");
+        let w_all = get(&format!(
+            "/db/history?kind=mem&key=used&from=1&to={}&limit=30000",
+            chrono::Utc::now().timestamp() + 86_400
+        ));
+        let wa_body = w_all.split_once("\r\n\r\n").map_or("", |p| p.1);
+        let wa_rows: Vec<serde_json::Value> =
+            serde_json::from_str(wa_body).expect("窗查询应回 JSON 数组");
+        assert!(!wa_rows.is_empty(), "全域窗应含刚落轮的行: {wa_body}");
         let hist = get("/db/history?kind=mem&key=used&limit=5");
         assert!(
             hist.contains("200 OK") && hist.contains("application/json"),

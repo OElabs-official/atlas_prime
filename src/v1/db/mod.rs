@@ -216,7 +216,27 @@ impl Db {
             match shared_conn().await {
                 Ok(cell) => {
                     let mut core = cell.lock().await;
-                    history_on(&mut core.conn, &kind, key.as_deref(), limit).await
+                    history_on(&mut core.conn, &kind, key.as_deref(), limit, None).await
+                }
+                Err(e) => {
+                    report_history_err("conn", &e);
+                    Vec::new()
+                }
+            }
+        })
+    }
+
+    /// 时间窗历史（悬浮历史卡按日翻页）：半开窗 `[from, to)`（unix 秒），新→旧。
+    /// 形状/失败语义与 [`Self::history`] 完全一致，仅叠加
+    /// `CAST(strftime('%s', ts) AS INTEGER)` 窗过滤；窗深可达数日，limit 钳位由调用方放宽。
+    pub fn history_between(kind: &str, key: Option<&str>, from: i64, to: i64, limit: u32) -> Vec<Record> {
+        let kind = kind.to_string();
+        let key = key.map(|k| k.to_string());
+        block_on(async move {
+            match shared_conn().await {
+                Ok(cell) => {
+                    let mut core = cell.lock().await;
+                    history_on(&mut core.conn, &kind, key.as_deref(), limit, Some((from, to))).await
                 }
                 Err(e) => {
                     report_history_err("conn", &e);
@@ -489,7 +509,13 @@ where
 /// 所有失败路径（open / 查询 / 行解码）经 [`report_history_err`] 上报（计数 + WARN）后
 /// 仍返回空 vec / 默认字段——响应形状不变，不再静默。
 #[allow(dead_code)] // 预留: 测试缝（仅 cfg(test) 消费，迁移语义逐次可测）；生产路径走常驻连接 history_on
-async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> Vec<Record> {
+async fn history_at(
+    path: &Path,
+    kind: &str,
+    key: Option<&str>,
+    limit: u32,
+    range: Option<(i64, i64)>,
+) -> Vec<Record> {
     let mut conn = match open_at(path).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -497,7 +523,7 @@ async fn history_at(path: &Path, kind: &str, key: Option<&str>, limit: u32) -> V
             return Vec::new();
         }
     };
-    history_on(&mut conn, kind, key, limit).await
+    history_on(&mut conn, kind, key, limit, range).await
 }
 
 /// 历史查询主体（在调用方提供的连接上执行；生产 = 常驻连接独占锁内）。
@@ -507,18 +533,23 @@ async fn history_on(
     kind: &str,
     key: Option<&str>,
     limit: u32,
+    range: Option<(i64, i64)>,
 ) -> Vec<Record> {
-    let sql = match key {
-        Some(_) => {
-            "SELECT CAST(strftime('%s', ts) AS INTEGER),ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 ORDER BY rowid DESC LIMIT ?3"
-        }
-        None => {
-            "SELECT CAST(strftime('%s', ts) AS INTEGER),ts,kind,key,value FROM records WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2"
-        }
+    // 谓词四象限（key × 时间窗）各自定长 SQL，占位符按绑定顺序连续编号；
+    // 窗过滤走 unix 秒投影（与输出 `t` 投影同源），半开 [from, to)。
+    let win = "CAST(strftime('%s', ts) AS INTEGER)";
+    let sql = match (key, range) {
+        (None, None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2", p = win),
+        (Some(_), None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 ORDER BY rowid DESC LIMIT ?3", p = win),
+        (None, Some(_)) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND {p}>=?2 AND {p}<?3 ORDER BY rowid DESC LIMIT ?4", p = win),
+        (Some(_), Some(_)) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 AND {p}>=?3 AND {p}<?4 ORDER BY rowid DESC LIMIT ?5", p = win),
     };
-    let mut q = sqlx::query::<sqlx::Sqlite>(sql).bind(kind);
+    let mut q = sqlx::query::<sqlx::Sqlite>(&sql).bind(kind);
     if let Some(k) = key {
         q = q.bind(k);
+    }
+    if let Some((from, to)) = range {
+        q = q.bind(from).bind(to);
     }
     q = q.bind(i64::from(limit));
     let rows = match q.fetch_all(conn).await {
@@ -940,6 +971,38 @@ mod tests {
     }
 
     #[test]
+    fn history_range_is_half_open_day_window() {
+        // Given：两天 × 各两行（A = T0+0/600s，B = T0+86400/87000s）
+        let file = temp_db("hist_range");
+        let mk = |off: i64, v: f64| Record {
+            ts: rfc(off),
+            ts_secs: T0 + off,
+            kind: kind::MEM.into(),
+            key: "used".into(),
+            value: v,
+        };
+        block_on(async {
+            insert_at(&file, &[mk(0, 1.0), mk(600, 2.0), mk(86_400, 3.0), mk(87_000, 4.0)])
+                .await
+                .unwrap();
+            // When：半开窗 [T0, T0+86400)（恰罩 day A，右界 == B 首行时刻，必须不含）
+            let win = history_at(&file, kind::MEM, Some("used"), 100, Some((T0, T0 + 86_400))).await;
+            // Then：只余 A 两行，新→旧
+            assert_eq!(
+                win.iter().map(|r| r.value).collect::<Vec<_>>(),
+                vec![2.0, 1.0],
+                "半开窗必须精确罩住单日"
+            );
+            // 全域窗（右界越过全部行 87_000s）= 全量四行
+            let all = history_at(&file, kind::MEM, None, 100, Some((T0, T0 + 90_000))).await;
+            assert_eq!(all.len(), 4, "全域窗不得漏行");
+            // 空窗 = 空 vec（前端据此渲染「当日无记录」）
+            let none = history_at(&file, kind::MEM, None, 100, Some((T0 - 86_400, T0))).await;
+            assert!(none.is_empty(), "窗外不得带行");
+        });
+    }
+
+    #[test]
     fn trim_keeps_newest_rounds_whole() {
         let file = temp_db("trim");
         block_on(async {
@@ -1312,7 +1375,7 @@ mod tests {
             let mut conn = open_at(&file).await.unwrap();
 
             // Then：两行无损经 history 读出，投影/文本皆正确
-            let hist = history_at(&file, kind::MEM, Some("used"), 10).await;
+            let hist = history_at(&file, kind::MEM, Some("used"), 10, None).await;
             assert_eq!(hist.len(), 2, "迁移必须无损");
             assert_eq!(hist[0].ts_secs, 1_700_003_600, "新→旧：最新行在前");
             assert_eq!(hist[0].ts, "2023-11-14T23:13:20Z");
@@ -1389,13 +1452,13 @@ mod tests {
             drop(open_at(&file).await.expect("旧电池行库 open 必须成功"));
 
             // Then：断言值而非 Ok
-            let bat = history_at(&file, kind::BATTERY, None, 10).await;
+            let bat = history_at(&file, kind::BATTERY, None, 10, None).await;
             let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want("current_ua"), Some(-500.0), "必须改名且 µA 原值不变");
             assert_eq!(want("current_ma"), None, "旧键不得残留");
             assert_eq!(want("temp_c"), Some(32.5), "旧 ÷10 温度必须 ×10 还原 ℃");
             assert_eq!(want("pct"), Some(88.0), "非迁移范围键值不动");
-            let net = history_at(&file, kind::NET, None, 10).await;
+            let net = history_at(&file, kind::NET, None, 10, None).await;
             let nwant = |k: &str| net.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(nwant("current_ma"), Some(-1.0), "WHERE kind='battery' 守卫必须生效");
             assert_eq!(nwant("temp_c"), Some(2.0));
@@ -1403,7 +1466,7 @@ mod tests {
 
             // 二次 open = no-op：值稳定（不重复 ×10）、版本不再动作
             drop(open_at(&file).await.unwrap());
-            let bat2 = history_at(&file, kind::BATTERY, None, 10).await;
+            let bat2 = history_at(&file, kind::BATTERY, None, 10, None).await;
             let want2 = |k: &str| bat2.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want2("temp_c"), Some(32.5), "二次 open 不得重复 ×10");
             assert_eq!(raw_user_version(&file).await, 2);
@@ -1477,7 +1540,7 @@ mod tests {
 
             drop(open_at(&file).await.expect("INTEGER 遗留库 open 必须成功"));
 
-            let bat = history_at(&file, kind::BATTERY, None, 10).await;
+            let bat = history_at(&file, kind::BATTERY, None, 10, None).await;
             assert_eq!(bat.len(), 2, "重建必须无损");
             let want = |k: &str| bat.iter().find(|r| r.key == k).map(|r| r.value);
             assert_eq!(want("current_ua"), Some(-500.0), "rebuild 完成后电池迁移必须生效");
@@ -1597,7 +1660,7 @@ mod tests {
             };
             assert_eq!(insert_at(&file, &[rec.clone()]).await.unwrap(), 1);
 
-            let hist = history_at(&file, kind::MEM, Some("used"), 5).await;
+            let hist = history_at(&file, kind::MEM, Some("used"), 5, None).await;
             assert_eq!(hist.len(), 1);
             let parsed = DateTime::parse_from_rfc3339(&hist[0].ts).expect("入库 ts 必须是 RFC3339");
             assert_eq!(parsed.timestamp(), rec.ts_secs);
@@ -1622,7 +1685,7 @@ mod tests {
         std::fs::write(&file, b"not a sqlite database, just garbage bytes").unwrap();
 
         let before = HISTORY_ERRS.load(Ordering::Relaxed);
-        let hist = block_on(history_at(&file, kind::MEM, None, 10));
+        let hist = block_on(history_at(&file, kind::MEM, None, 10, None));
 
         assert!(hist.is_empty(), "读失败仍返回空 vec（响应形状不变）");
         assert_eq!(
@@ -1659,7 +1722,7 @@ mod tests {
 
             let before = HISTORY_ERRS.load(Ordering::Relaxed);
             // When：查询取 key/value 列 → no-such-column
-            let hist = history_at(&file, kind::MEM, None, 10).await;
+            let hist = history_at(&file, kind::MEM, None, 10, None).await;
 
             assert!(hist.is_empty(), "查询失败仍返回空 vec（响应形状不变）");
             assert_eq!(
