@@ -1023,7 +1023,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.40 -->
+    <!-- rev 2026-11-25.41 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -3492,15 +3492,17 @@ function histShift(delta) {                          // ±1 天翻页 / 0 当日
   const my = ++HIST.seq;
   $("#histBar").hidden = false;
   histFetchDay(HIST.day).then(datas => {
-    if (my !== HIST.seq) return;                     // 迟到的换日响应 = 丢弃
+    if (my !== HIST.seq) return;                     // 迟到的换日响应 = 丢弃（新请求自己收条）
+    $("#histBar").hidden = true;                     // settle 必落条（.34–.40 漏笔：只上条没下条）
     histRender(datas);
     // 邻页预取（fire-and-forget，渲后才发）：向未来翻 = 后一天，否则 = 前一天；
     // 今天永不缓存故不作预取目标；失败静默（真翻到时再走正常失败路径）。
     const nb = (delta > 0 && HIST.day + 86400000 < today) ? HIST.day + 86400000 : HIST.day - 86400000;
     if (nb >= 0 && nb !== today) histFetchDay(nb).catch(() => {});
-  }, () => { if (my === HIST.seq) histEmpty("查询失败，翻页重试"); });
+  }, () => { if (my === HIST.seq) { $("#histBar").hidden = true; histEmpty("查询失败，翻页重试"); } });
 }
 function histEmpty(msg) {                            // 居中占位（体空时）
+  $("#histBar").hidden = true;                       // 兜底：一切空态路径条必停
   const body = $("#histBody");
   body.innerHTML = "";
   const box = el("div", "hempty"); box.textContent = msg; body.appendChild(box);
