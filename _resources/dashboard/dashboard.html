@@ -1009,7 +1009,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.32 -->
+    <!-- rev 2026-11-25.33 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -2156,7 +2156,7 @@ function renderGpu(d, o) {
 }
 async function seedGpu() {
   try {
-    const rows = await getJSON("/db/history?kind=gpu&limit=5000&fmt=arr"); // {load_pct,freq_mhz}，t 升序（紧凑形，histRows 适配；5000 行 ≈ 33h 轮次）
+    const rows = await getJSON("/db/history?kind=gpu&limit=25&fmt=arr"); // {load_pct,freq_mhz}，t 升序（≈10 轮×2 键+余量，与四图同政）
     if (!Array.isArray(rows)) return;
     const cut = Date.now() - 5000;                                  // 去重护栏：过新种子行跳过
     const g = new Map();
@@ -3295,8 +3295,9 @@ mqLight.addEventListener("change", () => {
 /* ---------- 历史回填（/db/history：每图独立播种、独立门闩、独立加载指示） ----------
    种子请求带 &fmt=arr（紧凑形）：行契约 = [[ts_secs,"k",v],...]；histRows 统一适配
    {t:毫秒,k,v}（坏行过滤 = 旧「畸形 t → 跳行」语义）。服务端按 t 升序，limit 钳 1..=5000。
-   自持封顶：freq/mem/swap/temp/gpu=5000 行（temp 传感器密集 ≈5h 覆盖，24h 视图缺口由
-   live 续采自然补齐）、battery=4500（≈21h）。去重护栏：ms > Date.now()-5000 的种子行丢弃。
+   播种体量：除 battery（4500 行 ≈21h，长窗卡片需要纵深）外一律 ≈10 轮/kind
+   （行预算 = 10×键数+余量：freq=100、mem=40、swap=25、temp=400、gpu=25）——
+   初始只拿「最后几个点」，更早的 24h 视图由左缘波带如实呈现，live 续采自然加长。去重护栏：ms > Date.now()-5000 的种子行丢弃。
    每 kind 独立 10s 超时：某图超时/失败只影响该图（迟到弃收），其余图历史照常上屏。 */
 // fmt=arr 行适配器：[[ts_secs,"k",v],...] → [{t:毫秒,k,v}]；非数组 → []。
 const histRows = d => Array.isArray(d) ? d
@@ -3543,15 +3544,15 @@ const SEEDK = {};
 const tickBusy = {};
 const gates = {
   freq: seedGate("freq", "CPU", "#cpuChart",
-    async () => { const rows = histRows(await getJSON("/db/history?kind=cpu_freq&limit=5000&fmt=arr"));
+    async () => { const rows = histRows(await getJSON("/db/history?kind=cpu_freq&limit=100&fmt=arr"));
       if (SEEDK.freq === "pending") seedFreqPush(rows); }, redrawFreq),
   hot: seedGate("hot", "THERMALS", "#hotChart",
-    async () => { const rows = histRows(await getJSON("/db/history?kind=temp&limit=5000&fmt=arr"));
+    async () => { const rows = histRows(await getJSON("/db/history?kind=temp&limit=400&fmt=arr"));
       if (SEEDK.hot === "pending") seedHotPush(rows); }, redrawHot),
   mem: seedGate("mem", "MEMORY", "#memChart",
     async () => { const [m, s] = await Promise.all([
-        getJSON("/db/history?kind=mem&limit=5000&fmt=arr"),
-        getJSON("/db/history?kind=swap&limit=5000&fmt=arr")]);
+        getJSON("/db/history?kind=mem&limit=40&fmt=arr"),
+        getJSON("/db/history?kind=swap&limit=25&fmt=arr")]);
       // histRows 适配必须过（builder 吃 {t,k,v}，不是原始 [secs,k,v] 三元组）
       if (SEEDK.mem === "pending") seedMemPush(histRows(m), histRows(s)); }, redrawMem),
   batt: seedGate("batt", "BATTERY", "#battChart",
