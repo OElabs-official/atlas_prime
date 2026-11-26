@@ -871,6 +871,12 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 #histPop .hd{font-size:13px;color:var(--md-sys-color-on-surface-variant);min-width:118px;text-align:center}
 #histPop .hstat{font-size:11px;color:var(--md-sys-color-on-surface-variant);padding:4px 2px 0;display:flex;gap:10px;flex-wrap:wrap}
 #histPop .hempty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--md-sys-color-on-surface-variant)}
+#histPop .hbody{max-height:62vh;overflow-y:auto}
+#histPop .hrow{display:flex;align-items:center;gap:8px;padding:3px 0}
+#histPop .hlab{flex:none;width:132px;display:flex;flex-direction:column;gap:1px;font-size:11px;color:var(--md-sys-color-on-surface)}
+#histPop .hlab i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+#histPop .hlab s{text-decoration:none;font-size:9px;color:var(--md-sys-color-on-surface-variant)}
+#histPop .hmini{position:relative;flex:1;min-width:0;height:52px}
 </style>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
 
@@ -1017,7 +1023,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.36 -->
+    <!-- rev 2026-11-25.37 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -1100,9 +1106,8 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
         <button class="btn btn-text btn-sm" id="histToday" type="button">今天</button>
         <button class="btn btn-text btn-sm" id="histClose" type="button" aria-label="关闭">✕</button>
       </span></header>
-    <div class="chartbox" style="height:200px;margin-top:6px"><div class="lh" id="histChart"></div><span class="chartload" id="histBar" hidden><i></i></span></div>
-    <div class="chartbox" id="histBox2" style="height:130px" hidden><div class="lh" id="histChart2"></div></div>
-    <div class="legend" id="histLegend"></div>
+    <div class="chartbox" style="margin-top:6px"><span class="chartload" id="histBar" hidden><i></i></span>
+      <div class="hbody" id="histBody"></div></div>
     <div class="hstat" id="histStat"></div>
   </section>
 </div>
@@ -3466,69 +3471,40 @@ function histOpen(k) {
   histShift(0);
 }
 function histClose() { $("#histPop").hidden = true; HIST.seq++; }   // seq++ = 在途请求作废
-function histEmpty(msg) {
-  const host = $("#histChart");
-  if (!host.querySelector(".hempty")) host.appendChild(el("div", "hempty", msg));
-  $("#histLegend").innerHTML = ""; $("#histStat").innerHTML = "";
+function histEmpty(msg) {                            // 居中占位（体空时）
+  const body = $("#histBody");
+  body.innerHTML = "";
+  const box = el("div", "hempty"); box.textContent = msg; body.appendChild(box);
+  $("#histStat").innerHTML = "";
 }
-function histFetchDay(dayMs) {                       // 单日取数：缓存命中零请求
-  const key = HIST.k + "|" + dayMs;
-  if (dayMs !== histTodayMs() && HIST.cache.has(key)) return Promise.resolve(HIST.cache.get(key));
-  const from = Math.floor(dayMs / 1000), to = from + 86400;
-  return Promise.all(HISTV[HIST.k].kinds.map(kd =>
-    getJSON("/db/history?kind=" + kd + "&from=" + from + "&to=" + to + "&limit=30000&fmt=arr").then(histRows).catch(() => [])
-  )).then(datas => {
-    HIST.cache.set(key, datas);
-    if (HIST.cache.size > 8) HIST.cache.delete(HIST.cache.keys().next().value);   // 环形逐出（8 日 ≈ 两屏往返）
-    return datas;
-  });
-}
-function histShift(delta) {                          // ±1 天翻页 / 0 当日重载
-  if (!HIST.k) return;
-  if (delta) { const d = new Date(HIST.day); d.setDate(d.getDate() + delta); HIST.day = d.getTime(); }
-  const today = histTodayMs();
-  $("#histDate").textContent = histDateStr(HIST.day) + (HIST.day === today ? " · 今天" : HIST.day > today ? " · 未来" : "");
-  $("#histNext").disabled = HIST.day >= today;
-  const my = ++HIST.seq;
-  $("#histBar").hidden = false;
-  histFetchDay(HIST.day).then(datas => {
-    if (my !== HIST.seq) return;                     // 迟到的换日响应 = 丢弃
-    histRender(datas);
-    // 邻页预取（fire-and-forget，渲后才发）：向未来翻 = 后一天，否则 = 前一天；
-    // 今天永不缓存故不作预取目标；失败静默（真翻到时再走正常失败路径）。
-    const nb = (delta > 0 && HIST.day + 86400000 < today) ? HIST.day + 86400000 : HIST.day - 86400000;
-    if (nb >= 0 && nb !== today) histFetchDay(nb).catch(() => {});
-  }, () => { if (my === HIST.seq) histEmpty("查询失败，翻页重试"); });
-}
-function histStats(vals, unit) {                     // 主序列摘要（点数/最值/均值）
-  if (!vals.length) return "无数据";
+function histMini(vals, unit) {                      // 行内小摘要：max · avg
+  if (!vals.length) return "";
   let mx = -Infinity, sum = 0;
-  for (const v of vals) { if (v > mx) mx = v; sum += v; }
-  return vals.length + " 样本 · 最大 " + mx.toFixed(2) + " · 均值 " + (sum / vals.length).toFixed(2) + " " + unit;
+  for (const val of vals) { if (val > mx) mx = val; sum += val; }
+  return "峰 " + mx.toFixed(2) + " · 均 " + (sum / vals.length).toFixed(2) + " " + unit;
 }
-function histRender(datas) {                        // 全真值绘制：无任何 tf 自缩放
-  const K = HIST.k, v = HISTV[K], host = $("#histChart");
-  const host2 = $("#histChart2"), box2 = $("#histBox2");
-  const em = host.querySelector(".hempty"); if (em) em.remove();
-  const total = datas.reduce((n, d) => n + d.length, 0);
-  if (!total) { histEmpty("当日无记录"); box2.hidden = true; return; }
+/* 渲染 = 单元列表 → 一条数据一个小图（多序列共图已废：8 核 × 10 组糊成纱帘）。
+   时间标尺全体一致（winMs/nowAt），y 轴一律真值，渐变面积全关（小图看形不看面）。 */
+function histRender(datas) {
+  const K = HIST.k, body = $("#histBody");
+  body.innerHTML = "";
   const rows = datas[0] || [];
-  const s1 = []; let s2 = null; const legend = []; let stat = ""; let fill = true;
-  if (K === "freq") {                               // 每核一条（库 = cpu{i} 逐核记录）
-    const byCore = new Map(); let maxCore = -1, allV = [];
+  const total = datas.reduce((n, d) => n + d.length, 0);
+  if (!total) { histEmpty("当日无记录"); return; }
+  const units = [];                                  // {label,color,v,ts,min,max,gl,stat}
+  const glPct = [{ v: 0, label: "0" }, { v: 50, label: "50" }, { v: 100, label: "100" }];
+  if (K === "freq") {
+    const byCore = new Map(); let maxCore = -1;
     for (const r of rows) { const m = /^cpu(\d+)$/.exec(r.k); if (!m) continue;
       const ci = +m[1]; if (ci > maxCore) maxCore = ci;
       let o = byCore.get(ci); if (!o) byCore.set(ci, o = { ts: [], v: [] });
       o.ts.push(r.t); o.v.push(r.v); }
-    if (maxCore < 0) { histEmpty("当日仅 " + rows.length + " 个样本"); return; }
-    const cc = spreadCoreColors(C.cpu, maxCore + 1);
+    const cc = spreadCoreColors(C.cpu, Math.max(1, maxCore + 1));
     for (let ci = 0; ci <= maxCore; ci++) { const o = byCore.get(ci); if (!o || o.v.length < 2) continue;
-      s1.push({ v: o.v, c: cc[ci % cc.length], ts: o.ts, w: 1.2 });
-      allV = allV.concat(o.v);
-      legend.push("<em style='background:" + cc[ci % cc.length] + "'></em>core " + ci); }
-    fill = false; stat = histStats(allV, "GHz");
-  } else if (K === "hot") {                         // 每分组一条 = 组内最高温
-    const grp = new Map(); let allV = [];
+      units.push({ label: "core " + ci, color: cc[ci % cc.length], v: o.v, ts: o.ts,
+        min: 0, max: 5, gl: [{ v: 0, label: "0" }, { v: 2.5, label: "" }, { v: 5, label: "5" }], stat: histMini(o.v, "GHz") }); }
+  } else if (K === "hot") {
+    const grp = new Map();
     for (const r of rows) { const g = String(r.k).split(".")[0] || "other";
       let m = grp.get(g); if (!m) grp.set(g, m = new Map());
       if (!(m.get(r.t) > r.v)) m.set(r.t, r.v); }
@@ -3536,12 +3512,10 @@ function histRender(datas) {                        // 全真值绘制：无任�
     gs.sort((a, b) => { const ix = n => { const i = THERM_GROUPS.findIndex(x => x[0] === n); return i < 0 ? 99 : i; }; return ix(a) - ix(b); });
     const ct = spreadCoreColors(C.therm, Math.max(2, gs.length));
     gs.forEach((g, gi) => { const m = grp.get(g); const ts = asc(m); if (ts.length < 2) return;
-      const vv = ts.map(t => m.get(t));
-      s1.push({ v: vv, c: ct[gi % ct.length], ts, w: 1.2 });
-      allV = allV.concat(vv);
-      legend.push("<em style='background:" + ct[gi % ct.length] + "'></em>" + (THERM_GROUPS.find(x => x[0] === g) || [g, g])[1]); });
-    fill = false; stat = histStats(allV, "°C");
-  } else if (K === "mem") {                         // 真使用率 %（mem+swap 配对）
+      units.push({ label: (THERM_GROUPS.find(x => x[0] === g) || [g, g])[1], color: ct[gi % ct.length],
+        v: ts.map(t => m.get(t)), ts, min: 20, max: 90,
+        gl: [{ v: 20, label: "20" }, { v: 55, label: "" }, { v: 90, label: "90" }], stat: histMini(ts.map(t => m.get(t)), "°C") }); });
+  } else if (K === "mem") {
     const byT = new Map();
     const at = t => { let o = byT.get(t); if (!o) byT.set(t, o = {}); return o; };
     for (const r of rows) { const o = at(r.t); if (r.k === "used") o.u = r.v; else if (r.k === "total") o.t = r.v; }
@@ -3550,65 +3524,57 @@ function histRender(datas) {                        // 全真值绘制：无任�
     for (const t of ts) { const o = byT.get(t);
       if (o.t > 0 && o.u != null) { mv.push(o.u / o.t * 100); mt.push(t); }
       if (o.st > 0 && o.su != null) { sv.push(o.su / o.st * 100); stf.push(t); } }
-    if (mt.length < 2) { histEmpty("当日仅 " + mt.length + " 个样本"); return; }
-    s1.push({ v: mv, c: C.mem, ts: mt });
-    legend.push("<em style='background:" + C.mem + "'></em>内存使用率");
-    if (sv.length >= 2) { s1.push({ v: sv, c: C.task, ts: stf });
-      legend.push("<em style='background:" + C.task + "'></em>交换使用率"); }
-    stat = histStats(mv, "%");
-  } else if (K === "gpu") {                         // 上=负载%；下=频率 MHz 真轴（第二图盒）
+    if (mt.length >= 2) units.push({ label: "内存使用率", color: C.mem, v: mv, ts: mt, min: 0, max: 100,
+      gl: glPct.concat([{ v: 80, label: "80", color: C.err, emph: true }]), stat: histMini(mv, "%") });
+    if (sv.length >= 2) units.push({ label: "交换使用率", color: C.task, v: sv, ts: stf, min: 0, max: 100, gl: glPct, stat: histMini(sv, "%") });
+  } else if (K === "gpu") {
     const byT = new Map();
     const at = t => { let o = byT.get(t); if (!o) byT.set(t, o = {}); return o; };
     for (const r of rows) { const o = at(r.t); if (r.k === "load_pct") o.l = r.v; else if (r.k === "freq_mhz") o.f = r.v; }
     const ts = asc(byT);
     const lts = ts.filter(t => byT.get(t).l != null);
-    if (lts.length < 2) { histEmpty("当日 GPU 仅 " + lts.length + " 个样本"); return; }
-    s1.push({ v: lts.map(t => byT.get(t).l), c: C.gpu, ts: lts });
-    legend.push("<em style='background:" + C.gpu + "'></em>使用率 %");
-    const fts = ts.filter(t => byT.get(t).f != null);
-    const fv = fts.map(t => byT.get(t).f);
-    if (fts.length >= 2) {
-      const fMax = fv.reduce((m, x) => Math.max(m, x), 0);
+    if (lts.length >= 2) units.push({ label: "GPU 使用率", color: C.gpu, v: lts.map(t => byT.get(t).l), ts: lts, min: 0, max: 100, gl: glPct, stat: histMini(lts.map(t => byT.get(t).l), "%") });
+    const fts = ts.filter(t => byT.get(t).f != null); const fv = fts.map(t => byT.get(t).f);
+    if (fts.length >= 2) { const fMax = fv.reduce((m, x) => Math.max(m, x), 0);
       const mA = Math.max(150, Math.ceil(fMax / 150) * 150);
-      s2 = { series: [{ v: fv, c: C.net, ts: fts }], min: 0, max: mA, gl: histGl(mA, 0), unit: "MHz" };
-      legend.push("<em style='background:" + C.net + "'></em>频率 MHz · 真值轴 0–" + mA);
-    }
-    stat = histStats(lts.map(t => byT.get(t).l), "%");
-  } else if (K === "batt") {                        // 上=电量%；下=功率 W 真轴（第二图盒）
+      units.push({ label: "GPU 频率", color: C.net, v: fv, ts: fts, min: 0, max: mA, gl: histGl(mA, 0), stat: histMini(fv, "MHz") }); }
+  } else if (K === "batt") {
     const byT = new Map();
     const at = t => { let o = byT.get(t); if (!o) byT.set(t, o = {}); return o; };
     for (const r of rows) { const o = at(r.t);
       if (r.k === "pct") o.p = r.v; else if (r.k === "volt_mv") o.mv = r.v; else if (r.k === "current_ua") o.ua = r.v; }
     const ts = asc(byT);
     const pts = ts.filter(t => byT.get(t).p != null);
-    if (pts.length < 2) { histEmpty("当日仅 " + pts.length + " 个样本"); return; }
-    s1.push({ v: pts.map(t => byT.get(t).p), c: C.pow, ts: pts });
-    legend.push("<em style='background:" + C.pow + "'></em>电量 %");
+    if (pts.length >= 2) units.push({ label: "电量", color: C.pow, v: pts.map(t => byT.get(t).p), ts: pts, min: 0, max: 100, gl: glPct, stat: histMini(pts.map(t => byT.get(t).p), "%") });
     let wMax = 0; const wp = [];
     for (const t of ts) { const o = byT.get(t);
       if (o.mv != null && o.ua != null) { const w = Math.abs(o.mv * o.ua) / 1e9; if (w > wMax) wMax = w; wp.push({ t, w }); } }
-    if (wp.length >= 2) {
-      const mA = Math.max(1, Math.ceil(wMax * 1.15 * 2) / 2);
-      s2 = { series: [{ v: wp.map(o => o.w), c: C.net, ts: wp.map(o => o.t) }], min: 0, max: mA, gl: histGl(mA, 1), unit: "W" };
-      legend.push("<em style='background:" + C.net + "'></em>功率 W · 真值轴 0–" + mA.toFixed(1));
-    }
-    stat = histStats(pts.map(t => byT.get(t).p), "%");
+    if (wp.length >= 2) { const mA = Math.max(1, Math.ceil(wMax * 1.15 * 2) / 2);
+      units.push({ label: "功率 |V×A|", color: C.net, v: wp.map(o => o.w), ts: wp.map(o => o.t), min: 0, max: mA, gl: histGl(mA, 1), stat: histMini(wp.map(o => o.w), "W") }); }
   }
-  if (!s1.length) { histEmpty("当日样本不足"); box2.hidden = true; return; }
+  if (!units.length) { histEmpty("当日样本不足"); return; }
   const end = Math.min(Date.now(), HIST.day + 86400000);
   const winMs = Math.max(300000, end - HIST.day);
-  const base = { axis: true, time: true, winMs, nowAt: end, fill };
-  const gl = v.gl.map(g => ({ v: g, label: String(g) }));
-  if (K === "mem") gl.push({ v: 80, label: "80", color: C.err, emph: true });
-  drawLines(host, s1, Object.assign({ min: v.y[0], max: v.y[1], gridLines: gl }, base));
-  box2.hidden = !(s2 && s2.series[0].v.length >= 2);
-  if (!box2.hidden) drawLines(host2, s2.series, Object.assign({ min: s2.min, max: s2.max, gridLines: s2.gl }, base));
-  $("#histLegend").innerHTML = legend.map(x => "<div>" + x + "</div>").join("");
+  for (const u of units) {
+    const row = el("div", "hrow");
+    const lab = el("div", "hlab");
+    const dot = document.createElement("i"); dot.style.background = u.color;
+    const nm = el("span"); nm.textContent = u.label;
+    const st = el("s"); st.textContent = u.stat;
+    nm.appendChild(dot);
+    lab.appendChild(nm);
+    lab.appendChild(st);
+    const mini = el("div", "hmini");
+    row.appendChild(lab); row.appendChild(mini); body.appendChild(row);
+    drawLines(mini, [{ v: u.v, c: u.color, ts: u.ts, w: 1.4 }],
+      { min: u.min, max: u.max, gridLines: u.gl, axis: true, time: true, winMs, nowAt: end, fill: false });
+  }
+  let n = 0; for (const d of datas) n += d.length;
   $("#histStat").innerHTML = "<span>" + histDateStr(HIST.day) + " 00:00 → " +
-    (HIST.day + 86400000 > Date.now() ? "此刻" : "24:00") + "</span><span>" + stat + "</span>" +
-    (box2.hidden ? "" : "<span>下轴 = " + s2.unit + " 真值</span>");
+    (HIST.day + 86400000 > Date.now() ? "此刻" : "24:00") + "</span><span>" +
+    units.length + " 图 · " + n + " 行 · 轴均为真值</span>";
 }
-function histGl(mA, dp) {                           // 第二图盒真轴网格：0..max 五档、数值标注
+function histGl(mA, dp) {                            // 真轴网格：0..max 五档、数值标注
   const out = [];
   for (let i = 0; i <= 4; i++) { const val = mA * i / 4; out.push({ v: val, label: i === 0 ? "" : val.toFixed(dp) }); }
   return out;
