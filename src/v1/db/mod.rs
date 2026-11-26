@@ -535,21 +535,30 @@ async fn history_on(
     limit: u32,
     range: Option<(i64, i64)>,
 ) -> Vec<Record> {
-    // 谓词四象限（key × 时间窗）各自定长 SQL，占位符按绑定顺序连续编号；
-    // 窗过滤走 unix 秒投影（与输出 `t` 投影同源），半开 [from, to)。
-    let win = "CAST(strftime('%s', ts) AS INTEGER)";
+    // 谓词四象限（key × 时间窗）各自定长 SQL，占位符按绑定顺序连续编号。
+    // 窗过滤 = ts 文本半开 [from_rfc, to_rfc)：全行 RFC3339（v2 迁移钉死，字典序
+    // 即时间序）且 (kind, ts) 复合索引在位 → 谓词直接吃索引区间扫，代价随「窗深」
+    // 而非「kind 全量」缩放（CAST/strftime 谓词不可索引，3M 行库实测 0.7–4s/击，
+    // 攥锁即全站排队 —— 261126 事故登记）。
+    let win = "ts";
     let sql = match (key, range) {
-        (None, None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2", p = win),
-        (Some(_), None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 ORDER BY rowid DESC LIMIT ?3", p = win),
-        (None, Some(_)) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND {p}>=?2 AND {p}<?3 ORDER BY rowid DESC LIMIT ?4", p = win),
-        (Some(_), Some(_)) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 AND {p}>=?3 AND {p}<?4 ORDER BY rowid DESC LIMIT ?5", p = win),
+        (None, None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 ORDER BY rowid DESC LIMIT ?2", p = "CAST(strftime('%s', ts) AS INTEGER)"),
+        (Some(_), None) => format!("SELECT {p},ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 ORDER BY rowid DESC LIMIT ?3", p = "CAST(strftime('%s', ts) AS INTEGER)"),
+        (None, Some(_)) => "SELECT CAST(strftime('%s', ts) AS INTEGER),ts,kind,key,value FROM records WHERE kind=?1 AND ts>=?2 AND ts<?3 ORDER BY rowid DESC LIMIT ?4".to_string(),
+        (Some(_), Some(_)) => "SELECT CAST(strftime('%s', ts) AS INTEGER),ts,kind,key,value FROM records WHERE kind=?1 AND key=?2 AND ts>=?3 AND ts<?4 ORDER BY rowid DESC LIMIT ?5".to_string(),
     };
     let mut q = sqlx::query::<sqlx::Sqlite>(&sql).bind(kind);
     if let Some(k) = key {
         q = q.bind(k);
     }
     if let Some((from, to)) = range {
-        q = q.bind(from).bind(to);
+        // unix 秒 → RFC3339（秒级、UTC、'Z' 尾）——与行文本同格式，文本比较精确等价数值窗
+        let rfc = |t: i64| {
+            chrono::DateTime::from_timestamp(t, 0)
+                .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .unwrap_or_default()
+        };
+        q = q.bind(rfc(from)).bind(rfc(to));
     }
     q = q.bind(i64::from(limit));
     let rows = match q.fetch_all(conn).await {
