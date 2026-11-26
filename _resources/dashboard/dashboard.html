@@ -876,7 +876,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 #histPop .hlab{flex:none;width:132px;display:flex;flex-direction:column;gap:1px;font-size:11px;color:var(--md-sys-color-on-surface)}
 #histPop .hlab i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:-1px}
 #histPop .hlab s{text-decoration:none;font-size:9px;color:var(--md-sys-color-on-surface-variant)}
-#histPop .hmini{position:relative;flex:1;min-width:0;height:52px}
+#histPop .hmini{position:relative;flex:1;min-width:0;height:208px}
 </style>
 <div class="bg"><div class="blobs" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b></div><div class="bg-mesh"></div><div class="bg-grid"></div></div>
 
@@ -987,7 +987,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
          5s · 双击=刷新；speed 缺席 = 环行整体隐藏） ====== -->
     <section class="card acc-net" id="card-net">
       <header class="ch"><h2>NETWORK</h2>
-        <span class="hctl"><button class="btn btn-text btn-sm" id="pubIpBtn" type="button" aria-expanded="false" aria-controls="pubIpList" hidden>展开</button></span></header>
+        <span class="hctl"><button class="btn btn-text btn-sm" id="pubIpBtn" type="button" aria-expanded="false" aria-controls="pubIpList" hidden>公网IP</button></span></header>
       <div id="netRings" style="display:none">
         <div class="netrings" id="netRingsRow"></div>
         <div class="legend">
@@ -1011,7 +1011,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
 <!-- ====== STORAGE：大字占用率居左，默认仅列 >32 GiB 总容量的分区、其余折叠（60s · 双击=刷新） ====== -->
     <section class="card acc-sto" id="card-sto">
       <header class="ch"><h2>STORAGE</h2>
-        <span class="hctl"><button class="btn btn-text btn-sm" id="stoFoldBtn" type="button" aria-expanded="false" hidden>展开</button></span></header>
+        <span class="hctl"><button class="btn btn-text btn-sm" id="stoFoldBtn" type="button" aria-expanded="false" hidden>系统小分区</button></span></header>
       <!-- wavy 波带共用渐变（全行同族→定义一份；stop 走 var()+color-mix = CSS 上下文合法，明暗自动跟随；crit = error 族） -->
       <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs>
         <linearGradient id="wprog-grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" style="stop-color:color-mix(in srgb,var(--a-sto) 66%,#fff)"/><stop offset="1" style="stop-color:var(--a-sto)"/></linearGradient>
@@ -1023,7 +1023,7 @@ body[data-jobs="open"] .jToggle .jchev{transform:rotate(180deg)}
   </div>
 
   <footer>
-    <!-- rev 2026-11-25.39 -->
+    <!-- rev 2026-11-25.40 -->
     <div class="fnote">ATLAS-PRIME | OELABS PRESENT | POWERED BY NTEX-WEB &amp; MATERIAL-DESIGN3</div>
   </footer>
 </div>
@@ -2404,7 +2404,7 @@ function applyPubIp(n) {                                   // n = 公网行数�
   const btn = $("#pubIpBtn");
   showBox($("#pubIpList"), pubIpOpen);
   btn.hidden = !n;
-  btn.textContent = pubIpOpen ? "收起" : "展开 " + (n || 0) + " 项";
+  btn.textContent = pubIpOpen ? "收起" : "公网IP " + (n || 0) + " 项";
   btn.setAttribute("aria-expanded", pubIpOpen ? "true" : "false");
 }
 function renderNet(d) {
@@ -2630,7 +2630,7 @@ function renderSto(d) {
   });
   // 展开/收起按钮：无 remainder 或无 qualifiers 整体隐（剪裁壳也不产出，防空卡错觉）；折叠 →「展开其余 N 个分区」，展开 →「收起」
   fold.hidden = !qual.length || !restRows.length;
-  fold.textContent = stoExpanded ? "收起" : "展开其余 " + restRows.length + " 个分区";
+  fold.textContent = stoExpanded ? "收起" : "系统小分区 " + restRows.length + " 个";
   fold.setAttribute("aria-expanded", String(stoExpanded));
 }
 async function tickSto() {
@@ -3797,7 +3797,7 @@ $("#stoFoldBtn").addEventListener("click", () => {             // STORAGE 卡展
   const d = lastData.sto;
   // remainder = 过噪声过滤且总容量 ≤ 32 GiB（门槛语义与 renderSto 同式：32*1024 MB）
   const n = d && Array.isArray(d.disks) ? d.disks.filter(k => { const t = Number(k.total_mb) || 0; return t >= 64 && t <= 32*1024; }).length : 0;
-  fold.textContent = stoExpanded ? "收起" : "展开其余 " + n + " 个分区";
+  fold.textContent = stoExpanded ? "收起" : "系统小分区 " + n + " 个";
   fold.setAttribute("aria-expanded", String(stoExpanded));
 });
 wireDbl("#card-task", () => manualRefresh("task", tickTasks));
